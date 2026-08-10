@@ -1,0 +1,335 @@
+# 配置详解
+
+> 管理面里每个字段什么意思、怎么填、填错会怎样。按「先池后站」的顺序读。
+> 想用 API 批量配见 [API 参考](./api-reference.md)；字段校验源码在 `src/config/schema.js`（**唯一数据真相源**）。
+> 网页上怎么点见 [管理面使用教程](./user-guide.md)。
+
+---
+
+## 0. 配置顺序
+
+上游模型借鉴 nginx 的 `upstream`：**所有上游都是「源站」实体，统一存放在「源站」标签页**，站点只通过 `poolId` 引用它。
+源站有两种 `kind`，两者是同一实体的不同形态，引用方式完全一致：
+
+- **单一源站（`kind: "single"`）** —— 恰好 1 个 origin。可以在「源站」页手动建，也可以在**新建/编辑站点时直接填源站地址，由系统自动联动创建**；若已存在地址完全相同的单一源站则直接复用，不会重复创建。
+- **源站池（`kind: "pool"`）** —— 多个 origin + 负载均衡策略（链式/轮询/随机/加权/哈希）。**只能在「源站」页点「+ 新建源站池」创建**，可被多个站点与规则共享。
+
+> 因此不再有「内联源站」的说法：站点里填的地址一样会成为「源站」页里的一条记录。
+> 每条源站都带**引用字段**，显示被多少对象引用、分别是谁（站点默认源站 / 站点规则 / 全站通用规则）；存在引用时禁止删除，避免误删导致 502。
+
+还有一条铁律：**规则按 `priority` 从高到低匹配，命中即停。** 想让某条规则先生效，把它的优先级调高（数字大）。
+
+---
+
+## 1. 源站（Origin / Pool）
+
+一条「源站」= 一个可被站点与规则引用的上游。`kind` 决定它是单一源站还是源站池；
+两者同表存储（KV key 均为 `pool:{id}`）、同一引用方式，只是能力范围不同。
+
+| 字段 | 说明 | 默认值 |
+|---|---|---|
+| `id` | 机器主键，**系统自动生成**（格式 `pl_xxxx`），用户不可填；站点用 `poolId` 引用此值 | 新建时系统生成 |
+| `name` | 用户友好名称（给人区分用的展示标签，可重复、可选）。即界面上的「名称」输入框 | 空（回退显示 id） |
+| `kind` | `single`=单一源站（恰好 1 个 origin，可由站点联动创建）；`pool`=源站池（多 origin + 调度） | `single` |
+| `strategy` | 调度策略：`chain` / `roundrobin` / `weighted` / `random` / `iphash`。`kind:"single"` 时恒为 `chain` 且界面隐藏 | `chain` |
+| `origins[]` | 源站列表（见下表）。`kind:"single"` 时**只能有 1 项**，多于 1 项会被拒绝 | 必填，至少 1 个 |
+| `createdBy` | 由站点联动自动创建时记录来源站点 host，纯展示用 | 空 |
+| `failover` | 故障转移：`enabled` / `maxRetries`（重试次数） / `timeoutMs`（单源超时） / `retryOn`（遇这些状态码则换源，如 `[500,502,503,504,522,524]`） | 见默认 |
+| `pathPrefix` | 整池回源时统一加的路径前缀（如 `/repo`，不能含域名） | 空 |
+| `stickyTtl` | 仅 `iphash` 策略生效：会话保持时长（秒） | 0 |
+
+> **ID 与名称的分工**：`id` 是给机器/接口引用用的内部主键，由系统保证唯一，用户**绝不手动填写**（新建时后端自动生成，编辑时不可改）。给人看的「区分字段」是 `name`，可重复、可中文、可留空。站点 `poolId` 引用的是系统 `id`，不是 `name`。
+>
+> **引用与删除**：`GET /pools` 会为每条源站附带 `refs[]`（谁在引用）、`refCount`、`deletable`；`GET /pools/:id/refs` 可单独查询引用明细。只要 `refCount > 0` 就无法删除，需先把引用改指到其它源站。站点数量过多导致引用无法扫全时，删除同样会被保守拒绝。
+
+### origins[] 单项
+
+| 字段 | 说明 | 示例 |
+|---|---|---|
+| `addr` | 源站地址（**只写 host，不要带路径/协议**，路径用 `pathPrefix`） | `storage.example.net` |
+| `scheme` | 协议：`http` / `https` | `https` |
+| `port` | 端口（一般留空，按 scheme 自动 80/443） | `443` |
+| `weight` | 权重（`policy=weighted` 时生效） | `1` |
+| `order` | 顺序（`policy=chain` 时，数字小先尝试） | 自动 |
+| `enabled` | 是否参与调度 | `true` |
+| `engine` | 回源引擎：`fetch`（通用）/ `socket`（TCP 裸 IP，**仅 Cloudflare Workers**）/ `r2`（**回源到 R2 桶，仅 Cloudflare**，不走公网） | `fetch` |
+| `extraHeaders` | 回源额外带上的请求头（键值对） | — |
+| `hostHeader` | 回源 Host：`inherit`(用 addr) / `origin`(用源站) / `client`(用访问域名) / `custom` | `inherit` |
+| `sni` | TLS SNI（高级，一般留空，仅 socket 引擎生效） | 空 |
+
+> 常见坑：把 `https://oss.com/path` 整段塞进 `addr` → 校验报错「源站地址不应包含路径，请用 pathPrefix 字段」。正确做法：`addr=oss.com` + `pathPrefix=/path`。
+
+> **自定义回源 Host 的跨平台能力矩阵**（核心）：
+> | 场景 | CF Workers (`engine=socket`) | CF Pages | EdgeOne Makers |
+> |---|---|---|---|
+> | 域名源站 + 自定义 Host | ✅ socket 全功能 | ⚠️ fetch 自动按域名设 Host | ✅ fetch 注入 Host 生效 |
+> | 裸 IP + 自定义 Host + SNI | ✅ socket 全功能 | ❌ 无 socket | ⚠️ 代码层无 SNI；用 **EO 平台级「源站组回源 Host 重写」** 兜底 |
+>
+> - **CF 端**：自定义回源 Host（含裸 IP）必须用 **Workers 形态部署**（`wrangler deploy`，`wrangler.toml` 已带 `sockets` 兼容标志），才能拿到 `cloudflare:sockets`。CF Pages 形态无 socket，只能域名源站自动 Host。
+> - **EO 端**：边缘函数 `fetch` 允许向外部自定义 Host 设置 Host 头，故「域名源站 + 自定义 Host」代码层即可实现；「裸 IP + 自定义 Host + SNI」则配 **EO 源站组 + 回源 Host 重写**（控制台/规则引擎），Makers 函数只 `fetch` 到该源站组，Host 由 EO 平台注入。平台侧完整操作步骤见 [eo-origin-host.md](./eo-origin-host.md)。
+> - `engine=fetch` 时在 Cloudflare 上设 `hostHeader=client/custom` 会被静默丢弃（警告），但路由逻辑仍会注入；在 EdgeOne 上注入生效，无需改 `engine`。
+
+### origins[] 的 `engine: 'r2'`（回源到 R2 桶，仅 Cloudflare）
+
+这是最省、最绕不开公网的回源方式：不走 `fetch` 你的 R2 自定义域名（那等于「边缘 → 公网 → 绕回边缘 R2 公共端点」），而是 **Worker 进程内直接调用 R2 绑定**，全程走 Cloudflare 骨干网，不出公网、不计 egress 带宽费。
+
+**前置条件（wrangler.toml 绑定）：**
+
+```toml
+[[r2_buckets]]
+binding = "CDN_R2"        # 必须与源站 r2Binding 完全一致
+bucket_name = "cdn-assets"
+```
+
+> 绑定名（`binding`）和桶名是两个独立选择项：先在 R2 控制台/命令行创建桶（如 `cdn-assets`），
+> 再把它的**绑定变量名**填到 `[[r2_buckets]].binding`（本例 `CDN_R2`），源站配置里的 `r2Binding` 填同一个变量名。
+> 桶**无需**开启 Public Access / 自定义域——Worker 鉴权读取即可，更安全。
+
+**`engine:'r2'` 专有的源站字段：**
+
+| 字段 | 说明 | 示例 |
+|---|---|---|
+| `r2Binding` | R2 绑定名（必须等于 wrangler.toml 的 `binding`） | `CDN_R2` |
+| `r2KeyPrefix` | 拼到 key 前面的固定前缀（桶内「目录」隔离，多站点可共用一桶） | `img/` |
+| `r2KeyMode` | pathname → R2 key 的转换方式 | `none`（默认）/ `prefix` / `strip` / `regex` |
+| `r2KeyPrefixRule` | `prefix` 时加在前面的串；`strip` 时要剥除的开头；`regex` 时的正则 | `/cdn` |
+| `r2KeyRegexTo` | `regex` 模式下的替换值 | `` |
+| `r2ContentType` | R2 对象缺 content-type 时的兜底类型 | `application/octet-stream` |
+
+> key 的计算顺序：**规则级 rewrite（pathPrefix/正则等）先作用到 pathname**，再由本表的 4 个字段做「最后一步」处理。
+> 最终 key = `r2KeyPrefix` + pathnameToKey(pathname)。R2 key 不区分目录，只是普通字符串。
+
+**示例 1：原样映射（pathname 即 key，最常用）**
+
+```json
+{
+  "addr": "", "engine": "r2", "r2Binding": "CDN_R2", "r2KeyMode": "none"
+}
+```
+访问 `/poster/ab.jpg` → 读 R2 key `poster/ab.jpg`。
+
+**示例 2：桶内统一加前缀（共享一桶多站点）**
+
+```json
+{ "engine": "r2", "r2Binding": "CDN_R2", "r2KeyPrefix": "site-a/", "r2KeyMode": "none" }
+```
+访问 `/a.png` → 读 R2 key `site-a/a.png`。
+
+**示例 3：剥除访问前缀（对外暴露 `/cdn/...`，桶内不要 `/cdn`）**
+
+```json
+{ "engine": "r2", "r2Binding": "CDN_R2", "r2KeyMode": "strip", "r2KeyPrefixRule": "/cdn" }
+```
+访问 `/cdn/x/y.png` → 读 R2 key `x/y.png`。
+
+**示例 4：正则改写 key**
+
+```json
+{ "engine": "r2", "r2Binding": "CDN_R2",
+  "r2KeyMode": "regex", "r2KeyPrefixRule": "^/v1/", "r2KeyRegexTo": "/v2/" }
+```
+访问 `/v1/foo.png` → 读 R2 key `/v2/foo.png`。
+
+> 注意：非 Cloudflare 平台（如 EdgeOne）没有 R2 binding，`engine:'r2'` 会在运行时返回 502，请改用 `fetch` + 私有签名回源或平台对象存储方案。
+
+---
+
+## 2. 站点（Site）
+
+一个站点 = 一个加速域名（支持 `*.example.com` 泛域名）。
+
+| 字段 | 说明 | 默认 |
+|---|---|---|
+| `host` | 加速域名（站点 key） | 必填 |
+| `enabled` | 是否启用（关闭后该域名不走加速） | `true` |
+| `poolId` | **必填**。站点默认上游，引用一条源站的 id（`kind` 为 `single` 或 `pool` 均可）。写入时若改为直接提交 `origins`（单个地址），后端会自动创建一条 `kind:"single"` 源站并把 id 回填到此字段 | 必填 |
+| `defaultHostHeader` | 站点级默认回源 Host：`accel` / `origin` / `custom` | `accel` |
+| `ipv6Support` | 是否允许 IPv6 回源 | `false` |
+| `rules[]` | 规则引擎（见下） | 空 |
+| `security` | 安全策略（见 §4） | 关 |
+| `cacheGen` | 缓存代次（改它可一键让旧缓存失效） | `0` |
+
+### 2.1 规则引擎 rules[]
+
+每条规则 = 「**什么时候生效（match）**」 + 「**做什么（action）**」。规则按 `priority` **降序**匹配，命中即停。
+
+```jsonc
+{
+  "id": "r_abc",          // 自动生成，勿手改
+  "priority": 50,         // 越大越先匹配
+  "enabled": true,        // 关闭则该规则跳过
+  "match": { ... },       // 见 2.2
+  "action": { ... }       // 见 2.3
+}
+```
+
+#### 2.2 match（匹配条件）
+
+**方式一：简易快捷条件**（仍可用，适合单条件）
+| 字段 | 说明 | 示例 |
+|---|---|---|
+| `pathPrefix` | 路径前缀（自动补 `/`） | `/images` |
+| `pathRegex` | 路径正则（上限 200 字符，做 ReDoS 防护） | `^/api/.*\.json$` |
+| `extIn` | 扩展名列表（自动转小写、去点） | `["jpg","png"]` |
+| `methodIn` | HTTP 方法列表 | `["GET","HEAD"]` |
+
+**方式二：可视化多条件（推荐，更灵活）** —— `match.conditions` 是**二维数组**：
+
+```
+conditions: [
+  [ 条件A, 条件B ],   // 这一组里 A 且 B 同时成立
+  [ 条件C ]           // 或者 仅 C 成立
+]
+外层 = OR（满足任意一组即可），内层 = AND（组内全部满足）
+```
+
+每个条件对象的字段：
+
+| 字段 | 说明 |
+|---|---|
+| `target` | 匹配对象：`host` / `path` / `query` / `header` / `cookie` / `method` / `clientIp` / `referer` / `userAgent` / `asn` / `country` / `scheme` / `protocol` |
+| `op` | 操作符：见下方表格 |
+| `key` | 当 `target=header/cookie` 时必填（头的名字，如 `x-token`） |
+| `values[]` | 匹配值列表（多值之间 OR）；`op=exists/notExists` 时不需要 |
+| `ignoreCase` | 是否忽略大小写（默认 true） |
+
+常用操作符 `op`：
+
+| op | 含义 | 示例 |
+|---|---|---|
+| `eq` | 等于（任一值） | `path` `eq` `/robots.txt` |
+| `neq` | 不等于 | `method` `neq` `POST` |
+| `in` | 在列表里 | `extIn` 等价于 `path` `in` `[...]` |
+| `notIn` | 不在列表 | |
+| `prefix` | 前缀为 | `path` `prefix` `/api` |
+| `suffix` | 后缀为 | `path` `suffix` `.webp` |
+| `contains` | 包含 | `userAgent` `contains` `bot` |
+| `regex` / `notRegex` | 正则匹配 / 不匹配 | `path` `regex` `^/v\d+/` |
+| `exists` / `notExists` | 头/参数存在 / 不存在 | `header` `key=x-token` `exists` |
+
+> 没有条件 = 匹配所有请求（常用于「整站默认动作」兜底规则）。
+
+#### 2.3 action（动作）
+
+一条规则可以挂多个动作，**同时生效**：
+
+| 字段 | 说明 | 默认 |
+|---|---|---|
+| `poolId` | 命中后改用哪条源站（`single` / `pool` 均可；不填则用站点默认源站） | 站点默认 |
+| `rewrite` | 路径重写（见下） | `none` |
+| `hostHeader` | 回源 Host：`inherit` / `origin` / `client` / `custom` | `inherit` |
+| `clientIpHeader` | 回传给源站的客户端 IP 头 | `{enabled:false, name:'X-EdgeGateway-Client-IP'}` |
+| `forceHttps` | 是否强制跳转 HTTPS | `false` |
+| `forceHttpsStatus` | 跳转码：`301` / `302` / `307` / `308` | `301` |
+| `redirect` | 访问 URL 重定向 `{enabled,status,target,keepQuery}` | 关 |
+| `directResponse` | 直接返回固定响应（不走源站）`{enabled,status,contentType,body}` | 关 |
+| `reqHeaders` | 改**请求**头（回源前）`{set:{},remove:[]}` | 空 |
+| `respHeaders` | 改**响应**头（返回前）`{set:{},remove:[]}` | 空 |
+| `followRedirect` | 回源跟随 3xx（最多 3 次） | `false` |
+| `originTimeoutMs` | 回源超时（0=用引擎默认，上限 120000ms） | `0` |
+| `cache` | 规则级缓存（见下） | 关 |
+
+**rewrite（路径重写）**
+| `type` | 行为 | 配置 |
+|---|---|---|
+| `none` | 不改 | — |
+| `prefix` | 加前缀 | `value`（如 `/raw`） |
+| `strip` | 去前缀 | `value`（如 `/public`） |
+| `regex` | 正则替换 | `regexFrom` + `regexTo` |
+
+> 例：访问 `/public/a.png` → 重写 `strip /public` → 实际回源 `/a.png`。
+
+**cache（规则级缓存）**
+| 字段 | 说明 |
+|---|---|
+| `enabled` | 是否启用本规则缓存 |
+| `edgeTtl` | 边缘缓存 TTL（秒，0=不缓存） |
+| `browserTtl` | 浏览器缓存 TTL（-1=跟随源站） |
+| `ignoreQuery` | 忽略全部查询参数做缓存键 |
+| `queryWhitelist` | 仅这些查询参数计入缓存键 |
+| `key` | 缓存键维度：是否带 Cookie/Authorization 等 |
+| `statusTtl` | 不同状态码的 TTL（如 404 缓存短一点） |
+| `preRefresh` | 缓存即将过期时后台刷新（防穿透） |
+| `offlineCache` | 源站挂了也用过期缓存兜底（stale-while-error） |
+| `staleWhileRevalidate` | 边缘过期后仍可先返回旧内容并后台刷新（秒） |
+| `cacheGen` | 缓存代次（站点级，改它可让旧缓存键失效） |
+
+> **缓存的本质（重要）**：本程序只是运行在 CF Workers/Pages、EO Pages 上的边缘处理代码，**自身无持久存储，不具备真实硬盘缓存**。缓存完全依赖底层边缘：
+> - **Cloudflare**：用 `caches.default` API 直接存一份，同时下发 `Cache-Control` / `CDN-Cache-Control` 让 CF 边缘也按头缓存。但 **CF 生产环境真正的缓存权威是面板两条规则**，必须成对设置，否则源站返回的头（如 `no-store`/`private`）会反客为主：
+>   - **Cache Rules（请求/命中侧）**：决定"存不存、存多久"（`Cache eligibility`、`Edge TTL`、`Browser TTL`、`Origin Cache-Control = Ignore if present` 覆盖源站头）。
+>   - **Cache Response Rules（响应侧，Modify cache response headers and tags）**：在响应离开边缘前改写 `Cache-Control`/`CDN-Cache-Control`、加 `Cache-Tag`、清掉 `Set-Cookie` 等。本项目代码下发的头只是跨平台兜底，CF 上以这两条面板规则为准。
+> - **EdgeOne（1+1 架构）**：没有 `caches.default` API，但边缘缓存能力真实存在，走两条路径：
+>   - **路径 B 响应头委托**：网关下发 `CDN-Cache-Control`，由 EO 边缘按头缓存（`edgeTtl` 决定 TTL）——所有 EO 请求都享受。
+>   - **路径 A 同站 fetch 委托节点缓存**：对「无自定义回源 Host 的可缓存请求」，边缘函数内 `fetch(同站加速域名)`（HOST 与 host 头一致）走 EO 节点缓存，**命中零函数调用、未命中由 EO 按平台源站组回源**。需预先在 EO 控制台配好源站组 + 回源 Host 重写（见 `docs/eo-origin-host.md`）。
+>
+> **本项目已自动遵循「最前端 CDN 为最终依据」的分层铁律**（`src/proxy/headers.js` 的 `buildClientHeaders`）：可缓存响应自动下发 `Cache-Control: public, max-age=1800, immutable`（浏览器 30 分钟）+ `CDN-Cache-Control: public, max-age=15552000`（边缘半年），并**主动剥离源站带回的 `set-cookie`/`pragma`/`no-store`/`private`/`expires=0`**；开启 `cache.enabled` 但未给 TTL 时回落到半年/30 分钟默认（常量 `TIER_CDN_DEFAULT_EDGE_TTL`/`TIER_CDN_DEFAULT_BROWSER_TTL`）。即模板开箱即符合铁律，CF/EO 面板规则是把最前端权威再钉死一层。详见部署文档「分层缓存架构部署方案」。
+>
+> 因此「缓存」是**可控的头设置 / 同站 fetch 委托让边缘去缓存**，不是本程序自己存。这也带来一个 EO 下的限制：`cacheGen` 整站清除只作用于 `caches.default`（CF），**EO 下无法主动按键清除**，只能等 TTL 自然过期或用 `Cache-Tag` + 平台 purge。
+
+---
+
+## 3. 安全（Security）
+
+挂在**站点** `security` 下，也可在**全局** `global.security` 兜底（逐层生效，白名单优先）。
+
+| 能力 | 字段 | 说明 |
+|---|---|---|
+| 防盗链 | `refererMode` | `off` / `whitelist`(白名单) / `blacklist`(黑名单) |
+| | `refererList` | 允许的 Referer 域名列表（自动转小写） |
+| | `allowEmptyReferer` | 是否放行空 Referer（直接访问） |
+| UA 过滤 | `uaBlacklist` | 命中即拦截的 UA 列表 |
+| IP 控制 | `ipBlacklist` | 拦截的 IP/CIDR 列表（上限 64 条） |
+| | `ipWhitelist` | 放行名单（优先于黑名单；全局级也可设 `global.ipWhitelist`） |
+| 签名 URL | `signedUrl` | `{enabled, secret, ttl, param}`：开启后需带有效签名才能访问，`ttl` 过期失效，`param` 默认 `sign` |
+| 限流 | `rateLimit` | `{enabled, rpm}`：单 IP 每分钟请求数上限，超限返回 429 |
+
+> 全局 `global.security` 与 `global.ipWhitelist` 对所有站点兜底；站点级可覆盖细化。
+
+---
+
+## 4. 统计（Stats）
+
+| 项 | 说明 |
+|---|---|
+| `statsDriver` | `kv`（默认）或 `d1`。EO 无 D1，用 `kv` 即可 |
+| 落盘 | 内存聚合 + 批量写；D1 首次自动建表 |
+| 查看 | 管理面「统计」页（总览 / 单站点） |
+
+---
+
+## 5. 全局配置（Global）
+
+读取/更新：`GET/PUT /{ADMIN_PATH}/api/config/global`（默认段 `__panel`，即 `GET/PUT /__panel/api/config/global`）。常用字段：
+
+| 字段 | 说明 | 默认 |
+|---|---|---|
+| `statsDriver` | `kv` / `d1` | `kv` |
+| `imageOptimization` | 图片优化（webp/avif 协商，仅 CF） | 关 |
+| `disguise` | 把 `Server` 伪装成 nginx（隐藏网关） | 关 |
+| `logLevel` | 日志级别 | `info` |
+| `security` | 全局安全兜底 | 见上 |
+| `ipWhitelist` | 全局 IP 白名单（对管理面也生效） | 空 |
+
+---
+
+## 6. 全局变量（部署时设，非配置字段）
+
+| 变量 | 类型 | 说明 |
+|---|---|---|
+| `ADMIN_PASSWORD` | Secret | 管理面初始密码 |
+| `JWT_SECRET` | Secret | `openssl rand -hex 32` 生成 |
+| `ADMIN_PATH` | Variable | 管理面路径前缀，建议随机串（第一层防护） |
+| `CLOUD_PLATFORM` | Variable | `edgeone`(EO) / `pages`(CF Pages) / 不填(CF Workers) |
+
+> **`ADMIN_PATH` 必须贯穿「构建期」与「运行时」两条链路**，否则管理面静态资源 404：
+> - **构建期**：`build.mjs` 读取 `ADMIN_PATH`（默认 `__panel`），把 UI 资源输出到 `dist/public/{ADMIN_PATH}/assets/*`，并在 `index.html` 注入 `window.__BASE__='/{ADMIN_PATH}'`。CI 的 build 步骤已自动注入同一变量（CNB 读密钥仓库 `ADMIN_PATH`；GitHub 读仓库 `vars.ADMIN_PATH`，缺省 `__panel`）。
+> - **运行时**：`getAdminPath()` 优先级为 **KV 显式配置 > `ADMIN_PATH` 环境变量 > 默认 `__panel`**。
+> - 三者（KV / 构建期环境变量 / 运行时环境变量）必须取值一致。若只改运行时 `ADMIN_PATH` 而构建期没改，则 `dist/public` 里仍只有 `/__panel/assets/*`，自定义路径的管理面资源会 404。
+
+> 本地 `.dev.vars` 已含上述本地值，生产在平台 Dashboard 设，不要写进仓库文件。
+
+---
+
+## 7. 配置备份
+
+管理面「系统 → 配置备份」一键**导出 / 导入**完整 JSON。导出是下载到本地，不外传任何服务器。迁移环境时直接导入即可。

@@ -1,0 +1,70 @@
+# CNB 自定义按钮定义
+#
+# 作用：在 CNB 仓库页面生成手动触发按钮。本项目严禁自动部署，
+#       所有上线动作都必须从这里点按钮发起。
+# 关联：每个 button 的 event 对应 .cnb.yml 中 $ 块下的同名事件。
+# 限制：自定义按钮仅支持触发 web_trigger 开头的事件。
+
+branch:
+  - reg: ".*" # 所有分支均显示按钮
+    buttons:
+      # ---------------- 构建校验（安全，不动线上） ----------------
+      - name: 🔍 构建校验
+        description: 安装依赖、构建并跑产物自检，不部署任何环境
+        event: web_trigger_verify
+
+      # ---------------- 部署 Cloudflare Workers ----------------
+      - name: 🚀 部署 CF Workers
+        description: 手动部署到 Cloudflare Workers（wrangler deploy）
+        event: web_trigger_deploy_cf_workers
+        inputs:
+          dry_run:
+            name: 干跑模式
+            description: 选「是」只校验配置不真正发布，用于上线前预演
+            type: select
+            required: true
+            default: "false"
+            options:
+              - name: 否 — 真实发布到线上
+                value: "false"
+              - name: 是 — 仅干跑校验（不发布）
+                value: "true"
+
+      # ---------------- 部署 Cloudflare Pages ----------------
+      - name: 🚀 部署 CF Pages
+        description: 手动部署到 Cloudflare Pages（部署目录为仓库根）
+        event: web_trigger_deploy_cf_pages
+        inputs:
+          cf_pages_project:
+            name: Pages 项目名
+            description: 留空则用密钥仓库的 CF_PAGES_PROJECT，再无则用 cdn-edge-gateway
+            type: input
+            required: false
+          cf_pages_branch:
+            name: 目标分支
+            description: production 分支填 main；填其他值会创建预览部署
+            type: input
+            required: false
+            default: main
+
+      # ---------------- 部署 EdgeOne Pages ----------------
+      - name: 🚀 部署 EO Pages
+        description: 手动部署到 EdgeOne Pages（部署目录为仓库根）
+        event: web_trigger_deploy_eo_pages
+        inputs:
+          eo_env:
+            name: 目标环境
+            description: 先发 preview 验证，确认无误后再发 production
+            type: select
+            required: true
+            default: preview
+            options:
+              - name: preview — 预览环境（安全）
+                value: preview
+              - name: production — 正式环境
+                value: production
+          eo_pages_project:
+            name: EO 项目名
+            description: 留空则用密钥仓库的 EO_PAGES_PROJECT，再无则用 cdn-edge-gateway
+            type: input
+            required: false

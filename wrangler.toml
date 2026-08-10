@@ -1,0 +1,111 @@
+#===============================================================================
+# cdn-edge-gateway — Cloudflare Workers / Pages 本地开发配置
+#===============================================================================
+# 构建产物为根目录 _worker.js（由 `npm run build` 生成）
+# Cloudflare Pages 会自动识别根目录的 _worker.js，无需额外配置。
+#===============================================================================
+
+name = "cdn-edge-gateway"
+main = "_worker.js"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat", "sockets"]
+keep_vars = true
+
+#===============================================================================
+# 静态资产绑定（Cloudflare Workers Static Assets）
+# ----------------------------------------------------------------------------
+# 目的：让管理面静态资源（dist/public/{adminPath}/assets/*）走 CF 静态资产层，
+#       命中边缘缓存后【零函数计费】，与 CF Pages / EO Makers 静态托管等价。
+#       这是 CF Workers 形态下弥补「无 Pages 静态层」的唯一官方做法，无需前后端分体。
+#
+# 关键设置：
+#   - directory：构建产物目录（由 `npm run build` 生成，CI / 手动部署前务必先 build）
+#   - html_handling = "none"：禁止 CF 自动用静态 HTML 接管路由，
+#     管理面根 HTML 需运行时注入 __BASE__/__PLATFORM__，必须由 Worker 动态返回。
+#   - not_found_handling = "none"：资产未命中时交给 Worker（_worker.js）继续路由，
+#     而非 CF 直接返回 404。
+#   - binding = "ASSETS"：运行时通过 ctx.env.ASSETS.fetch(request) 主动拉取静态资产。
+#
+# 兼容说明：
+#   - wrangler deploy 时该目录必须存在且非空，否则部署报错（CI 已先 build，安全）。
+#   - 纯 Dashboard 粘贴 _worker.js（不走 wrangler）时不会上传资产，
+#     ctx.env.ASSETS 为 undefined，adminPage.js 自动回退到 ui.gen.js 内联兜底，仍可运行。
+#===============================================================================
+assets = { directory = "./dist/public", binding = "ASSETS", html_handling = "none", not_found_handling = "none" }
+
+#===============================================================================
+# 部署职责划分（toml 与可视化并行，但同一操作只由一边负责，不重复）
+# ----------------------------------------------------------------------------
+# 本项目不强制「全 toml」或「全可视化」二选一，按「哪个更省事」分工：
+#
+#   【toml 负责，wrangler deploy 自动带上】
+#     - assets 静态资产层（代码/构建产物的一部分，应版本化）
+#     - 非敏感变量 ADMIN_PATH（构建期与运行时需一致）
+#
+#   【可视化负责，部署前一次性在 Dashboard 点完，无需知道 ID】
+#     - KV 命名空间创建 + 绑定 CDN_KV（UI 里选命名空间即绑，根本不用记 namespace id）
+#     - R2 桶创建 + 绑定 CDN_R2（engine=r2 时）
+#     - D1 数据库创建 + 绑定 CDN_DB（statsDriver=d1 时）
+#     - Secrets（ADMIN_PASSWORD / JWT_SECRET 等）—— 平台禁止进文件，只能单独注入
+#     - 自定义域名 / Worker Route（DNS + 代理，UI 更直观）
+#     - Fetch handler 缓存开关（平台侧开关，无 toml 字段）
+#
+# ⚠️ 关键：同一个绑定不要两边都写「你要做这个」。下方 KV/R2/D1 默认注释掉，
+#    仅作「纯本地 dev 且不想开 Dashboard」时的备用写法；走 CI / Dashboard 部署时
+#    请保持注释状态，改去控制台绑——这样 CI 的 `wrangler deploy` 只上传代码+资产，
+#    不会因占位符 ID 报错，也不会和可视化已绑的重复声明。
+#    完整说明与操作顺序见 docs/deployment.md 的「Cloudflare Workers 部署职责表」。
+#===============================================================================
+
+#-------------------------------------------------------------------------------
+# 路由绑定（归属：Dashboard 可视化更顺手，此处仅留占位参考）
+# ----------------------------------------------------------------------------
+# 自定义域名 / Worker Route 涉及 DNS 与代理开关，在控制台点更直观；
+# 若你更想用 toml 一次性声明，取消下方注释并填 zone（注意 routes 与 custom domain 二选一）：
+#
+# routes = [
+#   { pattern = "img.example.com/*", zone_name = "example.com" },
+# ]
+#
+# 控制台入口：Dashboard → Worker → Settings → Domains & Routes → Add Custom Domain / Add Route
+
+#===============================================================================
+# 存储绑定（KV / R2 / D1）—— 默认【可视化归属】，注释掉即可
+# ----------------------------------------------------------------------------
+# 推荐在 Dashboard 一次性创建并绑定（无需记 ID）：
+#   KV  ：Worker → Settings → Variables → KV namespace bindings → 选/建命名空间，变量名 CDN_KV
+#   R2  ：Worker → Settings → Variables → R2 bucket bindings   → 选/建桶 cdn-assets，变量名 CDN_R2
+#   D1  ：Worker → Settings → Variables → D1 database bindings → 选/建库，变量名 CDN_DB
+#
+# 仅当「纯本地 dev、完全不用 Dashboard」时，才取消下方注释并填真实 ID
+# （CI 部署务必保持注释，否则占位符会让 wrangler deploy 绑定失败）。
+#===============================================================================
+
+# [[kv_namespaces]]
+# binding = "CDN_KV"
+# id = "在此填 wrangler kv namespace create CDN_KV 输出的 id"
+
+# [[r2_buckets]]
+# binding = "CDN_R2"
+# bucket_name = "cdn-assets"
+
+# [[d1_databases]]
+# binding = "CDN_DB"
+# database_name = "edge-cdn-stats"
+# database_id = "在此填 wrangler d1 create edge-cdn-stats 输出的 database_id"
+
+#-------------------------------------------------------------------------------
+# 非敏感环境变量（toml 负责，wrangler deploy 自动带上）
+#-------------------------------------------------------------------------------
+[vars]
+# 管理面路径段（强烈建议改成随机字符串，这是第一层安全防护）
+ADMIN_PATH = "__panel"
+
+#-------------------------------------------------------------------------------
+# Secrets —— 【绝不进 toml】，单独注入其中一种方式即可（不要两种都做）：
+#   CLI： npx wrangler secret put ADMIN_PASSWORD
+#         npx wrangler secret put JWT_SECRET
+#         npx wrangler secret put CNB_AUTH   # 可选，源站 extraHeaders 用 @secret:CNB_AUTH 引用
+#   Dashboard：Worker → Settings → Variables → 设为 Secrets 类型
+# （secrets 在 wrangler 中无 toml 字段，只能命令注入或 UI 填）
+#-------------------------------------------------------------------------------

@@ -1,0 +1,31 @@
+{
+  "name": "cdn-edge-gateway",
+  "version": "1.0.0",
+  "description": "边缘回源加速网关 — 支持多域名、多源站池、负载均衡、链式回退，可部署于 Cloudflare Workers / Cloudflare Pages / EdgeOne Pages",
+  "type": "module",
+  "main": "_worker.js",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node scripts/dev.mjs",
+    "dev:clean": "node scripts/dev.mjs --clean",
+    "dev:cf": "node scripts/dev.mjs --cf",
+    "dev:nobuild": "node scripts/dev.mjs --no-build",
+    "dev:pages": "npm run build && wrangler pages dev .",
+    "deploy": "npm run build && wrangler deploy",
+    "deploy:pages": "npm run build && wrangler pages deploy .",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "cloudflare-workers",
+    "edgeone",
+    "cdn",
+    "reverse-proxy",
+    "load-balancing",
+    "edge"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "esbuild": "^0.28.1",
+    "wrangler": "^4.120.0"
+  }
+}

@@ -1,0 +1,230 @@
+# ============================ 可复用片段（锚点定义） ============================
+# 注意：锚点必须定义在被引用之前，故置于文件顶部。
+.docker-image: &docker-image
+  image: docker.cnb.cool/xzydm/mirrors/debian:13-all
+
+.runner4: &runner4
+  cpus: 4
+  tags: cnb:arch:amd64
+
+.runner2: &runner2
+  cpus: 2
+  tags: cnb:arch:amd64
+
+# 密钥仓库地址。CNB 不支持仓库级 Secret 直填，凭据须放在独立的「密钥仓库」，
+# 通过 imports 导入（详见 https://docs.cnb.cool/zh/repo/secret.html）。
+# 地址可用环境变量 CNB_SECRET_ENVS 覆盖，未配置时回退默认路径。
+# 密钥 yml 应包含（一份文件同时喂 CNB 与 GitHub，字段名两边一致）：
+#   CLOUDFLARE_API_TOKEN        —— CF API Token（Workers:Edit 或 Pages:Edit 权限）
+#   CLOUDFLARE_ACCOUNT_ID       —— CF 账户 ID
+#   CF_PAGES_PROJECT            —— 可选，CF Pages 项目名，默认 cdn-edge-gateway
+#   EO_SECRET                   —— EdgeOne API Token（EO Pages 控制台 → API Token 新建）
+#   EO_PAGES_PROJECT            —— 可选，EO Pages 项目名，默认 cdn-edge-gateway
+.secret-envs: &secret-envs
+  - ${CNB_SECRET_ENVS:-https://cnb.cool/xzydm/xzsecret/-/blob/main/cdn-edge-gateway.yml}
+
+# ---------------- 校验步骤（仅手动校验按钮使用，绝不含部署） ----------------
+.ci-stages: &ci-stages
+  - name: install
+    script: npm ci
+  - name: build
+    # build.mjs 内置产物自检（文件完整性 + _worker.js 可加载 + 导出面）
+    script: npm run build
+  - name: test
+    script: |
+      set -e
+      if ls test/*.test.js >/dev/null 2>&1; then
+        npm test
+      else
+        echo "跳过：test/ 下暂无用例"
+      fi
+  - name: verify-deploy-config
+    # 部署配置是纯文本，错了要到部署时才发现，这里提前静态校验
+    script: |
+      set -e
+      node -e "JSON.parse(require('fs').readFileSync('edgeone.json','utf8'))" \
+        && echo "✓ edgeone.json 合法 JSON"
+      for f in edge-functions/'[[default]].js' wrangler.toml; do
+        [ -f "$f" ] && echo "✓ 存在 $f" || { echo "✗ 缺失 $f"; exit 1; }
+      done
+
+# ============================ CI / CD 说明 ============================
+# 【铁律】严禁任何自动触发。
+#   本文件不存在 main / push / pull_request 等任何自动事件块，
+#   所有流水线只能由仓库页面上的自定义按钮手动触发（web_trigger 事件），
+#   按钮定义见 .cnb/web_trigger.yml。
+#
+# 产物说明（对齐本项目「双产物」构建）：
+#   _worker.js    → 边缘函数，CF Workers / EO Edge Function / EO Cloud Function 共用
+#   dist/public/  → 管理面静态资源，由边缘缓存托管
+#
+# 三个部署目标均从按钮发起：CF Workers / CF Pages / EO Pages。
+
+# ============================ 兜底分支（$）：远程开发 + 手动部署 ============================
+# YAML 顶层键不可重复，vscode 与所有 web_trigger_* 事件必须同处这一个 $ 块下。
+$:
+  # ---- vscode 事件：专供页面中启动远程开发用 ----
+  vscode:
+    - docker:
+        image: docker.cnb.cool/xzydm/mirrors/debian:13-all
+      services:
+        - docker
+        - name: vscode
+          options:
+            onlyPreview: false
+            launch: python keepalive.py
+            keepAliveTimeout: 3600000
+            daemon: true
+            backup: false
+      stages:
+        # 镜像 debian:13-all 已预装 node24/npm11/git/curl/python3 等。
+        # 依赖不自动安装：仅做环境体检并给出提示，由用户自行决策执行。
+        - name: env-check
+          script: |
+            set -e
+            echo "==> 当前工具链: node $(node -v) / npm $(npm -v) / git $(git --version)"
+            if [ -d node_modules ]; then
+              echo "✓ node_modules 已存在，可直接开发"
+            else
+              echo "⚠ node_modules 不存在（已从版本库移除，需本地安装）"
+            fi
+            echo ""
+            echo "-------- 手动执行以下命令 --------"
+            echo "  npm ci          # 按 package-lock.json 精确安装依赖"
+            echo "  npm run build   # 生成 _worker.js"
+            echo "  npm run dev     # 本地开发"
+            echo "----------------------------------"
+            echo "✓ 环境体检完成"
+
+  # ---- 按钮：仅构建校验（不部署，可随时验产物） ----
+  web_trigger_verify:
+    - runner:
+        <<: *runner2
+      docker:
+        <<: *docker-image
+      stages: *ci-stages
+
+  # ---- 按钮：部署 Cloudflare Workers ----
+  web_trigger_deploy_cf_workers:
+    - runner:
+        <<: *runner4
+      docker:
+        <<: *docker-image
+      imports: *secret-envs
+      stages:
+        - name: 确认手动触发
+          script: |
+            echo "触发事件: $CNB_EVENT"
+            echo "分支/提交: $CNB_BRANCH @ $CNB_COMMIT_SHORT"
+            echo "目标: Cloudflare Workers"
+            echo "干跑模式: ${dry_run:-false}"
+        - name: install
+          script: npm ci
+        - name: build
+          # ADMIN_PATH 必须与部署后的运行时一致（KV 配置 / ADMIN_PATH 环境变量），
+          # 否则 dist/public 静态资源物理路径与运行时路由错位，管理面资源 404。
+          # 优先级：密钥仓库 ADMIN_PATH 变量 > 默认值 __panel。
+          # 必须先 build：wrangler.toml 的 assets 绑定会把 dist/public/ 作为 CF 静态资产
+          # 上传，管理面静态资源由此命中边缘缓存、零函数额度（CF Workers 形态专属）。
+          script: ADMIN_PATH="${ADMIN_PATH:-__panel}" npm run build
+        - name: 校验凭据
+          script: |
+            set -e
+            [ -n "$CLOUDFLARE_API_TOKEN" ] || { echo "✗ 缺少 CLOUDFLARE_API_TOKEN（请检查密钥仓库）"; exit 1; }
+            [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || { echo "✗ 缺少 CLOUDFLARE_ACCOUNT_ID"; exit 1; }
+            echo "✓ 凭据就绪"
+        - name: 干跑校验（不发布）
+          if: |
+            [ "$dry_run" = "true" ]
+          script: |
+            set -e
+            npx wrangler deploy --dry-run --outdir /tmp/wrangler-dryrun
+            echo "✓ 干跑通过，未发布到线上"
+        - name: 发布到 Workers
+          if: |
+            [ "$dry_run" != "true" ]
+          script: |
+            set -e
+            npx wrangler deploy
+            echo "✓ Workers 部署完成"
+
+  # ---- 按钮：部署 Cloudflare Pages ----
+  web_trigger_deploy_cf_pages:
+    - runner:
+        <<: *runner4
+      docker:
+        <<: *docker-image
+      imports: *secret-envs
+      stages:
+        - name: 确认手动触发
+          script: |
+            echo "触发事件: $CNB_EVENT"
+            echo "分支/提交: $CNB_BRANCH @ $CNB_COMMIT_SHORT"
+            echo "目标: Cloudflare Pages"
+        - name: install
+          script: npm ci
+        - name: build
+          # ADMIN_PATH 必须与部署后的运行时一致（KV 配置 / ADMIN_PATH 环境变量），
+          # 否则 dist/public 静态资源物理路径与运行时路由错位，管理面资源 404。
+          # 优先级：密钥仓库 ADMIN_PATH 变量 > 默认值 __panel。
+          script: ADMIN_PATH="${ADMIN_PATH:-__panel}" npm run build
+        - name: 校验凭据
+          script: |
+            set -e
+            [ -n "$CLOUDFLARE_API_TOKEN" ] || { echo "✗ 缺少 CLOUDFLARE_API_TOKEN（请检查密钥仓库）"; exit 1; }
+            [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || { echo "✗ 缺少 CLOUDFLARE_ACCOUNT_ID"; exit 1; }
+            echo "✓ 凭据就绪"
+        - name: 发布到 Pages
+          script: |
+            set -e
+            # 优先级：按钮输入 > 密钥仓库变量 > 默认值
+            PROJECT="${cf_pages_project:-${CF_PAGES_PROJECT:-cdn-edge-gateway}}"
+            TARGET_BRANCH="${cf_pages_branch:-main}"
+            echo "项目: $PROJECT / 目标分支: $TARGET_BRANCH"
+            # 部署目录必须是仓库根，不能是 dist/public：
+            # Pages 需要根目录的 _worker.js 承载数据面代理与 /__panel/api/*，
+            # 只传 dist/public 会得到「静态页能开、API 全 404」的站点。
+            npx wrangler pages deploy . \
+              --project-name="$PROJECT" \
+              --branch="$TARGET_BRANCH"
+            echo "✓ Pages 部署完成（项目: $PROJECT）"
+
+  # ---- 按钮：部署 EdgeOne Pages ----
+  # 说明：CNB 官方支持直接对接 EO，用腾讯云提供的 tencentcom/deploy-eopages 镜像，
+  #       镜像内置 edgeone CLI。部署步骤单独换镜像，故 imports 下沉到该 stage。
+  web_trigger_deploy_eo_pages:
+    - runner:
+        <<: *runner4
+      docker:
+        <<: *docker-image
+      stages:
+        - name: 确认手动触发
+          script: |
+            echo "触发事件: $CNB_EVENT"
+            echo "分支/提交: $CNB_BRANCH @ $CNB_COMMIT_SHORT"
+            echo "目标: EdgeOne Pages / 环境: ${eo_env:-preview}"
+        - name: install
+          script: npm ci
+        - name: build
+          # ADMIN_PATH 必须与部署后的运行时一致（KV 配置 / ADMIN_PATH 环境变量），
+          # 否则 dist/public 静态资源物理路径与运行时路由错位，管理面资源 404。
+          # 优先级：密钥仓库 ADMIN_PATH 变量 > 默认值 __panel。
+          script: ADMIN_PATH="${ADMIN_PATH:-__panel}" npm run build
+        - name: 发布到 EO Pages
+          imports: *secret-envs
+          image: tencentcom/deploy-eopages:latest
+          script: |
+            set -e
+            [ -n "$EO_SECRET" ] || { echo "✗ 缺少 EO_SECRET（请检查密钥仓库）"; exit 1; }
+            # 优先级：按钮输入 > 密钥仓库变量 > 默认值
+            PROJECT="${eo_pages_project:-${EO_PAGES_PROJECT:-cdn-edge-gateway}}"
+            TARGET_ENV="${eo_env:-preview}"
+            echo "项目: $PROJECT / 环境: $TARGET_ENV"
+            # 部署目录必须是仓库根，不能是 dist/public：
+            # EO Makers 需要根目录的 edge-functions/[[default]].js 承载全部动态请求，
+            # 并自动托管 dist/public/ 静态资源（与函数路由冲突时静态优先）。
+            edgeone makers deploy . \
+              -n "$PROJECT" \
+              -t "$EO_SECRET" \
+              -e "$TARGET_ENV"
+            echo "✓ EO Pages 部署完成（项目: $PROJECT / 环境: $TARGET_ENV）"

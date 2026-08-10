@@ -1,0 +1,31 @@
+# 本地开发 Secrets，绝不提交
+.dev.vars
+.env
+.env.*
+!.env.example
+
+# 本地 wrangler 状态 / 本地 KV 持久化
+.wrangler/
+
+# 构建产物（可选，若不想提交）
+# _worker.js
+
+# node
+node_modules/
+npm-debug.log*
+.npm/
+
+# 本地参考资料（第三方脚本，含硬编码凭据，不纳入版本管理）
+refs/
+
+# 系统 / 编辑器
+.Trash-0
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/*
+!.vscode/settings.json
+
+# 本地克隆的外部演示仓库，不纳入版本控制
+next-cnb-eo-demo/

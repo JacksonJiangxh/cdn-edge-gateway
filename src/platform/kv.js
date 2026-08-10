@@ -1,0 +1,411 @@
+/**
+ * ============================================================================
+ * platform/kv.js —— KV 存储统一适配层
+ * ----------------------------------------------------------------------------
+ * 抹平 Cloudflare KV 与腾讯云 EdgeOne KV 的接口差异，对上层暴露统一的 KVLike：
+ *
+ *   { get(key, type?), put(key, value, opts?), delete(key), list(opts?) }
+ *
+ * 已知平台差异（截至实现时）：
+ * ┌──────────────┬────────────────────────────┬──────────────────────────────┐
+ * │              │ Cloudflare KV              │ EdgeOne KV                   │
+ * ├──────────────┼────────────────────────────┼──────────────────────────────┤
+ * │ get 返回类型 │ get(key, 'text'|'json'|    │ 仅 get(key) → string，部分版 │
+ * │              │ 'arrayBuffer'|'stream')    │ 本支持 get(key,{type:'json'})│
+ * │ put 选项     │ {expirationTtl, expiration,│ 仅支持 {expirationTtl}，     │
+ * │              │  metadata}                 │ metadata 不支持              │
+ * │ list 返回    │ {keys:[{name,expiration,   │ {keys:[{key}], list_complete,│
+ * │              │  metadata}],list_complete, │ cursor} —— 字段名是 key 不是 │
+ * │              │  cursor}                   │ name                         │
+ * │ 不存在的 key │ 返回 null                  │ 返回 null（部分版本抛错）    │
+ * └──────────────┴────────────────────────────┴──────────────────────────────┘
+ *
+ * 因此本层的策略是：
+ * 1. get 一律先按「原始文本」取回，再由本层自己做 JSON.parse，
+ *    避免依赖底层对 type 参数的支持程度。
+ * 2. put 只透传 expirationTtl，其余选项按平台能力过滤。
+ * 3. list 统一把 EdgeOne 的 {key} 归一化成 CF 的 {name}。
+ * 4. 所有底层调用都包 try/catch，读失败返回 null 而不是抛错，
+ *    让上层能优雅降级到 defaults。
+ * 5. **键名统一编码**：EdgeOne KV 官方限定 key「仅支持数字、字母及下划线」，
+ *    而本项目键空间大量使用 `:` 分隔、host/IP 含 `.`。因此本层在所有
+ *    get/put/delete/list 的边界上做编解码（见 keyCodec.js），上层调用点
+ *    继续使用可读的 `cfg:global` 形式，无需感知。
+ *
+ * 【关于 EdgeOne Blob 回退】
+ * 曾经在此实现「KV 未授权时回退 Blob」，现已移除。原因是二者运行时不交集：
+ *   - EdgeOne KV  ：仅支持在 Edge Functions 中使用
+ *   - EdgeOne Blob：SDK 仅提供 Node.js 版本（@edgeone/pages-blob）
+ * 本项目入口 edge-functions/[[default]].js 是 Edge Function（非 Node 运行时），
+ * 动态 import('@edgeone/pages-blob') 必然失败并静默降级为无持久化。
+ * 若将来需要 Blob，必须在 cloud-functions/ 另建 Cloud Function 入口承载，而非在此回退。
+ * ============================================================================
+ */
+
+import { encodeKey, decodeKey, encodePrefix } from './keyCodec.js';
+
+/**
+ * @typedef {Object} KVListKey
+ * @property {string} name              键名（已归一化）
+ * @property {number} [expiration]      过期时间戳（秒），可能不存在
+ * @property {Object} [metadata]        元数据，EdgeOne 恒为 undefined
+ */
+
+/**
+ * @typedef {Object} KVListResult
+ * @property {KVListKey[]} keys         键列表
+ * @property {boolean}     list_complete 是否已列完
+ * @property {string}      [cursor]     下一页游标
+ */
+
+/**
+ * @typedef {Object} KVLike
+ * @property {(key:string, type?:'text'|'json', strong?:boolean)=>Promise<any>} get
+ * @property {(key:string, value:string, opts?:{expirationTtl?:number})=>Promise<void>} put
+ * @property {(key:string)=>Promise<void>} delete
+ * @property {(opts?:{prefix?:string, limit?:number, cursor?:string})=>Promise<KVListResult>} list
+ */
+
+/** 绑定名候选，按优先级排列 */
+const BINDING_NAMES = ['CDN_KV', 'KV'];
+
+/** isolate 级适配器缓存，key 为原始绑定对象，避免每次请求重复包装 */
+const _adapterCache = new WeakMap();
+
+/**
+ * 鸭子类型判断：是否是一个可用的 KV 命名空间。
+ * @param {any} b 待检测对象
+ * @returns {boolean} 是否像 KV
+ */
+function looksLikeKV(b) {
+  return !!(b && typeof b === 'object' && typeof b.get === 'function' && typeof b.put === 'function');
+}
+
+/**
+ * 从 env 上挑出原始 KV 绑定。
+ * @param {Object} env 环境对象
+ * @returns {any|null} 原始绑定或 null
+ */
+function pickRawBinding(env) {
+  if (!env) return null;
+  for (const name of BINDING_NAMES) {
+    if (looksLikeKV(env[name])) return env[name];
+  }
+  return null;
+}
+
+/**
+ * 归一化 list 返回的单个 key 条目。
+ * CF 用 `name`，EdgeOne 用 `key`，这里统一成 `name`。
+ * @param {any} item 原始条目（可能是字符串或对象）
+ * @returns {KVListKey|null} 归一化后的条目
+ */
+function normalizeListKey(item) {
+  if (item == null) return null;
+  if (typeof item === 'string') return { name: item };
+  const name = item.name ?? item.key ?? item.Key;
+  if (typeof name !== 'string' || name === '') return null;
+  const out = { name };
+  if (typeof item.expiration === 'number') out.expiration = item.expiration;
+  if (item.metadata != null) out.metadata = item.metadata;
+  return out;
+}
+
+/**
+ * 把原始 KV 绑定包装成统一的 KVLike 适配器。
+ * @param {any} raw 原始 KV 绑定
+ * @returns {KVLike} 统一适配器
+ */
+function wrap(raw) {
+  const cached = _adapterCache.get(raw);
+  if (cached) return cached;
+
+  /** @type {KVLike} */
+  const adapter = {
+    /**
+     * 读取一个键。
+     * 统一先取文本，再按需自行解析 JSON——这样不依赖底层对 type 参数的支持。
+     * @param {string} key 键名
+     * @param {'text'|'json'} [type='text'] 期望的返回类型
+     * @returns {Promise<any>} 值；不存在、解析失败或底层报错时均返回 null
+     */
+    async get(key, type = 'text') {
+      if (typeof key !== 'string' || key === '') return null;
+      let physKey;
+      try {
+        physKey = encodeKey(key);
+      } catch {
+        // 键本身非法（超长等）→ 当作无数据，由上层降级
+        return null;
+      }
+      let rawVal;
+      try {
+        // 先尝试标准 CF 签名 get(key, 'text')
+        rawVal = await raw.get(physKey, 'text');
+      } catch {
+        try {
+          // EdgeOne 部分版本只接受单参数
+          rawVal = await raw.get(physKey);
+        } catch {
+          // 读失败（网络/权限/键不存在抛错）一律当作「无数据」，由上层降级
+          return null;
+        }
+      }
+      if (rawVal == null) return null;
+
+      // 某些实现会直接返回 ArrayBuffer / Uint8Array，这里兜底转成字符串
+      let text;
+      if (typeof rawVal === 'string') {
+        text = rawVal;
+      } else if (rawVal instanceof ArrayBuffer || ArrayBuffer.isView(rawVal)) {
+        try {
+          text = new TextDecoder().decode(
+            rawVal instanceof ArrayBuffer ? rawVal : rawVal.buffer
+          );
+        } catch {
+          return null;
+        }
+      } else if (typeof rawVal === 'object') {
+        // 已经是对象（EdgeOne 某些版本会自动解析），直接返回
+        return type === 'json' ? rawVal : JSON.stringify(rawVal);
+      } else {
+        text = String(rawVal);
+      }
+
+      if (type !== 'json') return text;
+      try {
+        return JSON.parse(text);
+      } catch {
+        // 脏数据不应导致整条请求失败
+        return null;
+      }
+    },
+
+    /**
+     * 写入一个键。
+     * 只透传 expirationTtl（两平台共有），metadata / expiration 在 EdgeOne 上不支持，
+     * 为保证行为一致这里统一不使用。
+     * @param {string} key 键名
+     * @param {string} value 值（调用方负责序列化）
+     * @param {{expirationTtl?:number}} [opts] 选项
+     * @returns {Promise<void>}
+     */
+    async put(key, value, opts) {
+      if (typeof key !== 'string' || key === '') return;
+      const physKey = encodeKey(key); // 键非法时抛错——写操作必须让调用方感知
+      const body = typeof value === 'string' ? value : JSON.stringify(value);
+      /** @type {{expirationTtl?:number}|undefined} */
+      let putOpts;
+      if (opts && typeof opts.expirationTtl === 'number' && opts.expirationTtl > 0) {
+        // CF 要求 expirationTtl 最小 60 秒，EdgeOne 无此限制，取最大值保证两边都合法
+        putOpts = { expirationTtl: Math.max(60, Math.floor(opts.expirationTtl)) };
+      }
+      try {
+        if (putOpts) {
+          await raw.put(physKey, body, putOpts);
+        } else {
+          await raw.put(physKey, body);
+        }
+      } catch (err) {
+        // 写失败向上抛，写操作的失败必须让调用方感知（区别于读）
+        throw new Error(`KV put failed for "${key}": ${err && err.message ? err.message : err}`);
+      }
+    },
+
+    /**
+     * 删除一个键。删除不存在的键不算错误。
+     * @param {string} key 键名
+     * @returns {Promise<void>}
+     */
+    async delete(key) {
+      if (typeof key !== 'string' || key === '') return;
+      if (typeof raw.delete !== 'function') return;
+      const physKey = encodeKey(key);
+      try {
+        await raw.delete(physKey);
+      } catch (err) {
+        throw new Error(`KV delete failed for "${key}": ${err && err.message ? err.message : err}`);
+      }
+    },
+
+    /**
+     * 列举键。返回结构已归一化为 CF 形态。
+     * EdgeOne 若不支持 list，则返回空列表（上层依赖 _index 而非 list，故不致命）。
+     * @param {{prefix?:string, limit?:number, cursor?:string}} [opts] 选项
+     * @returns {Promise<KVListResult>} 归一化结果
+     */
+    async list(opts) {
+      if (typeof raw.list !== 'function') {
+        return { keys: [], list_complete: true };
+      }
+
+      // 前缀同样要编码。逐字符编码保证 encode(prefix) 一定是 encode(fullKey)
+      // 的前缀，因此前缀列举语义在编码后依然成立（详见 keyCodec.js）。
+      const physOpts = { ...(opts || {}) };
+      if (typeof physOpts.prefix === 'string' && physOpts.prefix !== '') {
+        try {
+          physOpts.prefix = encodePrefix(physOpts.prefix);
+        } catch {
+          return { keys: [], list_complete: true };
+        }
+      }
+
+      let res;
+      try {
+        res = await raw.list(physOpts);
+      } catch {
+        return { keys: [], list_complete: true };
+      }
+      if (!res) return { keys: [], list_complete: true };
+
+      const srcKeys = Array.isArray(res.keys) ? res.keys : Array.isArray(res) ? res : [];
+      const keys = [];
+      for (const item of srcKeys) {
+        const k = normalizeListKey(item);
+        if (!k) continue;
+        // 把物理键解回逻辑键，让上层（stats cleanup 等）拿到可读键名。
+        // 解不出来说明是编码启用前的历史键，原样保留并打标，
+        // 供迁移逻辑识别；上层按逻辑键做前缀匹配时不会误伤。
+        const logical = decodeKey(k.name);
+        if (logical === null) {
+          k.legacy = true;
+        } else {
+          k.name = logical;
+        }
+        keys.push(k);
+      }
+      const complete =
+        typeof res.list_complete === 'boolean'
+          ? res.list_complete
+          : typeof res.listComplete === 'boolean'
+            ? res.listComplete
+            : true;
+      /** @type {KVListResult} */
+      const out = { keys, list_complete: complete };
+      const cursor = res.cursor ?? res.next_cursor;
+      if (typeof cursor === 'string' && cursor !== '') out.cursor = cursor;
+      return out;
+    },
+  };
+
+  /**
+   * 原始通道：绕过键编码，直接以物理键读写。
+   *
+   * 仅供迁移逻辑使用——迁移需要读取「编码方案启用前写入的历史键」
+   * （如字面量 `cfg:global`），这些键无法由 encodeKey 产生，
+   * 必须绕过编码层才能访问和删除。
+   *
+   * 业务代码**不应**使用本通道。
+   */
+  adapter.raw = {
+    /**
+     * 以物理键直接读取。
+     * @param {string} physKey 物理键（不经编码）
+     * @returns {Promise<string|null>} 原始文本，失败返回 null
+     */
+    async get(physKey) {
+      try {
+        const v = await raw.get(physKey, 'text');
+        return v == null ? null : typeof v === 'string' ? v : String(v);
+      } catch {
+        try {
+          const v = await raw.get(physKey);
+          return v == null ? null : typeof v === 'string' ? v : String(v);
+        } catch {
+          return null;
+        }
+      }
+    },
+    /**
+     * 以物理键直接删除。
+     * @param {string} physKey 物理键（不经编码）
+     * @returns {Promise<boolean>} 是否成功
+     */
+    async delete(physKey) {
+      if (typeof raw.delete !== 'function') return false;
+      try {
+        await raw.delete(physKey);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    /**
+     * 以物理前缀直接列举，返回未解码的物理键名。
+     * @param {{prefix?:string, limit?:number, cursor?:string}} [o] 选项
+     * @returns {Promise<KVListResult>} 物理键列表
+     */
+    async list(o) {
+      if (typeof raw.list !== 'function') return { keys: [], list_complete: true };
+      let res;
+      try {
+        res = await raw.list(o || {});
+      } catch {
+        return { keys: [], list_complete: true };
+      }
+      if (!res) return { keys: [], list_complete: true };
+      const src = Array.isArray(res.keys) ? res.keys : Array.isArray(res) ? res : [];
+      const keys = [];
+      for (const item of src) {
+        const k = normalizeListKey(item);
+        if (k) keys.push(k);
+      }
+      const complete =
+        typeof res.list_complete === 'boolean'
+          ? res.list_complete
+          : typeof res.listComplete === 'boolean'
+            ? res.listComplete
+            : true;
+      const out = { keys, list_complete: complete };
+      const cursor = res.cursor ?? res.next_cursor;
+      if (typeof cursor === 'string' && cursor !== '') out.cursor = cursor;
+      return out;
+    },
+  };
+
+  _adapterCache.set(raw, adapter);
+  return adapter;
+}
+
+/**
+ * 获取统一的 KV 适配器。
+ *
+ * 绑定名优先 `env.CDN_KV`，兼容 `env.KV`（Cloudflare 与 EdgeOne 同构）。
+ * 无绑定时返回 null，上层应据此降级到 defaults（只读、不可持久化模式）。
+ *
+ * @param {Object} env 平台环境变量与绑定
+ * @returns {KVLike|null} KV 适配器，无持久化时返回 null
+ *
+ * @example
+ * const kv = getKV(ctx.env);
+ * if (!kv) return DEFAULT_GLOBAL;         // 优雅降级
+ * const cfg = await kv.get('cfg:global', 'json');
+ */
+export function getKV(env) {
+  const raw = pickRawBinding(env);
+  return raw ? wrap(raw) : null;
+}
+
+/**
+ * 判断当前环境是否具备 KV 持久化能力。
+ * @param {Object} env 环境对象
+ * @returns {boolean} 是否有可用 KV
+ */
+export function hasKV(env) {
+  return pickRawBinding(env) !== null;
+}
+
+/**
+ * 预热 KV 适配器（请求生命周期早期调用一次，可选）。
+ *
+ * 目前 KV 适配器是纯同步包装，无需异步初始化；本函数保留是为了
+ * 兼容 app 层已有的 waitUntil(preloadKV(...)) 调用点，并预先填充
+ * isolate 级适配器缓存，省去首个请求的包装开销。
+ *
+ * @param {Object} env 平台环境变量
+ * @param {Caps} [_caps] 平台能力（当前未使用，保留签名兼容）
+ * @returns {Promise<KVLike|null>} 适配器或 null
+ */
+export async function preloadKV(env, _caps) {
+  return getKV(env);
+}

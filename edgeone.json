@@ -1,0 +1,12 @@
+{
+  "name": "cdn-edge-gateway",
+  "version": "1.0.0",
+  "description": "通用 CDN 回源加速网关 — EdgeOne Makers 部署配置",
+  "framework": "others",
+  "buildCommand": "npm run build",
+  "installCommand": "npm ci",
+  "outputDirectory": "dist/public",
+  "env": {
+    "NODE_VERSION": "18"
+  }
+}

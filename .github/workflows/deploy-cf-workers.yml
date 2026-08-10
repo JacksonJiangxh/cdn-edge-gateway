@@ -1,0 +1,105 @@
+# 部署到 Cloudflare Workers —— 仅手动触发
+#
+# 【铁律】没有 push 触发器，只有 workflow_dispatch。
+# 必须在 Actions 页面点「Run workflow」并填写确认串才会执行，杜绝误部署。
+#
+# 需要的仓库 Secret（Settings → Secrets and variables → Actions）：
+#   CLOUDFLARE_API_TOKEN   —— 需含 Workers Scripts:Edit 权限
+#   CLOUDFLARE_ACCOUNT_ID
+
+name: 部署 Cloudflare Workers（手动）
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '确认部署到线上请输入 deploy（防误触）'
+        required: true
+        type: string
+        default: ''
+      dry_run:
+        description: '干跑模式：只校验不发布'
+        required: true
+        type: boolean
+        default: false
+
+# 禁止并发部署，避免两次发布互相覆盖
+concurrency:
+  group: deploy-cf-workers
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: 部署到 Workers
+    runs-on: ubuntu-latest
+    steps:
+      - name: 校验确认串
+        # 二次确认：输入不是 deploy 就直接失败，防止手滑点了 Run workflow
+        run: |
+          if [ "${{ inputs.confirm }}" != "deploy" ]; then
+            echo "✗ 确认串不正确（需输入 deploy），已中止"
+            exit 1
+          fi
+          echo "✓ 已确认，触发人: ${{ github.actor }}"
+
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建（含产物自检）
+        # 必须先 build：wrangler.toml 的 assets 绑定会把 dist/public/ 作为 CF 静态资产
+        # 上传，管理面静态资源（/{adminPath}/assets/*）由此命中边缘缓存、零函数额度。
+        run: npm run build
+
+      - name: 校验凭据
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -e
+          [ -n "$CLOUDFLARE_API_TOKEN" ] || { echo "✗ 未配置 Secret: CLOUDFLARE_API_TOKEN"; exit 1; }
+          [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || { echo "✗ 未配置 Secret: CLOUDFLARE_ACCOUNT_ID"; exit 1; }
+          echo "✓ 凭据就绪"
+
+      - name: 干跑校验（不发布）
+        if: ${{ inputs.dry_run }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -e
+          npx wrangler deploy --dry-run --outdir /tmp/wrangler-dryrun
+          echo "✓ 干跑通过，未发布到线上"
+
+      - name: 发布到 Workers
+        if: ${{ !inputs.dry_run }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -e
+          npx wrangler deploy
+          echo "✓ Workers 部署完成"
+
+      - name: 部署摘要
+        if: always()
+        run: |
+          {
+            echo "### Cloudflare Workers 部署"
+            echo ""
+            echo "- 触发人：\`${{ github.actor }}\`"
+            echo "- 提交：\`${{ github.sha }}\`"
+            echo "- 干跑：\`${{ inputs.dry_run }}\`"
+            echo "- 结果：\`${{ job.status }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,58 @@
+# 构建校验 —— 只校验，绝不部署，且仅手动触发
+#
+# 【铁律】本仓库严禁任何自动触发。
+#   本文件没有 push / pull_request 触发器，只有 workflow_dispatch。
+#   即便是「只校验」的流水线，也一律由人工在 Actions 页面点 Run workflow 发起。
+#   所有上线动作请走 deploy-*.yml（同样仅手动触发）。
+
+name: 构建校验（手动）
+
+on:
+  workflow_dispatch:
+
+# 重复触发时取消旧任务，省额度
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: 构建与产物自检
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建（含产物自检）
+        # build.mjs 内置校验：产物完整性 + _worker.js 可被 import + 导出面正确
+        run: npm run build
+
+      - name: 单元测试
+        run: |
+          set -e
+          if ls test/*.test.js >/dev/null 2>&1; then
+            npm test
+          else
+            echo "跳过：test/ 下暂无用例"
+          fi
+
+      - name: 校验部署配置
+        run: |
+          set -e
+          node -e "JSON.parse(require('fs').readFileSync('edgeone.json','utf8'))" \
+            && echo "✓ edgeone.json 合法 JSON"
+          for f in "edge-functions/[[default]].js" wrangler.toml; do
+            [ -f "$f" ] && echo "✓ 存在 $f" || { echo "✗ 缺失 $f"; exit 1; }
+          done

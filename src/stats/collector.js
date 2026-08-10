@@ -1,0 +1,434 @@
+/**
+ * ============================================================================
+ * stats/collector.js —— 内存聚合式访问统计
+ * ----------------------------------------------------------------------------
+ * 【核心约束：绝不能每请求写一次 KV/D1】
+ * Cloudflare KV 免费版每天仅 1000 次写入，一个中等流量站点几分钟就能打爆；
+ * D1 免费版每日写入上限 100,000 行（远高于 KV），但同样需要节流。
+ * 因此统计必须先在 isolate 内存里聚合，达到阈值后才批量落盘一次。
+ *
+ * 落盘触发条件（满足其一即可）：
+ *   - 自上次 flush 起累计条数 >= 500
+ *   - 距上次 flush 时间 >= 5 分钟
+ *   - 调用方显式 force = true（如 isolate 即将回收、管理面手动触发）
+ *
+ * 数据流：
+ *   pipeline → record(ctx, entry)                 // 纯内存 O(1)，绝不 await
+ *   pipeline → ctx.waitUntil(flush(ctx))          // 后台异步落盘，不阻塞响应
+ *
+ * 【已知的可接受损失】
+ * isolate 随时可能被平台回收，最后一批未 flush 的内存数据会丢失（最多 500 条
+ * 或 5 分钟的量）。对「趋势型访问统计」这个用途来说完全可以接受 —— 我们要的是
+ * 量级和趋势，不是财务级精确计数。
+ * ============================================================================
+ */
+
+import { getGlobal } from '../config/store.js';
+
+// ============================================================================
+// 常量
+// ============================================================================
+
+/** 累计多少条后触发落盘。 */
+const FLUSH_COUNT_THRESHOLD = 500;
+
+/** 距上次落盘多少毫秒后触发。 */
+const FLUSH_INTERVAL_MS = 300000;
+
+/** 内存中最多聚合多少个 host，超出丢弃新 host，防止被构造的 Host 头打爆内存。 */
+const MAX_HOSTS = 500;
+
+/** 每个 host 最多记录多少个不同的 originId。 */
+const MAX_ORIGINS_PER_HOST = 32;
+
+/** 耗时分位采样上限。只保留固定条数的样本做近似分位，避免数组无限增长。 */
+const MAX_DURATION_SAMPLES = 256;
+
+// ============================================================================
+// isolate 级聚合状态
+// ============================================================================
+
+/**
+ * 聚合桶。
+ * @typedef {Object} Bucket
+ * @property {number} requests          请求总数
+ * @property {number} s2xx              2xx 计数
+ * @property {number} s3xx              3xx 计数
+ * @property {number} s4xx              4xx 计数
+ * @property {number} s5xx              5xx 计数
+ * @property {number} sOther            其他状态码计数
+ * @property {number} bytes             累计响应字节数
+ * @property {number} cacheHit          缓存命中数
+ * @property {number} cacheMiss         缓存未命中数
+ * @property {number} durSum            耗时总和（ms），用于算均值
+ * @property {number[]} durSamples      耗时样本，用于近似分位
+ * @property {Record<string,number>} origins  originId → 次数
+ */
+
+/**
+ * host → Bucket 的内存聚合表。
+ * @type {Map<string, Bucket>}
+ */
+let buckets = new Map();
+
+/** 自上次 flush 起累计的记录条数。 */
+let pendingCount = 0;
+
+/** 上次 flush 的时间戳（ms）。 */
+let lastFlushAt = Date.now();
+
+/** flush 互斥锁：防止并发 waitUntil 同时落盘造成重复写与配额浪费。 */
+let flushing = false;
+
+/**
+ * 创建空聚合桶。
+ * @returns {Bucket} 新桶
+ */
+function newBucket() {
+  return {
+    requests: 0,
+    s2xx: 0,
+    s3xx: 0,
+    s4xx: 0,
+    s5xx: 0,
+    sOther: 0,
+    bytes: 0,
+    cacheHit: 0,
+    cacheMiss: 0,
+    durSum: 0,
+    durSamples: [],
+    origins: Object.create(null),
+  };
+}
+
+/**
+ * 规整 host，防止恶意 Host 头污染统计键。
+ * @param {string} host 主机名
+ * @returns {string} 清洗后的 host
+ */
+function normHost(host) {
+  const s = String(host || 'unknown').toLowerCase().replace(/[^a-z0-9.\-_*]/g, '');
+  return s.slice(0, 128) || 'unknown';
+}
+
+// ============================================================================
+// record —— 热路径，必须极快
+// ============================================================================
+
+/**
+ * 记录一条访问日志到内存聚合器。
+ *
+ * **性能契约**：本函数是同步的、O(1) 的、绝不 await、绝不抛异常。
+ * 它处在每个请求的关键路径上，任何阻塞都会直接体现在用户的 TTFB 上。
+ *
+ * @param {import('../contracts.js').Ctx} ctx 请求上下文
+ * @param {Object} entry 访问记录
+ * @param {string}  [entry.host]      站点主机名，缺省取 ctx.url.hostname
+ * @param {number}  [entry.status]    响应状态码
+ * @param {number}  [entry.bytes]     响应字节数
+ * @param {boolean|string} [entry.cacheHit] 是否命中缓存（或 'HIT'/'MISS' 字符串）
+ * @param {string}  [entry.originId]   实际使用的源站 id
+ * @param {number}  [entry.durationMs] 处理耗时（ms），缺省由 ctx.startTime 推算
+ * @param {number}  [entry.duration]   durationMs 的兼容别名
+ * @returns {void}
+ *
+ * @example
+ * record(ctx, { host, status: resp.status, bytes: 1024, cacheHit: true, originId: 'o1', durationMs: 42 });
+ */
+export function record(ctx, entry) {
+  try {
+    const e = entry || {};
+    const host = normHost(e.host || (ctx && ctx.url && ctx.url.hostname));
+
+    let b = buckets.get(host);
+    if (!b) {
+      // 超出 host 上限时静默丢弃，保护 isolate 内存
+      if (buckets.size >= MAX_HOSTS) return;
+      b = newBucket();
+      buckets.set(host, b);
+    }
+
+    b.requests += 1;
+
+    const status = Number(e.status);
+    if (status >= 200 && status < 300) b.s2xx += 1;
+    else if (status >= 300 && status < 400) b.s3xx += 1;
+    else if (status >= 400 && status < 500) b.s4xx += 1;
+    else if (status >= 500 && status < 600) b.s5xx += 1;
+    else b.sOther += 1;
+
+    const bytes = Number(e.bytes);
+    if (Number.isFinite(bytes) && bytes > 0) b.bytes += bytes;
+
+    const ch = e.cacheHit;
+    const isHit = ch === true || (typeof ch === 'string' && ch.toUpperCase() === 'HIT');
+    const isMiss = ch === false || (typeof ch === 'string' && ch.toUpperCase() === 'MISS');
+    if (isHit) b.cacheHit += 1;
+    else if (isMiss) b.cacheMiss += 1;
+
+    if (e.originId) {
+      const oid = String(e.originId).slice(0, 64);
+      if (b.origins[oid] !== undefined || Object.keys(b.origins).length < MAX_ORIGINS_PER_HOST) {
+        b.origins[oid] = (b.origins[oid] || 0) + 1;
+      }
+    }
+
+    let dur = Number(e.durationMs !== undefined ? e.durationMs : e.duration);
+    if (!Number.isFinite(dur) && ctx && Number.isFinite(ctx.startTime)) {
+      dur = Date.now() - ctx.startTime;
+    }
+    if (Number.isFinite(dur) && dur >= 0) {
+      b.durSum += dur;
+      // 蓄水池式采样：满了之后随机替换，保证样本对全体近似均匀
+      if (b.durSamples.length < MAX_DURATION_SAMPLES) {
+        b.durSamples.push(dur);
+      } else {
+        const idx = (Math.random() * b.requests) | 0;
+        if (idx < MAX_DURATION_SAMPLES) b.durSamples[idx] = dur;
+      }
+    }
+
+    pendingCount += 1;
+  } catch {
+    // 统计绝不能影响主流程，任何异常都吞掉
+  }
+}
+
+// ============================================================================
+// flush —— 后台落盘
+// ============================================================================
+
+/**
+ * 判断当前是否应当落盘。
+ * @param {boolean} force 是否强制
+ * @returns {boolean} 是否应当落盘
+ */
+function shouldFlush(force) {
+  if (pendingCount === 0) return false;
+  if (force) return true;
+  if (pendingCount >= FLUSH_COUNT_THRESHOLD) return true;
+  return Date.now() - lastFlushAt >= FLUSH_INTERVAL_MS;
+}
+
+/**
+ * 取出并清空内存快照。
+ *
+ * 「先换后写」是关键：把 Map 整体换成新的空 Map 再去做异步 IO，
+ * 这样落盘期间新到达的请求写入的是新 Map，不会被本次 flush 重复写入，
+ * 也不会在 flush 过程中被并发修改。
+ *
+ * @returns {{snapshot: Map<string, Bucket>, count: number}} 快照与条数
+ */
+function takeSnapshot() {
+  const snapshot = buckets;
+  const count = pendingCount;
+  buckets = new Map();
+  pendingCount = 0;
+  lastFlushAt = Date.now();
+  return { snapshot, count };
+}
+
+/**
+ * 从耗时样本计算近似分位。
+ * @param {number[]} samples 样本数组
+ * @param {number} p 分位（0-1）
+ * @returns {number} 分位值（ms）
+ */
+function percentile(samples, p) {
+  if (!samples || samples.length === 0) return 0;
+  const arr = samples.slice().sort((a, b) => a - b);
+  const idx = Math.min(arr.length - 1, Math.max(0, Math.round(p * (arr.length - 1))));
+  return Math.round(arr[idx]);
+}
+
+/**
+ * 把内存桶转换为驱动层可消费的扁平记录。
+ * @param {string} host 主机名
+ * @param {Bucket} b 聚合桶
+ * @returns {Object} 扁平统计记录
+ */
+function toRecord(host, b) {
+  return {
+    host,
+    requests: b.requests,
+    status2xx: b.s2xx,
+    status3xx: b.s3xx,
+    status4xx: b.s4xx,
+    status5xx: b.s5xx,
+    statusOther: b.sOther,
+    bytes: b.bytes,
+    cacheHit: b.cacheHit,
+    cacheMiss: b.cacheMiss,
+    durAvg: b.requests > 0 ? Math.round(b.durSum / b.requests) : 0,
+    durP50: percentile(b.durSamples, 0.5),
+    durP95: percentile(b.durSamples, 0.95),
+    durP99: percentile(b.durSamples, 0.99),
+    origins: { ...b.origins },
+  };
+}
+
+/**
+ * 把快照写回内存桶（落盘失败时的回滚）。
+ * 只在驱动层整体抛错时调用，避免数据白白丢失。
+ * @param {Map<string, Bucket>} snapshot 之前取出的快照
+ * @returns {void}
+ */
+function restore(snapshot) {
+  try {
+    for (const [host, b] of snapshot) {
+      const cur = buckets.get(host);
+      if (!cur) {
+        if (buckets.size >= MAX_HOSTS) continue;
+        buckets.set(host, b);
+        continue;
+      }
+      cur.requests += b.requests;
+      cur.s2xx += b.s2xx;
+      cur.s3xx += b.s3xx;
+      cur.s4xx += b.s4xx;
+      cur.s5xx += b.s5xx;
+      cur.sOther += b.sOther;
+      cur.bytes += b.bytes;
+      cur.cacheHit += b.cacheHit;
+      cur.cacheMiss += b.cacheMiss;
+      cur.durSum += b.durSum;
+
+      // 【必须合并 durSamples】旧实现漏掉了这一项：回滚后样本数组为空，
+      // 该 host 的 P50/P95/P99 会全部塌成 0，而 requests/durSum 却是对的，
+      // 形成「均值正常但分位数为 0」的诡异数据。
+      // 合并时保持总量不超过 MAX_DURATION_SAMPLES：先填满空位，
+      // 超出部分随机替换，维持样本对整体的近似均匀性（与 record() 的蓄水池一致）。
+      if (Array.isArray(b.durSamples) && b.durSamples.length > 0) {
+        if (!Array.isArray(cur.durSamples)) cur.durSamples = [];
+        for (const d of b.durSamples) {
+          if (cur.durSamples.length < MAX_DURATION_SAMPLES) {
+            cur.durSamples.push(d);
+          } else {
+            const idx = (Math.random() * MAX_DURATION_SAMPLES) | 0;
+            cur.durSamples[idx] = d;
+          }
+        }
+      }
+
+      for (const [oid, n] of Object.entries(b.origins)) {
+        cur.origins[oid] = (cur.origins[oid] || 0) + n;
+      }
+    }
+  } catch {
+    /* 回滚失败就放弃这批数据，不能让统计拖垮主流程 */
+  }
+}
+
+/**
+ * 落盘：把内存聚合结果写入 KV 或 D1。
+ *
+ * 由 pipeline 在 `ctx.waitUntil(flush(ctx))` 中调用，不阻塞客户端响应。
+ * 未达到触发条件时直接返回，几乎零开销。
+ *
+ * @param {import('../contracts.js').Ctx} ctx 请求上下文
+ * @param {boolean} [force=false] 强制落盘，忽略阈值
+ * @returns {Promise<void>}
+ *
+ * @example
+ * ctx.waitUntil(flush(ctx));
+ */
+export async function flush(ctx, force = false) {
+  try {
+    if (flushing) return;
+    if (!shouldFlush(force)) return;
+
+    // 【锁必须在第一个 await 之前置位】
+    // 旧实现把 flushing = true 放在 await getGlobal() 之后，而 JS 的并发切换
+    // 只发生在 await 处：两个并发请求可以同时通过上面的 `if (flushing)` 检查，
+    // 双双进入 await，然后各自执行一次 takeSnapshot() —— 第二次拿到空快照，
+    // 或两次写入重复数据。这里提前加锁，使「检查 + 置位」之间不存在 await，
+    // 从而在单 isolate 的事件循环语义下真正互斥。
+    flushing = true;
+
+    // 统一用一个 finally 释放锁：下面有多条 return 分支，逐条手工复位极易漏掉，
+    // 一旦漏掉 flushing 会永久为 true，导致该 isolate 此后再也不落盘（静默丢数据）。
+    try {
+      // 读全局配置决定驱动。配置读取本身有内存缓存，成本极低。
+      let cfg = null;
+      try {
+        cfg = await getGlobal(ctx);
+      } catch {
+        cfg = null;
+      }
+
+      if (cfg && cfg.statsEnabled === false) {
+        // 统计已关闭：清空内存，不落盘
+        takeSnapshot();
+        return;
+      }
+
+      const driverName = (cfg && cfg.statsDriver) || 'kv';
+      if (driverName === 'none') {
+        takeSnapshot();
+        return;
+      }
+
+      const { snapshot } = takeSnapshot();
+      if (snapshot.size === 0) return;
+
+      const records = [];
+      for (const [host, b] of snapshot) records.push(toRecord(host, b));
+
+      try {
+        if (driverName === 'd1') {
+          const d1 = await import('./d1Driver.js');
+          const written = await d1.writeStats(ctx, records);
+          if (!written) {
+            // D1 不可用（例如跑在 EdgeOne 上）→ 自动降级到 KV
+            const kv = await import('./kvDriver.js');
+            await kv.writeStats(ctx, records);
+          }
+        } else {
+          const kv = await import('./kvDriver.js');
+          await kv.writeStats(ctx, records);
+        }
+      } catch (err) {
+        // 落盘失败：把数据放回内存，下次再试（最多重复几个周期后自然被丢弃）
+        restore(snapshot);
+        try {
+          console.warn('[stats] 落盘失败：', String((err && err.message) || err));
+        } catch {
+          /* ignore */
+        }
+      }
+    } finally {
+      flushing = false;
+    }
+  } catch {
+    flushing = false;
+  }
+}
+
+/**
+ * 返回当前内存聚合状态的只读快照，供管理后台展示「实时未落盘数据」。
+ * 不会清空内存。
+ *
+ * @returns {{pending:number, lastFlushAt:number, hosts:Object[]}} 状态摘要
+ */
+export function snapshotStats() {
+  const hosts = [];
+  for (const [host, b] of buckets) hosts.push(toRecord(host, b));
+  return { pending: pendingCount, lastFlushAt, hosts };
+}
+
+/**
+ * 重置聚合器。仅测试或管理面「清空统计」时使用。
+ * @returns {void}
+ */
+export function resetCollector() {
+  buckets = new Map();
+  pendingCount = 0;
+  lastFlushAt = Date.now();
+  flushing = false;
+}
+
+/** 导出阈值常量，便于管理面展示与其他模块复用。 */
+export const COLLECTOR_LIMITS = Object.freeze({
+  flushCountThreshold: FLUSH_COUNT_THRESHOLD,
+  flushIntervalMs: FLUSH_INTERVAL_MS,
+});

@@ -1,0 +1,115 @@
+# 部署到 EdgeOne Pages —— 仅手动触发
+#
+# 【铁律】没有 push / pull_request 触发器，只有 workflow_dispatch。
+#
+# 需要的仓库 Secret（Settings → Secrets and variables → Actions）：
+#   EO_SECRET          —— EdgeOne API Token（EO Pages 控制台 → API Token 新建）
+#                       注意：字段名与 CNB 密钥仓库保持一致，方便共用同一份密钥文件。
+# 可选仓库 Variable：
+#   EO_PAGES_PROJECT   —— 项目名，留空则用默认 cdn-edge-gateway
+#
+# 部署目录说明：本项目部署的是仓库根目录，不是 dist/public。
+#   EO Makers 需要根目录的 edge-functions/[[default]].js 承载全部动态请求，
+#   并自动托管 dist/public/ 静态资源（与函数路由冲突时静态优先）。
+#   只传 dist/public 会得到「静态页能开、API 全 404」的站点。
+
+name: 部署 EdgeOne Pages（手动）
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '确认部署请输入 deploy（防误触）'
+        required: true
+        type: string
+        default: ''
+      env_target:
+        description: '目标环境'
+        required: true
+        type: choice
+        default: preview
+        options:
+          - preview
+          - production
+      project_name:
+        description: 'EO Pages 项目名（留空用仓库变量 EO_PAGES_PROJECT）'
+        required: false
+        type: string
+        default: ''
+
+# 禁止并发部署，避免两次发布互相覆盖
+concurrency:
+  group: deploy-eo-pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: 部署到 EdgeOne Pages
+    runs-on: ubuntu-latest
+    steps:
+      - name: 校验确认串
+        run: |
+          if [ "${{ inputs.confirm }}" != "deploy" ]; then
+            echo "✗ 确认串不正确（需输入 deploy），已中止"
+            exit 1
+          fi
+          echo "✓ 已确认，触发人: ${{ github.actor }} / 环境: ${{ inputs.env_target }}"
+
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建（含产物自检）
+        # ADMIN_PATH 必须贯穿「构建期静态路径」与「运行时路由」：构建期产出
+        # dist/public/{adminPath}/assets/*，运行时 getAdminPath 读 KV/ADMIN_PATH，
+        # 二者不一致则管理面静态资源 404。缺省 __panel。
+        env:
+          ADMIN_PATH: ${{ vars.ADMIN_PATH || '__panel' }}
+        run: npm run build
+
+      - name: 校验凭据
+        env:
+          EO_SECRET: ${{ secrets.EO_SECRET }}
+        run: |
+          set -e
+          [ -n "$EO_SECRET" ] || { echo "✗ 未配置 Secret: EO_SECRET"; exit 1; }
+          echo "✓ 凭据就绪"
+
+      - name: 发布到 EO Pages
+        env:
+          EO_SECRET: ${{ secrets.EO_SECRET }}
+          INPUT_PROJECT: ${{ inputs.project_name }}
+          VAR_PROJECT: ${{ vars.EO_PAGES_PROJECT }}
+        run: |
+          set -e
+          # 优先级：手动输入 > 仓库变量 > 默认值
+          PROJECT="${INPUT_PROJECT:-${VAR_PROJECT:-cdn-edge-gateway}}"
+          echo "项目: $PROJECT / 环境: ${{ inputs.env_target }}"
+          npx edgeone makers deploy . \
+            -n "$PROJECT" \
+            -t "$EO_SECRET" \
+            -e "${{ inputs.env_target }}"
+          echo "✓ EO Pages 部署完成（项目: $PROJECT）"
+
+      - name: 部署摘要
+        if: always()
+        run: |
+          {
+            echo "### EdgeOne Pages 部署"
+            echo ""
+            echo "- 触发人：\`${{ github.actor }}\`"
+            echo "- 提交：\`${{ github.sha }}\`"
+            echo "- 环境：\`${{ inputs.env_target }}\`"
+            echo "- 结果：\`${{ job.status }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
