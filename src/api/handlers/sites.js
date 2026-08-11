@@ -56,9 +56,25 @@ async function ensureSingleOrigin(ctx, body) {
     o?.pathPrefix || '',
   ].join('|');
 
-  const want = fp(origins[0]);
+  // 先按 schema 把入参规范化（补 engine/scheme/port/pathPrefix 默认值），
+  // 否则入参"未填 port"与已落库"port 被补成 443"的指纹不一致，导致同地址查重失败、重复建源站。
+  const addr = String(origins[0]?.addr || '').toLowerCase();
+  const res = validatePool(
+    {
+      name: addr || body.host,
+      kind: 'single',
+      strategy: 'chain',
+      origins,
+      failover: body.originFailover,
+      createdBy: body.host || '',
+    },
+    ctx.caps
+  );
+  if (!res.ok) return { ok: false, error: '源站校验失败: ' + res.errors.join('; ') };
 
-  // 复用已存在的同构单一源站
+  const want = fp(res.value.origins[0]);
+
+  // 复用已存在的同构单一源站（基于规范化后的指纹比对）
   try {
     const pools = await listPools(ctx);
     const hit = pools.find(
@@ -77,20 +93,6 @@ async function ensureSingleOrigin(ctx, body) {
   } catch {
     // 列举失败不阻塞创建，退化为「总是新建一条」
   }
-
-  const addr = String(origins[0]?.addr || '').toLowerCase();
-  const res = validatePool(
-    {
-      name: addr || body.host,
-      kind: 'single',
-      strategy: 'chain',
-      origins,
-      failover: body.originFailover,
-      createdBy: body.host || '',
-    },
-    ctx.caps
-  );
-  if (!res.ok) return { ok: false, error: '源站校验失败: ' + res.errors.join('; ') };
 
   res.value.updatedAt = Date.now();
   await putPool(ctx, res.value);

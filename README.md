@@ -89,7 +89,7 @@ edge-functions/           # EO Makers Edge Function 目录
   └─ [[default]].js        # Catch-all 薄壳（加载 _worker.js，承载全部动态请求）
 dist/public/              # 构建产出的管理面静态资源（HTML + assets），供 CF Workers(ASSETS)/Pages/EO 静态托管
 scripts/dev.mjs           # 本地一键开发脚本
-build.mjs                 # 三步构建：内联兜底 + dist/public + 打包 _worker.js
+build.mjs                 # 四步构建：内联兜底 + dist/public + 打包 _worker.js + 产物自检
 ```
 
 ---

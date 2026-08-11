@@ -13,7 +13,7 @@
 
 ## 鉴权
 
-- 除 `POST /auth/login` 和 `POST /auth/logout` 外，**所有接口都需要登录**。
+- 除 `POST /auth/login`、`POST /auth/logout` 和 `GET /auth/me`（返回当前登录态，免登录）外，**所有接口都需要登录**。
 - 登录通过后下发 `Set-Cookie: ecw_token=...`（HttpOnly）。后续请求带该 cookie 即可。
 - 未匹配路径直接 404，不会泄露「接口是否存在」。
 

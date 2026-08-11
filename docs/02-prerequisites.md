@@ -22,7 +22,7 @@ v22.11.0
 ```
 
 <details>
-<summary>❌ 版本低于 20 或提示 command not found，点这里</summary>
+<summary>❌ 版本低于 22 或提示 command not found，点这里</summary>
 
 推荐用 nvm 安装，不污染系统环境：
 
@@ -30,11 +30,11 @@ v22.11.0
 # macOS / Linux
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
 # 重开终端后执行
-nvm install 20
-nvm use 20
+nvm install 22
+nvm use 22
 ```
 
-Windows 用户：到 [nodejs.org](https://nodejs.org/) 下载 20 LTS 安装包，一路下一步。
+Windows 用户：到 [nodejs.org](https://nodejs.org/) 下载 22 LTS 安装包，一路下一步。
 
 装完重新执行 `node -v` 确认。
 </details>

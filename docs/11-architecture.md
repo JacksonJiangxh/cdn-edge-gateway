@@ -286,10 +286,11 @@ const originResp = await requestWithFailover(ctx, [pick], rule, effectiveHostHea
 
 ## 9. 构建与运行
 
-- `build.mjs` 三步构建：
+- `build.mjs` 四步构建：
   1. 把 `web/` 打包进 `src/ui.gen.js`（内联兜底，供无静态托管环境）；
   2. 产出 `dist/public/`（HTML 引用外部 `app.css`/`app.js`，供 Pages 静态托管，最省函数额度）；
-  3. 用 esbuild 把 `src/` 打包成单文件 `_worker.js`。
+  3. 用 esbuild 把 `src/` 打包成单文件 `_worker.js`；
+  4. 产物自检（文件完整性 + `_worker.js` 可加载 + 导出面 `onRequest`）。
 - **EdgeOne 单目录收口**：`edge-functions/`（Edge Function 目录，`[[default]].js` Catch-all 薄壳加载 `_worker.js`，承载数据面 + 管理面 HTML/静态 + `/__panel/api/*` 全部动态请求）、`dist/public/`（静态托管）。全部共用同一份 `_worker.js` 与 KV 命名空间。新版 Makers 下 `edgeone.json` 不写 `routes`，静态与函数冲突时静态优先。
 - **Cloudflare 单 runtime**：`_worker.js` 一体运行（数据面 + 管理面），`dist/public` 由 CF Pages 静态托管时管理 UI 走边缘缓存零函数次；直接粘贴 Worker 时自动回退内联 HTML。
 - **改任何源码后必须重跑 `npm run build`**，否则线上/本地跑的还是旧产物。
