@@ -393,7 +393,7 @@
         })(),
       ]),
     ]));
-    wrap.appendChild(el('p', { class: 'hint' }, '以下为请求从入口到客户端的完整处理顺序。点击任意阶段可跳转到对应设置；单站点视图下可直接拖拽规则节点调整优先级（顶部规则先匹配）。'));
+    wrap.appendChild(el('p', { class: 'hint' }, '本图是请求从进入网关到返回客户端的真实处理顺序（顺序固定、不可更改）。每个环节卡片说明「流量走到这一步在干什么」；有可干预配置项的环节（① 站点 / ② 安全 / ③ 源站 / ④ 规则 / ⑥ cacheGen / ⑧ 源站池）点击可编辑，无配置项的环节（⑤⑦⑨⑩⑪⑫）为纯只读。规则引擎统一在 ④ 一个环节编辑——规则上的各类动作会分别作用到后续真实环节（回源改写→⑧、响应头→⑩、缓存策略→⑪），但前端不拆分规则。'));
 
     const hostSel = $('select', wrap);
     const flow = el('div', { class: 'seq-flow' });
@@ -414,7 +414,8 @@
       if (a.followRedirect) subs.push('回源跟随3xx');
       if (a.originTimeoutMs) subs.push(`回源超时${a.originTimeoutMs}ms`);
       const cp = a.cache || {};
-      if (cp.enabled) subs.push('缓存');
+      if (cp && cp.mode === 'noCache') subs.push('不缓存');
+      else if (cp && cp.enabled) subs.push('缓存');
       const rh = a.reqHeaders || {};
       if (rh.set && Object.keys(rh.set).length || (rh.remove || []).length) subs.push('改请求头');
       const rph = a.respHeaders || {};
@@ -490,72 +491,56 @@
         site.poolId ? '已配置' : '未配置', 'sec-origin',
         () => openInitialOriginDrawer(site.host, 'sec-origin'), '初始回源对象抽屉 · 源站方式'));
 
-      // ── ④ 匹配规则：规则本体 + 按 action 细分的最小任务包 ────────
-      flow.appendChild(seqGroup('④', '匹配规则 matchRule', 'ctx.origin 已就绪，可匹配 origin / originAddr 维度'));
-      if (!rules.length) {
-        flow.appendChild(seqStage('📜', '④.1 站点自身规则匹配',
-          '尚未添加任何规则，整站直接回源到 ③ 选出的初始回源对象', '未配置', 'sec-rules',
-          () => openRulesDrawer(site.host), '路由规则抽屉'));
-      } else {
-        rules.forEach((r, i) => {
-          const condCount = (r.match && r.match.conditions || []).reduce((n, g) => n + g.length, 0)
-            + Object.keys(legacyMatchFields(r.match || {})).length;
-          const node = seqRule(r, ruleSubs(r), condCount, site.host, draggable);
-          if (draggable) ruleNodes.push({ node, index: i });
-          flow.appendChild(node);
-        });
+      // ── ④ 匹配规则（规则引擎环节，唯一一个规则编辑入口）──────────
+      // ④ 就是「匹配规则」这一个真实环节：引擎按 priority 降序逐条匹配，命中即停。
+      // 一条规则上挂的各类 action（改请求头 / 改路径 / 改 Host / 改源站 / 改响应头 / 缓存策略）
+      // 都属于「这条规则」，编辑入口只有这一个 ④ 卡片里的规则编辑器——它们分别作用到后续
+      // 真实环节（回源请求、响应、写缓存），但前端不把它们拆成 ④.3~④.8 等子环节。
+      flow.appendChild(seqGroup('④', '匹配规则 matchRule（规则引擎）', '引擎按 priority 降序逐条匹配，命中即停。规则上的所有 action 在此统一编辑，并分别在后续真实环节生效：回源改写→⑧、响应头→⑩、缓存策略→⑪。'));
+      const hasGlobal = true; // 全站通用规则始终存在（兜底）
+      flow.appendChild(seqStage('📜', '④ 匹配规则（本站 + 全站兜底）',
+        rules.length
+          ? `${rules.length} 条本站规则按优先级从上到下匹配；另有全站通用规则兜底（站点未命中时回落）。点击编辑任意规则及其全部 action。`
+          : '本站尚未添加任何规则，整站直接回源到 ③ 选出的初始源站；全站通用规则仍作为兜底生效。',
+        rules.length ? `${rules.length} 条` : '仅兜底', 'sec-rules',
+        () => openRulesDrawer(site.host), '路由规则抽屉（编辑全部规则与 action）'));
+      // 命中规则列表（按优先级降序）挂在本环节卡片下，可拖拽调整优先级。
+      if (rules.length) {
+        flow.appendChild(el('div', { class: 'seq-rule-list' },
+          rules.map((r) => {
+            const condCount = (r.match && r.match.conditions || []).reduce((n, g) => n + g.length, 0)
+              + Object.keys(legacyMatchFields(r.match || {})).length;
+            const idx = rules.indexOf(r);
+            const node = seqRuleInPack(r, ruleSubs(r), condCount, site.host, draggable);
+            if (draggable && idx >= 0) ruleNodes.push({ node, index: idx });
+            return node;
+          })));
       }
-      // ④.2 全站通用规则：归属「全站」统一管理，站点不应越界编辑全站规则。
-      // 这里不再在站点上下文打开编辑器，而是直接跳转到全站自身的抽屉（#/sequence?host=__global__），
-      // 避免误操作把站点级改动写到全站规则上。
-      flow.appendChild(seqStage('🌐', '④.2 全站通用规则兜底',
-        '由全站统一管理（任何站点共享）；站点自身规则未命中时回落，仍未命中则 rule=null 直接回源',
-        '全站', null, () => { location.hash = '#/sequence?host=__global__'; }, '全站通用规则抽屉（全站统一管理，点击前往）'));
 
-      // ④.3 ~ ④.8：按 action 类别聚合，统计有多少条规则用到该动作。
-      // 每个子包只暴露自己这一类的操作（allowedOps），禁止在「回源改写·路径」抽屉里
-      // 添加「修改请求头」等越界动作——一个最小任务包一个抽屉，互不越界。
-      const cnt = (fn) => rules.filter((r) => { try { return fn(r.action || {}); } catch { return false; } }).length;
-      const RULE_PACKS = {
-        '4.3': { title: '④.3 终止型动作（命中后、回源前）', owner: '路由规则抽屉 · 终止型动作', allowedOps: ['forceHttps', 'redirect', 'directResponse'], match: (a) => a.forceHttps || (a.redirect && a.redirect.enabled) || (a.directResponse && a.directResponse.enabled) },
-        '4.4': { title: '④.4 修改请求头', owner: '路由规则抽屉 · 请求头', allowedOps: ['reqHeaders'], hideTargetPool: true, match: (a) => { const h = a.reqHeaders || {}; return (h.set && Object.keys(h.set).length) || (h.remove || []).length; } },
-        '4.5': { title: '④.5 回源改写 · 路径', owner: '路由规则抽屉 · 路径重写', allowedOps: ['rewrite'], hideTargetPool: true, match: (a) => a.rewrite && a.rewrite.type && a.rewrite.type !== 'none' },
-        '4.6': { title: '④.6 回源改写 · Host', owner: '路由规则抽屉 · 回源 Host', allowedOps: ['hostHeader'], hideTargetPool: true, match: (a) => a.hostHeader && a.hostHeader.mode && a.hostHeader.mode !== 'accel' },
-        '4.7': { title: '④.7 回源改写 · 候选源站', owner: '路由规则抽屉 · 候选源站', allowedOps: [], match: (a) => a.poolId || (a.inlineOrigins || []).length },
-        '4.8': { title: '④.8 响应与缓存类动作', owner: '路由规则抽屉 · 响应与缓存', allowedOps: ['respHeaders', 'cache', 'clientIp', 'originTimeout', 'followRedirect'], hideTargetPool: true, match: (a) => { const h = a.respHeaders || {}; return (a.cache && a.cache.enabled) || (h.set && Object.keys(h.set).length) || (h.remove || []).length || (a.clientIpHeader && a.clientIpHeader.enabled) || a.originTimeoutMs || a.followRedirect; } },
-      };
-      Object.entries(RULE_PACKS).forEach(([key, p]) => {
-        const pred = p.match;
-        const n = cnt(pred);
-        flow.appendChild(seqStage(key === '4.7' ? '🔀' : (key === '4.3' ? '🛑' : (key === '4.4' ? '📤' : (key === '4.5' ? '✂️' : (key === '4.6' ? '🏷️' : '📥')))), p.title,
-          n ? `${n} 条规则使用了该动作` : `无规则使用该动作`,
-          n ? `${n} 条` : '未使用', 'sec-rules',
-          () => openRulesDrawer(site.host, p), p.owner));
-      });
-
-      // ── ⑤ 确定实际源站池 ───────────────────────────────────────
+      // ── ⑤ 确定实际源站池（运行时推导，纯只读）──────────────────
       const ovrPool = rules.find((r) => r.action && r.action.poolId);
-      flow.appendChild(seqGroup('⑤', '确定实际源站', '沿用 ③ 首要分流结果，或被 ④.7 规则覆盖'));
+      flow.appendChild(seqGroup('⑤', '确定实际源站', '沿用 ③ 首要分流结果，或被 ④ 中「改候选源站」类规则覆盖（运行时推导，无独立配置项）'));
       flow.appendChild(seqStage('🧭', '⑤ 实际源站',
         ovrPool ? `存在规则覆盖 → ${poolName(ovrPool.action.poolId)}（命中该规则时生效）` : `无规则覆盖 → 沿用 ③ 的 ${site.poolId ? poolName(site.poolId) : '未配置'}`,
-        '推导', null, null, '由 ③ + ④.7 推导，无独立抽屉'));
+        '推导', null, null, null));
 
-      // ── ⑥ 缓存键 & 缓存开关 ────────────────────────────────────
-      const hasCache = rules.some((r) => r.action && r.action.cache && r.action.cache.enabled);
-      flow.appendChild(seqGroup('⑥', '缓存键 & 缓存开关', 'policy = 默认 < 源站级 cache < 规则级 action.cache'));
+      // ── ⑥ 缓存键 & 缓存开关（可干预：站点 cacheGen）────────────
+      const cacheRules = rules.filter((r) => r.action && r.action.cache && (r.action.cache.enabled || r.action.cache.mode === 'noCache'));
+      const hasCache = cacheRules.some((r) => r.action.cache.enabled);
+      flow.appendChild(seqGroup('⑥', '缓存键 & 缓存开关', '合并 policy = 默认 < 源站级 cache < 规则级 action.cache。本环节可干预项：站点 cacheGen（代次）。'));
       flow.appendChild(seqStage('🔖', '⑥ 合并缓存策略 & 构造缓存键',
-        hasCache ? `${rules.filter((r) => r.action && r.action.cache && r.action.cache.enabled).length} 条规则启用节点缓存 · cacheGen=${site.cacheGen || 0}` : `未启用规则级缓存 · cacheGen=${site.cacheGen || 0}`,
-        '推导', null, null, '由 ④.8 缓存策略 + 源站 cache + 站点 cacheGen 合并'));
+        `规则缓存动作 ${cacheRules.length} 条 · 站点 cacheGen=${site.cacheGen || 0}${hasCache ? '（已启用节点缓存）' : ''}`,
+        '推导', null, () => openSiteDrawer(site.host, 'sec-basic'), '站点基础抽屉（调整 cacheGen 等）'));
 
-      // ── ⑦ 查边缘缓存 ───────────────────────────────────────────
+      // ── ⑦ 查边缘缓存（运行时，纯只读）──────────────────────────
       flow.appendChild(seqStage('⚡', '⑦ 查边缘缓存 cacheMatch',
-        '命中则直接返回（响应头 X-Cache: HIT），未命中继续 ⑧ 回源',
-        '运行时', null, null, '运行时行为，无独立抽屉'));
+        '命中则直接返回（响应头 X-Cache: HIT），未命中继续 ⑧ 真正回源。运行时行为，无配置项。',
+        '运行时', null, null, null));
 
-      // ── ⑧ 回源循环 ─────────────────────────────────────────────
+      // ── ⑧ 回源循环（此时才真正发出回源请求；可干预：源站/池）────
       const pool = APP_DATA.pools.find((p) => p.id === ((ovrPool && ovrPool.action.poolId) || site.poolId));
       const fo = (pool && pool.failover) || {};
-      flow.appendChild(seqGroup('⑧', '回源循环 requestWithFailover', '逐个源站尝试；每个源站可有自己的 pathPrefix / Host / 头 / 超时'));
+      flow.appendChild(seqGroup('⑧', '回源循环 requestWithFailover（真正发出回源请求）', '逐个源站尝试；④ 中规则的回源改写（路径/Host/候选源站）在此对每个源站落地。可干预：源站地址、策略、故障转移。'));
       flow.appendChild(seqStage('🗄️', '⑧ 源站与故障转移',
         pool
           ? (poolKind(pool) === 'single'
@@ -567,10 +552,10 @@
         pool ? '源站抽屉' : '初始回源对象抽屉 · 源站方式'));
 
       const subSteps = [
-        ['⑧.1 合并本源站配置', '源站级打底、规则级覆盖，形成「回源改写」输入'],
-        ['⑧.2 构造回源 URL', '回源改写 · path / addr / port / host'],
-        ['⑧.3 构造回源请求头', 'buildOriginHeaders：源站 extraHeaders + 规则 reqHeaders + 客户端IP'],
-        ['⑧.4 选择引擎并发起', 'fetch / socket 引擎按源站配置分派'],
+        ['⑧.1 合并本源站配置', '源站级打底 + ④ 规则级覆盖，形成回源改写输入'],
+        ['⑧.2 构造回源 URL', '落实 ④ 中规则的路径 / Host 改写'],
+        ['⑧.3 构造回源请求头', '源站 extraHeaders + ④ 中规则的请求头改写 + 客户端IP'],
+        ['⑧.4 选择引擎并发起', 'fetch / socket 引擎按源站配置分派（真正发请求）'],
         ['⑧.5 处理响应 / 异常', '命中 retryOn 状态码或异常 → 换下一源站'],
       ];
       flow.appendChild(el('div', { class: 'seq-substeps' },
@@ -579,17 +564,19 @@
           el('span', { class: 'seq-substep-d', text: d }),
         ]))));
 
-      // ── ⑨ / ⑩ / ⑪ / ⑫ ─────────────────────────────────────────
-      flow.appendChild(seqGroup('⑨-⑫', '响应加工 & 回写', 'clone → 改写响应头 → 写缓存 → 统计'));
+      // ── ⑨ / ⑩ / ⑪ / ⑫ 回源后加工（⑩/⑪ 受 ④ 规则 action 影响）──
+      flow.appendChild(seqGroup('⑨-⑫', '回源后：响应加工 & 回写', 'clone → 应用 ④ 规则的响应头 → 应用 ④ 规则的缓存策略写缓存 → 统计。'));
       flow.appendChild(seqStage('🧬', '⑨ clone 原始响应',
-        'cacheKey 已在 ⑥ 固定，不随 ⑧ 换源变化', '运行时', null, null, '运行时行为，无独立抽屉'));
+        'cacheKey 已在 ⑥ 固定，不随 ⑧ 换源变化。运行时行为。', '运行时', null, null, null));
       flow.appendChild(seqStage('📥', '⑩ 改写响应头 buildClientHeaders',
-        '按实际成功源站重算 policy，并应用 ④.8 的规则级 respHeaders', '运行时', null, null, '随 rules 落库'));
+        hasCache || cacheRules.length ? '应用 ④ 中规则的响应头改写（回源响应返回用户前才改），并按实际成功源站重算 policy。' : '未配置规则响应头改写，仅注入品牌头。运行时行为。',
+        '运行时', null, null, null));
       flow.appendChild(seqStage('💾', '⑪ 写边缘缓存',
-        hasCache ? '按 ⑥ 的 cacheKey 与合并后的 policy 写入' : '未启用缓存，跳过写入', '运行时', null, null, '随 rules / pool 落库'));
+        hasCache ? '应用 ④ 中规则的缓存策略，按 ⑥ 的 cacheKey 写入。' : '未启用缓存，跳过写入。',
+        '运行时', null, null, null));
       flow.appendChild(seqStage('👤', '⑫ 响应 & 最终用户',
-        '统一注入品牌响应头 Server: EdgeGateway、Via: 1.1 EdgeGateway，并记录统计',
-        '固定', null, null, '固定行为'));
+        '统一注入品牌响应头 Server: EdgeGateway、Via: 1.1 EdgeGateway，并记录统计。固定行为。',
+        '固定', null, null, null));
 
       return { ruleNodes, rules };
     }
@@ -716,35 +703,36 @@
         el('div', { class: 'seq-summary', text: summary }),
         owner ? el('div', { class: 'seq-owner', text: '归属：' + owner }) : null,
       ]),
-      onClick ? el('div', { class: 'seq-go', text: '打开设置 →' }) : null,
+      onClick ? el('div', { class: 'seq-go', text: '前往设置 →' }) : null,
     ]);
     if (onClick) node.onclick = onClick;
     return node;
   }
 
-  // 流量序列：规则节点（可含子阶段）。draggable=true 时显示拖拽手柄并支持拖拽排序
-  function seqRule(rule, subs, condCount, host, draggable) {
+  // 流量序列：挂在 ④ 规则引擎环节下的具体规则节点。点击打开规则编辑器
+  // （整条规则及其所有 action 都在此编辑，不按 action 类型拆子环节）。
+  // draggable=true 时整体可拖拽（手柄 + draggable 属性），用于调整优先级。
+  function seqRuleInPack(rule, subs, condCount, host, draggable) {
     const a = rule.action || {};
     const head = el('div', { class: 'seq-rule-head' }, [
       draggable ? el('span', { class: 'seq-grip', title: '拖拽调整优先级', text: '⠿' }) : null,
       el('span', { class: 'seq-rule-prio', text: 'P' + (rule.priority || 0) }),
-      // 优先显示人类可读的规则名（模板生成的规则都带名字）；没有名字才退回机器 id
       el('span', { class: 'seq-rule-name', text: (rule.name || (rule.id ? '#' + rule.id : '规则')) + (a.poolId ? ' → ' + poolName(a.poolId) : '') }),
       el('span', { class: 'seq-badge ' + (rule.enabled === false ? 'off' : 'on'), text: rule.enabled === false ? '停用' : '启用' }),
     ]);
     const sub = el('div', { class: 'seq-subs' },
       (subs.length ? subs : ['（无动作，仅作为匹配占位）']).map((s) => el('span', { class: 'seq-chip', text: s })));
-    const node = el('div', { class: 'seq-stage seq-rule' + (rule.enabled === false ? ' disabled' : '') + (draggable ? ' seq-rule-drag' : '') }, [
-      el('div', { class: 'seq-icon', text: '📜' }),
+    const node = el('div', { class: 'seq-stage seq-rule seq-rule-inpack' + (rule.enabled === false ? ' disabled' : '') + (draggable ? ' seq-rule-drag' : '') }, [
+      el('div', { class: 'seq-icon', text: '↳' }),
       el('div', { class: 'seq-main' }, [
         head,
-        // note 解释「这条规则为什么这么配」，模板生成的规则靠它自我说明
         rule.note ? el('div', { class: 'seq-note muted', text: rule.note }) : null,
         el('div', { class: 'seq-summary', text: `匹配条件：${condCount} 项${condCount ? '（命中即执行下列动作）' : '（匹配全部请求）'}` }),
         sub,
       ]),
-      el('div', { class: 'seq-go', text: draggable ? '编辑规则 →' : '查看/编辑 →' }),
+      el('div', { class: 'seq-go', text: '编辑规则 →' }),
     ]);
+    if (draggable) node.draggable = true;
     node.onclick = () => openRulesDrawer(host);
     return node;
   }
