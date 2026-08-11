@@ -7,13 +7,18 @@
 //   toml 里写死的变量会覆盖远程同名 Secret。
 //
 // 正确做法（已修正）：
-//   绑定（binding）名是固定的代码契约：CDN_KV / CDN_R2 / CDN_DB。
-//   但资源的 id / 桶名 / 库名【不是固定的】——是系统生成或用户自定义的。
-//   所以不能「按资源名猜测」，必须【按 binding 名去拉远程已绑定的真实配置】。
+//   资源 id / 桶名 / 库名【不是固定的】——是系统生成或用户自定义的。
+//   所以不能「按资源名猜测」，必须【按 binding 类型去拉远程已绑定的真实配置】。
 //
-//   本脚本直接调 Cloudflare API 拉取该 Worker 的远程完整配置，提取
-//   binding 名为 CDN_KV / CDN_R2 / CDN_DB 的条目（含真实 id/桶名/库名），
+//   本脚本直接调 Cloudflare API 拉取该 Worker 的远程完整配置，提取所有
+//   KV 命名空间 / R2 桶 / D1 库 绑定（含真实 id/桶名/库名/绑定名），
 //   原样追加进「临时 toml」，使部署保留这些绑定——小白资源随便命名都行。
+//
+//   兼容性说明：
+//     - 服务运行所需的代码契约绑定 CDN_KV / CDN_R2 / CDN_DB 仍会被保留；
+//     - 同时，用户在 Dashboard 额外绑定的任何 KV / R2 / D1（如多 R2 桶
+//       BUCKET_A / BUCKET_B）也会一并保留，避免 wrangler deploy 的全量覆盖
+//       把它们清空。运行时按源站配置的 r2Binding 名从 env 动态取桶。
 //
 //   变量 ADMIN_PATH：本脚本【刻意不处理】。adminPath 的生效值是
 //   「KV 中管理面保存的值 > 内置默认 __panel」，部署时用内置默认兜底，
@@ -34,10 +39,13 @@ const ROOT = process.cwd();
 const BASE_TOML = `${ROOT}/wrangler.toml`;
 const OUT_TOML = `${ROOT}/wrangler.deploy.toml`;
 
-const TARGET_BINDINGS = {
-  kv_namespace: { binding: "CDN_KV", key: "namespace_id", toField: "id" },
-  r2_bucket: { binding: "CDN_R2", key: "bucket_name", toField: "bucket_name" },
-  d1: { binding: "CDN_DB", key: "id", toField: "database_id" },
+// 各绑定类型的字段映射：key 是远程 API 返回的取值字段，toField 是写入 toml 的字段名。
+// 注意：这里不再绑定「具体 binding 名」，而是按「类型」保留该类型下【全部】远程绑定，
+// 使 CDN_KV/CDN_R2/CDN_DB（代码契约）与用户在 Dashboard 额外绑定的 KV/R2/D1 都能安全存活。
+const TARGET_TYPES = {
+  kv_namespace: { key: "namespace_id", toField: "id" },
+  r2_bucket: { key: "bucket_name", toField: "bucket_name" },
+  d1: { key: "id", toField: "database_id" },
 };
 
 // ---- 读根 toml 的 name（script 名）----
@@ -109,43 +117,52 @@ function fetchRemoteBindings(scriptName) {
 let toml = readFileSync(BASE_TOML, "utf8");
 toml = toml.replace(/\n# === AUTO-APPENDED-BINDINGS[\s\S]*$/u, "");
 
-// ---------- 2. 按 binding 名拉远程真实绑定 ----------
+// ---------- 2. 按类型拉远程真实绑定（保留该类型下全部绑定） ----------
 const scriptName = getScriptName();
 const remote = fetchRemoteBindings(scriptName);
 const appended = [];
+// 同一类型的多个绑定名去重，避免同一绑定被重复写入 toml
+const seen = new Set();
 
-for (const [type, spec] of Object.entries(TARGET_BINDINGS)) {
-  const hit = remote.find((b) => b.type === type && b.name === spec.binding);
-  if (!hit) continue;
-  const value = hit[spec.key];
-  if (!value) continue;
+for (const [type, spec] of Object.entries(TARGET_TYPES)) {
+  // 遍历远程该类型的全部绑定（不再限定固定 binding 名）
+  for (const hit of remote.filter((b) => b.type === type)) {
+    const bindingName = hit.name;
+    if (!bindingName) continue;
+    if (seen.has(`${type}:${bindingName}`)) continue;
+    const value = hit[spec.key];
+    if (!value) continue;
+    seen.add(`${type}:${bindingName}`);
 
-  if (type === "kv_namespace") {
-    toml += `
-# === AUTO-APPENDED-BINDINGS (CI 按远程 binding 名提取，勿手改) ===
+    if (type === "kv_namespace") {
+      toml += `
+# === AUTO-APPENDED-BINDINGS (CI 按远程绑定提取，勿手改) ===
 [[kv_namespaces]]
-binding = "${spec.binding}"
+binding = "${bindingName}"
 id = "${value}"
 `;
-  } else if (type === "r2_bucket") {
-    // jurisdiction 是 CF 后台给 R2 绑定默认附加的字段（如 default / eu / fedramp）。
-    // 远程读取时原样保留，否则 wrangler deploy 对比时会产生空 {} diff warning
-    // （功能不受影响，但会误导用户以为绑定有问题）。
-    const jur = hit.jurisdiction ? `jurisdiction = "${hit.jurisdiction}"\n` : "";
-    toml += `
+    } else if (type === "r2_bucket") {
+      // jurisdiction 是 CF 后台给 R2 绑定默认附加的字段（如 default / eu / fedramp）。
+      // 远程读取时原样保留，否则 wrangler deploy 对比时会产生空 {} diff warning
+      // （功能不受影响，但会误导用户以为绑定有问题）。
+      const jur = hit.jurisdiction ? `jurisdiction = "${hit.jurisdiction}"\n` : "";
+      toml += `
 [[r2_buckets]]
-binding = "${spec.binding}"
+binding = "${bindingName}"
 ${jur}${spec.toField} = "${value}"
 `;
-  } else if (type === "d1") {
-    const dbName = hit.database_name ? `database_name = "${hit.database_name}"\n` : "";
-    toml += `
+    } else if (type === "d1") {
+      const dbName = hit.database_name ? `database_name = "${hit.database_name}"\n` : "";
+      toml += `
 [[d1_databases]]
-binding = "${spec.binding}"
+binding = "${bindingName}"
 ${dbName}${spec.toField} = "${value}"
 `;
+    }
+    // 隐私保护：只记录绑定名（CDN_KV / CDN_R2 / BUCKET_A 等用户自定义标识符），
+    // 【绝不】把资源真实值（KV namespace id / R2 桶名 / D1 database id）打进 CI 日志。
+    appended.push(bindingName);
   }
-  appended.push(`${spec.binding} → ${value}`);
 }
 
 // ---------- 3. ADMIN_PATH：刻意不传 ----------
@@ -162,8 +179,8 @@ writeFileSync(OUT_TOML, toml);
 console.log(`✓ 已生成临时配置: ${OUT_TOML}`);
 console.log(
   appended.length
-    ? `✓ 按 binding 名提取到远程绑定: ${appended.join(", ")}`
-    : "⚠ 远程未探测到 CDN_KV/CDN_R2/CDN_DB 绑定（请先在 Dashboard 创建并绑定，binding 名须为 CDN_KV/CDN_R2/CDN_DB）"
+    ? `✓ 已保留 ${appended.length} 个 KV/R2/D1 绑定（绑定名: ${appended.join(", ")}；资源 ID 已隐藏不打印）`
+    : "⚠ 远程未探测到任何 KV/R2/D1 绑定（请先在 Dashboard 创建并绑定，服务运行必需 CDN_KV/CDN_R2/CDN_DB）"
 );
 
 // ⚠️ 注意：不要在脚本内注册 process.on("exit", unlinkSync(...))。
