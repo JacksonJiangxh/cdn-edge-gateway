@@ -498,7 +498,8 @@
           () => openRulesDrawer(site.host), '路由规则抽屉'));
       } else {
         rules.forEach((r, i) => {
-          const condCount = (r.match && r.match.conditions || []).reduce((n, g) => n + g.length, 0);
+          const condCount = (r.match && r.match.conditions || []).reduce((n, g) => n + g.length, 0)
+            + Object.keys(legacyMatchFields(r.match || {})).length;
           const node = seqRule(r, ruleSubs(r), condCount, site.host, draggable);
           if (draggable) ruleNodes.push({ node, index: i });
           flow.appendChild(node);
@@ -1255,6 +1256,45 @@
     return { root, read };
   }
 
+  // 旧版快捷条件字段：后端 matcher 仍支持，但编辑器/流量序列只认 conditions。
+  const LEGACY_MATCH_KEYS = ['extIn', 'pathPrefix', 'pathRegex', 'methodIn'];
+
+  // 把旧版快捷条件并入 conditions（用于编辑器展示）。已存在的 conditions 不动，
+  // 旧字段转换为等价的 conditions 条目追加进第 0 个 AND 组。
+  function normalizeMatchForEditor(match) {
+    match = match || {};
+    const groups = Array.isArray(match.conditions) ? match.conditions.map((g) => (Array.isArray(g) ? g.slice() : [])) : [];
+    const first = groups.length ? groups[0] : [];
+    const push = (c) => first.push(c);
+    if (Array.isArray(match.extIn) && match.extIn.length) {
+      push({ target: 'extension', op: 'equal', ignoreCase: true, values: match.extIn.map((e) => String(e).toLowerCase().replace(/^\./, '')) });
+    }
+    if (match.pathPrefix) {
+      push({ target: 'path', op: 'prefix', ignoreCase: true, values: [match.pathPrefix] });
+    }
+    if (match.pathRegex) {
+      push({ target: 'path', op: 'regex', values: [match.pathRegex] });
+    }
+    if (Array.isArray(match.methodIn) && match.methodIn.length) {
+      push({ target: 'method', op: 'equal', values: match.methodIn.map((m) => String(m).toUpperCase()) });
+    }
+    if (first.length) {
+      if (!groups.length) groups.push(first);
+      else groups[0] = first;
+    }
+    return { ...match, conditions: groups };
+  }
+
+  // 提取并回写旧版快捷字段，与 conditions 并存，保证后端匹配语义不丢。
+  function legacyMatchFields(match) {
+    match = match || {};
+    const out = {};
+    for (const k of LEGACY_MATCH_KEYS) {
+      if (match[k] !== undefined && match[k] !== '' && !(Array.isArray(match[k]) && !match[k].length)) out[k] = match[k];
+    }
+    return out;
+  }
+
   // 构建单条规则卡片（可视化规则引擎）
   function buildRuleCard(rule, poolOptions, site, opts) {
     opts = opts || {};
@@ -1275,6 +1315,11 @@
     const poolListId = 'poollist-' + (rule.id || 'new') + '-' + Math.random().toString(36).slice(2, 7);
     const poolSel = el('input', { class: 'input', list: poolListId, value: rule.action.poolId || '', placeholder: '留空=用站点默认源站；或选择本规则专用的源站' });
     const poolDatalist = el('datalist', { id: poolListId }, poolOptions.map((o) => el('option', { value: o.value, label: o.label })));
+    // 旧版快捷条件（extIn / pathPrefix / pathRegex / methodIn）后端仍支持，
+    // 但编辑器与流量序列只认 conditions。打开规则时把旧格式并入 conditions 用于展示，
+    // 保存时原样回写这些旧字段（与 conditions 并存，后端两种都认），不丢匹配语义。
+    const matchForEditor = normalizeMatchForEditor(rule.match || {});
+    rule = { ...rule, match: matchForEditor };
     // 可视化条件编辑器
     const conds = conditionsEditor(rule.match.conditions);
 
@@ -1505,7 +1550,7 @@
       built.node.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
 
-    const actionAddSel = select('', flattenActionOptions(shownGroups), '');
+    const actionAddSel = selectWithGroups(shownGroups, '');
     actionAddSel.className = 'input';
     actionAddSel.addEventListener('change', () => {
       const v = actionAddSel.value;
@@ -1557,6 +1602,9 @@
         enabled: en.checked,
         priority: Number(priority.value) || 0,
         match: {
+          // 保留原始 match 里的旧版快捷字段（extIn / pathPrefix / pathRegex / methodIn），
+          // 与 conditions 并存——后端两种都认，避免任何边界下匹配语义丢失。
+          ...legacyMatchFields(rule.match || {}),
           conditions: conds.read(),
         },
         action,
@@ -2284,12 +2332,17 @@
     const title = confined ? opts.title : '路由规则（规则引擎）: ' + host;
     const headText = confined ? opts.title : '路由规则（规则引擎）';
     const owner = confined ? opts.owner : '路由规则抽屉 · 规则卡片';
+    // 始终把 rulesBox 放进 DOM：否则 shownRules 为空时「+ 添加规则」加进的是
+    // 一个游离节点，界面毫无反应。空状态提示单独放一个节点，按列表是否为空切换。
+    const emptyHint = el('p', { class: 'empty' }, '暂无属于本任务包的规则，点击「+ 添加规则」新建一条。');
+    emptyHint.style.display = shownRules.length ? 'none' : '';
     const body = el('div', { id: 'sec-rules' }, [
       el('div', { class: 'hint' }, confined
         ? '本抽屉只管理「' + opts.title + '」这一最小任务包的规则，只能添加/编辑该包允许的动作类型，不会越界到其它包。保存时只合并 rules 字段。'
         : '按条件把请求路由到不同源站、改写路径、设置回源 Host、请求头、响应头、缓存等。修改不会影响站点基础设置、源站与安全防护。'),
       el('div', { class: 'subhead' }, [el('span', {}, headText), addRuleBtn]),
-      shownRules.length ? rulesBox : el('p', { class: 'empty' }, '暂无属于本任务包的规则，点击「+ 添加规则」新建一条。'),
+      emptyHint,
+      rulesBox,
     ]);
 
     openDrawer(title, '仅管理本站点的路由规则。保存时只合并 rules 字段，互不越界。', body, async () => {
@@ -2950,14 +3003,18 @@
     ]);
   }
 
-  // 将功能分组结构拍平为 <select> 的 optgroup 选项
-  function flattenActionOptions(groups) {
-    const out = [];
+  // 把分组结构渲染成带 <optgroup> 的 <select>：分类名只做分组标题，
+  // 不再作为一个 value='' 的可选项出现在下拉里（以前会误导用户去选「网络优化」）。
+  function selectWithGroups(groups, value) {
+    const sel = el('select', { class: 'input' });
+    sel.appendChild(el('option', { value: '' }, '请选择要添加的操作…'));
     for (const g of groups) {
-      out.push({ value: '', label: `── ${g.group} ──` });
-      for (const it of g.items) out.push(it);
+      const og = el('optgroup', { label: g.group });
+      for (const it of g.items) og.appendChild(el('option', { value: it.value }, it.label));
+      sel.appendChild(og);
     }
-    return out;
+    if (value != null) sel.value = value;
+    return sel;
   }
   function select(id, options, value, preset, extraClass) {
     const opts = preset || options.map((o) => ({ value: o.value != null ? o.value : o, label: o.label != null ? o.label : o }));

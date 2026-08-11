@@ -11,25 +11,29 @@
 
 本服务有两套**互相独立**的平台，二选一，**不要两边都部署**（会状态漂移、难排查）：
 
-- **A. Cloudflare（CF）**：海外节点、生态成熟。下面有 4 种推代码方式（WR / 粘贴 / Pages / 流水线）。
+- **A. Cloudflare（CF）**：海外节点、生态成熟。分两种**形态**：
+  - **Workers 形态**（有 TCP 回源）：用 WR 命令行（A1）/ 粘贴代码（A2）/ 流水线「部署 CF Workers」按钮（A4a）。
+  - **Pages 形态**（无 TCP 回源、最省心）：用 CF Pages（A3）/ 流水线「部署 CF Pages」按钮（A4b）。
 - **B. EdgeOne（EO）**：国内节点，适合业务在国内。只有 1 套 Makers 部署逻辑。
 
-> 同一个服务只选一种方式部署。下面的步骤 **第 1 步～第 4 步是通用的**（建项目、绑 KV、设变量、开缓存），**第 5 步开始才分叉**到「怎么把代码推上去」。
+> 同一个服务只选**一种形态**部署。CF 的 Workers 形态与 Pages 形态是两套独立入口，不要混用（会状态漂移、难排查）。
+> 下面的步骤 **第 1 步～第 4 步是通用的**（建项目、绑 KV、设变量、开缓存），**第 6 步才分叉**到「Workers 形态还是 Pages 形态、怎么把代码推上去」。第 6 步开头有一张对照表帮你决定。
 
 ---
 
 ## 第 1 步：新建项目 / 服务（必须最先做）
 
 > **铁律：先有项目，才能绑 KV、设变量、绑域名。** 项目没建，后面所有设置都「无处安放」。所以这一步排在最前，CF 和 EO 都要先建。
+> **第 1 步的「建什么容器」就决定了形态**：建 **Worker** = 走 Workers 形态（A1/A2/A4a）；建 **Pages 项目** = 走 Pages 形态（A3/A4b）。先想清楚要不要 TCP 回源（见第 6 步对照表），再决定建哪个。
 
 ### 分支 A：Cloudflare
 
-你要先建好一个「承载容器」。按你后面打算怎么推代码，建法略有不同：
+你要先建好一个「承载容器」。按你后面打算走的形态，建法不同：
 
-- **打算用 WR（命令行）或粘贴代码** → 建 **Worker**：
+- **走 Workers 形态（要 TCP 回源 / R2 直连，用 A1/A2/A4a）** → 建 **Worker**：
   Dashboard → **Workers & Pages** → **Create** → **Create Worker** → 起名（如 `edge-cdn`）。
-  记下这个名字，它就是你的服务名。
-- **打算用 CF Pages** → 建 **Pages 项目**：
+  记下这个名字，它就是你的服务名（流水线「部署 CF Workers」按钮也用它）。
+- **走 Pages 形态（纯域名源站、图省心，用 A3/A4b）** → 建 **Pages 项目**：
   Dashboard → **Workers & Pages** → **Create** → **Pages** → **Connect to Git**，先建好 Pages 项目（构建命令 `npm run build`、输出目录 `.`），再往下走。
 
 ### 分支 B：EdgeOne
@@ -177,11 +181,31 @@ KV 中管理面保存的值  >  内置默认 __panel
 
 ## 第 6 步：把代码推上去（这里是分叉点，选一条路）
 
-前面 1–5 步已把「容器 + 配置」备好，现在只差「怎么把代码放进去」。按你的平台选：
+前面 1–5 步已把「容器 + 配置」备好，现在只差「怎么把代码放进去」。
 
-### 分支 A：Cloudflare —— 再选 4 种推法之一
+### 📌 CF 两种部署形态先分清（决定你有没有 TCP 回源能力）
 
-#### A1. WR（命令行部署，首选）
+Cloudflare 上有两条**互相独立**的部署形态，能力差异很大，**别混**：
+
+| 维度 | **CF Workers 形态** | **CF Pages 形态** |
+|---|---|---|
+| 入口 | 单个 Worker（`_worker.js`），`wrangler deploy` 推上去 | Pages 项目（Git 构建），走 Pages Functions |
+| **TCP Socket 回源** | ✅ 支持（`engine=socket`，裸 IP / 非标端口 / 自定义 Host + SNI） | ❌ 不支持，只能域名源站自动 Host，自动降级 fetch |
+| R2 直连回源 | ✅ 支持（`engine=r2`） | ❌ 不支持 |
+| KV/D1 绑定 | 在 Dashboard 绑，部署脚本自动保留（见 A1/A4a） | 在 Dashboard 绑，Pages 不读 toml，无覆盖风险 |
+| 静态资产（管理面省额度） | 用 `wrangler.toml` 的 `[assets]` Static Assets | 由 Pages 静态托管 `dist/public/` |
+| **适用** | 需要裸 IP / 自定义 Host / R2 回源 | 想 Git 自动构建、最省心、纯域名源站 |
+| 对应本篇分支 | **A1（WR）/ A2（粘贴）/ A4a（流水线 Workers 按钮）** | **A3（CF Pages）/ A4b（流水线 Pages 按钮）** |
+
+> 一句话：**要 TCP 回源（裸 IP / 自定义 Host / 非标端口）就选 Workers 形态（A1/A2/A4a）；只做域名源站、图省心就选 Pages 形态（A3/A4b）。**
+> 部署后都可在管理面「系统设置」核对：`运行平台` 应为 `workers` 或 `pages`，`TCP Socket` 列与之对应（Workers=可用，Pages=不可用属正常）。
+> ⚠️ 若选了 **Workers 形态却显示 `运行平台: pages` / `TCP Socket 不可用`**，是旧代码误判（见 [08 FAQ](./08-faq.md)），更新到最新代码重部署即可，不是你选错了路。
+
+### 分支 A：Cloudflare —— 选 Workers 形态还是 Pages 形态
+
+#### A1. WR 命令行部署 →【CF Workers 形态，首选】
+
+> 适用：需要 TCP 回源 / R2 直连，或就想用命令行一把梭。**这是 Workers 形态**，部署后系统设置应显示 `运行平台: workers`、`TCP Socket: 可用`。
 
 Worker 项目已在第 1 步建好。本机执行：
 
@@ -206,12 +230,14 @@ Published edge-cdn (x.xx sec)
   https://edge-cdn.<你的子域>.workers.dev
 ```
 
-> 流水线 / CI 不用 `wrangler login`（服务器无人点浏览器），改用 `CLOUDFLARE_API_TOKEN`，见分支 A4；流水线已内置同样的「生成临时 toml」步骤。
+> 流水线 / CI 不用 `wrangler login`（服务器无人点浏览器），改用 `CLOUDFLARE_API_TOKEN`，见分支 A4a；流水线已内置同样的「生成临时 toml」步骤。
 > 报错 `No such compatibility flag`：确认 `compatibility_flags` 只有 `["nodejs_compat"]`（不要加 `sockets`）。
 > 报错 `unknown field cache`：说明 `compatibility_date` 过旧，本仓库已升到 `2026-08-11`，保持同步即可。
 > 后续更新代码只需 `npm run deploy:cf`，不影响已绑定的存储、域名、Secrets。
 
-#### A2. 粘贴代码（不想装命令行，无静态资产）
+#### A2. 粘贴代码 →【CF Workers 形态，无静态资产】
+
+> 适用：不想装命令行。**仍是 Workers 形态**，支持 TCP 回源；只是不上传 `dist/public/`，管理面走内联兜底。
 
 1. 本地 `npm run build` 生成 `_worker.js`，全选复制其内容。
 2. Dashboard → **Workers & Pages** → 打开第 1 步建的 Worker → **Edit code**，删默认内容、粘贴 `_worker.js` → **Deploy**。
@@ -219,7 +245,9 @@ Published edge-cdn (x.xx sec)
 
 > 粘贴方式不上传 `dist/public/`，管理面自动回退内置内联资源，功能一致，仅每次访问管理面多一次函数调用（频率低，几乎无感）。**仍是 Workers，支持 TCP 回源**。
 
-#### A3. CF Pages（回退，不支持 TCP 回源）
+#### A3. CF Pages →【CF Pages 形态，不支持 TCP 回源】
+
+> 适用：想 Git 推送自动构建、最省心，**纯域名源站**。⚠️ 这是 **Pages 形态**，先天**无 `cloudflare:sockets`**，管理面系统设置会显示 `运行平台: pages`、`TCP Socket: 不可用（降级 fetch）`——**属正常，不是故障**。裸 IP / 自定义 Host / 非标端口源站场景请勿选此形态，改用 A1/A2/A4a（Workers 形态）。
 
 项目已在第 1 步建好（Connect to Git 那一步）。
 
@@ -232,18 +260,18 @@ Published edge-cdn (x.xx sec)
 
 > ⚠️ CF Pages **不支持 `cloudflare:sockets`**，即无 TCP 回源能力，裸 IP / 自定义 Host / 非标端口源站场景不适用；有静态托管但走 Pages Functions。
 
-#### A4. 流水线（CI/CD，GitHub 或 CNB）
+#### A4. 流水线（CI/CD，GitHub 或 CNB）→ 分 Workers / Pages 两个按钮
 
-源码同时托管在 GitHub 与 CNB，各有一套**手动**流水线（零自动触发，必须人工点击发起，杜绝生产错乱）。
+源码同时托管在 GitHub 与 CNB，各有一套**手动**流水线（零自动触发，必须人工点击发起，杜绝生产错乱）。流水线里 CF 相关有**两个独立按钮**，分别对应上面的 Workers 形态与 Pages 形态：
 
-**先准备 2 个部署凭据**（运行时密钥 `ADMIN_PASSWORD`/`JWT_SECRET` **不进流水线**，它们已在第 4 步设好；`ADMIN_PATH` 不是变量、由管理面存 KV，无需在此准备）：
+**先准备部署凭据**（运行时密钥 `ADMIN_PASSWORD`/`JWT_SECRET` **不进流水线**，它们已在第 4 步设好；`ADMIN_PATH` 不是变量、由管理面存 KV，无需在此准备）：
 
 | 字段 | 用途 | 怎么来 |
 |---|---|---|
 | `CLOUDFLARE_API_TOKEN` | CF Workers / Pages 部署 | CF 控制台生成，需 `Workers Scripts:Edit` 或 `Cloudflare Pages:Edit` 权限 |
 | `CLOUDFLARE_ACCOUNT_ID` | CF 账户 ID | 右侧账号信息里复制 |
 | `EO_SECRET` | EO Pages 部署 | EO 控制台生成的密钥 |
-| `CF_PAGES_PROJECT` | 可选，CF Pages 项目名 | 默认 `cdn-edge-gateway` |
+| `CF_PAGES_PROJECT` | 可选，仅「部署 CF Pages」按钮用，CF Pages 项目名 | 默认 `cdn-edge-gateway` |
 | `EO_PAGES_PROJECT` | 可选，EO Pages 项目名 | 默认 `cdn-edge-gateway` |
 
 **GitHub 怎么设**（仓库 → **Settings → Secrets and variables → Actions**）：
@@ -256,15 +284,31 @@ Published edge-cdn (x.xx sec)
 
 - 建一个密钥仓库（如 `cdn-edge-gateway.yml`），只放上面那 5 个**部署凭据**，由 `.cnb.yml` 的 `imports` 导入。
 - 字段与 GitHub 完全一致（一份密钥文件两边共用）。
-- 在 `.cnb/web_trigger.yml` 声明后，仓库页会渲染按钮：构建校验 / 部署 CF Workers / 部署 CF Pages / 部署 EO Pages，点击触发。
+- 在 `.cnb/web_trigger.yml` 声明后，仓库页会渲染按钮：构建校验 / **部署 CF Workers** / **部署 CF Pages** / 部署 EO Pages，点击触发。
+
+##### A4a. 部署 CF Workers（按钮）→【Workers 形态，有 TCP 回源】
+
+> 点「🚀 部署 CF Workers」按钮 = 与 A1 等价的线上版：`node scripts/gen-deploy-config.mjs` 生成临时 toml → `wrangler deploy`。**有 TCP 回源能力**。
+
+**📌 该按钮已内置「不覆盖远程绑定」保护**：在 `npx wrangler deploy` 之前会先跑 `scripts/gen-deploy-config.mjs`，按 binding 名拉取你在 Dashboard 已绑定的 KV/R2/D1 真实配置并写进一次性 `wrangler.deploy.toml`，部署完即删。所以**点此按钮前，请务必先在 Dashboard 把 KV/R2/D1 绑好（binding 名须为 `CDN_KV`/`CDN_R2`/`CDN_DB`）**，否则部署会清空这些绑定（脚本会打印 `⚠ 未探测到 ... 绑定` 提醒你）。
+
+> ⚠️ 若系统设置显示「运行平台 pages」、TCP Socket 不可用：这是旧代码的平台探测误判（把 Workers 的 Static Assets 绑定 `ASSETS` 错当成 Pages），**不是你点错了按钮**。修复已合入最新代码，只需「把仓库更新到最新 → 重新点一次本按钮」即可恢复（`caps.js` 改用 `CF_PAGES` 等 Pages 专属变量区分，不再凭 `ASSETS` 绑定误判）。详见 [08 FAQ](./08-faq.md)。
+
+##### A4b. 部署 CF Pages（按钮）→【Pages 形态，无 TCP 回源】
+
+> 点「🚀 部署 CF Pages」按钮 = 等价于 A3 的线上版：`wrangler pages deploy .`。**无 TCP 回源能力**（Pages 形态固有，部署后系统设置显示 `运行平台: pages`、`TCP Socket 不可用` 属正常）。适合纯域名源站、图 Git 自动构建。
+
+- 部署前需在第 1 步建好 **Pages 项目**并在第 3–4 步完成 KV/变量绑定（Pages 不读 `wrangler.toml` 的存储绑定段，绑定在 Dashboard 设）。
+- 按钮输入框 `cf_pages_project` 留空则用密钥仓库的 `CF_PAGES_PROJECT`，再无则用 `cdn-edge-gateway`；`cf_pages_branch` 填 `main` 即 production，填其他值创建预览部署。
+
+> **CF Pages / EO Pages 路线不受影响**：`wrangler pages deploy .` 与 `edgeone makers deploy .` 不读取 `wrangler.toml` 的存储绑定段，其 KV/R2/D1 绑定在各自 Dashboard 设，不会被 toml 覆盖；这两路的变量也在 Dashboard 设，不存在 `ADMIN_PATH` 被 toml 覆盖的问题。只有 **CF Workers 路线（A1/A2/A4a）** 需要临时 toml 机制。
+
+##### 流水线通用说明
 
 > EO 流水线路径：CNB 用 `tencentcom/deploy-eopages` 镜像，GitHub 用 `npx edgeone makers deploy`，部署目录为仓库根 `.`，均只手动触发、支持 preview/production。若已在 EO 控制台连 Git 自动构建，请关掉自动构建以守住「禁止自动部署」约束。
-
-**📌 Workers 流水线已内置「不覆盖远程绑定」保护**：`web_trigger_deploy_cf_workers` 按钮在 `npx wrangler deploy` 之前会先跑 `scripts/gen-deploy-config.mjs`，按 binding 名拉取你在 Dashboard 已绑定的 KV/R2/D1 真实配置并写进一次性 `wrangler.deploy.toml`，部署完即删。所以**点「部署 CF Workers」按钮前，请务必先在 Dashboard 把 KV/R2/D1 绑好（binding 名须为 `CDN_KV`/`CDN_R2`/`CDN_DB`）**，否则部署会清空这些绑定（脚本会打印 `⚠ 未探测到 ... 绑定` 提醒你）。
+> 若想本地复现与流水线完全一致的行为：`npm run deploy:cf`（见分支 A1，对应 A4a 的 Workers 按钮）。
 >
-> **CF Pages / EO Pages 路线不受影响**：`wrangler pages deploy .` 与 `edgeone makers deploy .` 不读取 `wrangler.toml` 的存储绑定段，其 KV/R2/D1 绑定在各自 Dashboard 设，不会被 toml 覆盖；这两路的变量也在 Dashboard 设，不存在 `ADMIN_PATH` 被 toml 覆盖的问题。只有 **CF Workers 路线**需要临时 toml 机制。
->
-> 若想本地复现与流水线完全一致的行为：`npm run deploy:cf`（见分支 A1）。
+> **⚠️ 若系统设置显示「运行平台 pages」、TCP Socket 不可用**：这是旧代码的平台探测误判（把 Workers 的 Static Assets 绑定 `ASSETS` 错当成 Pages），**不是你点错了按钮**。修复已合入最新代码，只需「把仓库更新到最新 → 重新点一次『部署 CF Workers』按钮」即可恢复（`caps.js` 改用 `CF_PAGES` 等 Pages 专属变量区分，不再凭 `ASSETS` 绑定误判）。详见 [08 FAQ](./08-faq.md)。
 
 ### 分支 B：EdgeOne —— Makers 部署
 
@@ -299,14 +343,30 @@ https://<你的域名或 *.workers.dev>/__health
 
 再访问管理面 `https://<域名>/__panel`（默认前缀，部署后可在管理面改成你自己的随机串并存 KV），用 `ADMIN_PASSWORD` 登录成功即完成。
 
+**平台能力核对**：进管理面 → 系统设置，确认：
+- CF Workers 部署应显示 `运行平台: workers`、`TCP Socket: 可用`。
+- CF Pages / EO Pages 部署显示 `运行平台: pages / edgeone`、`TCP Socket: 不可用（降级 fetch）` 属正常（这两类平台本就无 `cloudflare:sockets`）。
+
+> **⚠️ 排查：CF Workers 部署却显示 `运行平台: pages` / `TCP Socket 不可用`**
+> 这是旧代码把 Workers 的 Static Assets 绑定 `ASSETS` 误判成 Pages 导致，不是部署方式错误。
+> 修复已合入最新代码，按下面两步恢复：
+> 1. **更新你仓库里的代码到最新**（含 `src/platform/caps.js` 修复）：
+>    ```bash
+>    git pull origin main   # 或去 GitHub/CNB 仓库点 Sync / 拉取最新提交
+>    ```
+>    （如果你是 fork 后改过，先 `git fetch` 再 merge / rebase 上游最新。）
+> 2. **重新部署一次**：本地用 `npm run deploy:cf`；用流水线的直接再点一次「🚀 部署 CF Workers」按钮（CI 会自动拉最新代码构建）。
+> 部署后系统设置应变为 `运行平台: workers`、`TCP Socket: 可用`。
+> 详见 [08 FAQ · 为什么点 CF Workers 却显示 pages](./08-faq.md)。
+
 ---
 
 ## 部署完成检查清单
 
-- [ ] 第 1 步：已在 CF 或 EO 新建项目（二选一，没两边都做）
+- [ ] 第 1 步：已在 CF（建 **Worker** = Workers 形态 / 建 **Pages 项目** = Pages 形态）或 EO 新建项目（二选一，没两边都做，且 CF 两种形态没混用）
 - [ ] 第 3 步：KV 已绑定，变量名是 `CDN_KV`
-- [ ] 第 4 步：`ADMIN_PASSWORD` / `JWT_SECRET` 用 Secret 类型；`ADMIN_PATH` 不用变量页面设，部署后用默认 `__panel` 登录管理面、改成随机串存 KV；CF Workers 路线用 `npm run deploy:cf` / 流水线按钮
-- [ ] 第 5 步：缓存开关已开启（CF Workers 已在 `wrangler.toml` 内置 `[cache] enabled = true`，部署即生效；CF Pages / EO 需在面板开）
+- [ ] 第 4 步：`ADMIN_PASSWORD` / `JWT_SECRET` 用 Secret 类型；`ADMIN_PATH` 不用变量页面设，部署后用默认 `__panel` 登录管理面、改成随机串存 KV；CF Workers 形态用 `npm run deploy:cf` / 流水线「部署 CF Workers」按钮，CF Pages 形态用 A3/流水线「部署 CF Pages」按钮
+- [ ] 第 5 步：缓存开关已开启（CF Workers 形态已在 `wrangler.toml` 内置 `[cache] enabled = true`，部署即生效；CF Pages / EO 需在面板开）
 - [ ] 第 6 步：代码已按所选方式推上去
 - [ ] 第 7 步：自定义域名已绑定
 - [ ] 第 8 步：`/__health` 返回 `ok: true` 且 `hasKV: true`；管理面能登录

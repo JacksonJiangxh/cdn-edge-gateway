@@ -123,7 +123,7 @@ export const SITE_TEMPLATES = Object.freeze([
       {
         name: '静态资源长缓存',
         note: '带版本号/哈希的 css、js、图片、字体。这类文件内容一变文件名就变，所以可以放心长缓存。',
-        match: { extIn: [...EXT_ASSET] },
+        match: { conditions: [[extCond(EXT_ASSET)]] },
         cache: {
           enabled: true,
           mode: 'ttl',
@@ -137,13 +137,13 @@ export const SITE_TEMPLATES = Object.freeze([
       {
         name: 'HTML 页面不缓存',
         note: 'HTML 是内容入口，一旦被缓存住，发版后用户会长时间停在旧页面。默认不缓存最安全。',
-        match: { extIn: ['html', 'htm'] },
+        match: { conditions: [[extCond(['html', 'htm'])]] },
         cache: { enabled: false, mode: 'noCache' },
       },
       {
         name: 'API 路径不缓存',
         note: '/api/ 下通常是动态数据、且常带登录态，缓存会导致串号等严重问题。路径前缀按你的实际情况改。',
-        match: { pathPrefix: '/api/' },
+        match: { conditions: [[prefixCond('/api/')]] },
         cache: { enabled: false, mode: 'noCache' },
       },
     ],
@@ -182,7 +182,7 @@ export const SITE_TEMPLATES = Object.freeze([
       {
         name: '媒体分片长缓存',
         note: 'ts / m4s / mp4 等分片一旦生成就不再变化，适合长缓存，这是流媒体省带宽的关键。',
-        match: { extIn: EXT_MEDIA.filter((e) => e !== 'm3u8' && e !== 'mpd') },
+        match: { conditions: [[extCond(EXT_MEDIA.filter((e) => e !== 'm3u8' && e !== 'mpd'))]] },
         cache: {
           enabled: true,
           mode: 'ttl',
@@ -196,7 +196,7 @@ export const SITE_TEMPLATES = Object.freeze([
       {
         name: '索引清单短缓存',
         note: 'm3u8 / mpd 是播放列表，直播或更新中的点播会不断变化。只缓存几秒，既挡住高并发又不影响更新。',
-        match: { extIn: ['m3u8', 'mpd'] },
+        match: { conditions: [[extCond(['m3u8', 'mpd'])]] },
         cache: {
           enabled: true,
           mode: 'ttl',
@@ -224,7 +224,7 @@ export const SITE_TEMPLATES = Object.freeze([
       {
         name: '下载文件长缓存',
         note: '安装包这类文件发布后通常不再修改（改了一般也是换新版本号），适合最长缓存。',
-        match: { extIn: [...EXT_DOWNLOAD] },
+        match: { conditions: [[extCond(EXT_DOWNLOAD)]] },
         cache: {
           enabled: true,
           mode: 'ttl',
@@ -242,6 +242,21 @@ export const SITE_TEMPLATES = Object.freeze([
 // ----------------------------------------------------------------------------
 // 工具
 // ----------------------------------------------------------------------------
+
+// ----------------------------------------------------------------------------
+// match 快捷条件 → 二维 conditions 的桥接
+// ----------------------------------------------------------------------------
+// 早期模板生成的是快捷条件（extIn / pathPrefix），但前端规则编辑器与流量序列
+// 只认 `match.conditions` 二维数组，导致模板生成的规则在 UI 上「匹配条件 0 项 /
+// 匹配全部请求」，名字和规则对不上。这里统一产出 conditions 格式，前后端一致。
+/** 扩展名列表 → 一个 extension 等于条件（多值之间为「或」）。 */
+function extCond(exts) {
+  return { target: 'extension', op: 'equal', ignoreCase: true, values: exts.map((e) => String(e).toLowerCase().replace(/^\./, '')) };
+}
+/** 路径前缀 → 一个 path 前缀为条件。 */
+function prefixCond(p) {
+  return { target: 'path', op: 'prefix', ignoreCase: true, values: [p] };
+}
 
 /**
  * 由「错误页缓存时间」参数生成 statusTtl 映射，覆盖 400-599 常见状态码。
