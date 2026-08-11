@@ -56,23 +56,39 @@
 
 > 说明：数据面核心（failover 的 originUrl、resolveHostHeader 三参、accel 分支）经审查员 A 独立核查，**已正确**，原 REVIEW.mdlist 的 C1/C2 修复在源文件层属实，此处不再重复列为 bug。
 
-### 🟡 B1. `pools.js` `collectRefs` 在 `getGlobalRules` 失败时未置 `truncated=true`，可能低估引用导致误删源站（中·逻辑空挂）
+### 🟢 B1. `pools.js` `collectRefs` 在 `getGlobalRules` 失败时未置 `truncated=true`，可能低估引用导致误删源站（中·逻辑空挂 / fail-open 安全漏洞）—— **已修复**
 
 - 位置：`src/api/handlers/pools.js:63-79`（`collectRefs` 内 `try { getGlobalRules } catch { ... }`）。
 - 现象：`getGlobalRules` 异常被吞，仅注释"引用信息不完整"，但 `truncated` 保持原值（来自 `listAllSites`）。前端据此认为引用完整，`remove` 时 `refs.length===0` 会**误删仍被全局规则引用的源站池** → 全站 502。
 - 推断根因：`catch` 分支未保守置 `truncated = true` 阻断删除。
 - 类型：逻辑空挂 / 潜在数据面故障
 - 方向：—
-- 是否需确认：是——建议 `catch` 内 `truncated = true`。
+- **二次全面复核（2026-08-11 23:01，确认问题真实存在，非误判）**：
+  1. 实读 `src/api/handlers/pools.js:27-82`：`collectRefs` 第 37 行 `truncated` 来自 `listAllSites(ctx)`，第 63-76 行 `try { const globalRules = await getGlobalRules(ctx); ... }`，第 77-79 行 `catch {}` **为空**，未改 `truncated`。
+  2. 实读 `src/config/store.js`：第 452-469 行 `listAllSites` 的 `truncated` **仅表示"站点列表是否扫全"**（超过 `MAX_TOTAL_SITES_SCAN` 翻页上限才置 true），**与全局规则无关**；第 581-585 行 `getGlobalRules` 内部 `readJson(ctx, K_GLOBAL_RULES)` 可能因 KV 读取/解析异常**抛错**（仅"成功但格式不对"才返回 `[]`）。
+  3. 误删路径成立：若某源站池 P **仅被全局规则引用**（无任何站点直接引用，`listAllSites` 的 `truncated=false`），且 `getGlobalRules` 抛错被静默 → `collectRefs` 返回 `truncated=false` 且 `map` 中 P 无引用记录 → `remove(P)` 走第 172-183 行：`refs.length===0 && !truncated` → `deletable=true`、放行删除（第 194 行）→ P 被删但全局规则仍指向 P → 命中该全局规则的请求回源到已删池 → **全站 502**。此为 fail-open 安全漏洞。
+  4. 结论：**B1 确凿存在，非误判**，属 fail-open。修复点明确且最小：`catch` 块内 `truncated = true`（表示"全局规则引用信息不完整，不可判定无引用"），使 `remove` 走第 177 行保守拒绝（409），与站点维度 `truncated` 的语义一致。
+- **修复（2026-08-11 23:03）**：`src/api/handlers/pools.js`
+  - 第 37 行 `const { sites, truncated }` → `let { sites, truncated }`（使 catch 可重赋值）。
+  - 第 77-79 行 `catch {}` 改为 `catch { truncated = true; }` 并补注释说明 fail-open 风险。
+  - **注意**：二次验证时一度暴露本修复自身的笔误——初版直接 `truncated = true` 但变量仍是 `const`，运行时抛 `TypeError: Assignment to constant variable`，经端到端测试发现后已改正为 `let`。这正说明"先确认再动手 + 修复后二次验证"流程的价值。
+- **修复后二次验证（端到端，2026-08-11 23:05）**：用 ESM loader 拦截 `store.js`，构造「站点维度 `truncated:false` + `getGlobalRules` 抛错」的误删前置条件，分别跑旧版与修复版 `remove(ctx,'P')`：
+  - 修复前（旧版）：`HTTP 200` + `deletePool called: true` → **误删发生（fail-open），确认漏洞真实**。
+  - 修复后（当前）：`HTTP 409` + `error.code: CONFLICT`（"站点数量过多，无法完成引用检查…已阻止"）+ `deletePool called: false` → **误删路径已堵住，保守拒绝**。对照通过，B1 全面解决。
 
-### 🟡 B2. `signedUrl` 开启但 `secret` 为空 → 全站 403（中·可用性风险，已文档化）
+### ⚪ B2. `signedUrl` 开启但 `secret` 为空 → 全站 403（中·可用性风险，已文档化）—— **误判 / 跳过（无需修复）**
 
 - 位置：`src/security/guard.js:285-323`（`signedUrlBlocked`）、`contracts.js`/`schema.js` 对 `signedUrl.secret` 的校验。
-- 现象：`guard.js:289` 规定"未配置密钥时无法校验；此时拦截而不是放行"。即 `signedUrl.enabled=true` 但 `secret` 为空 → 所有请求 403，站点自锁。
-- 核查：这是 fail-closed 的正确安全行为；文档（08/11/12/04/05）已统一标注"⚠️ 实验特性（签发工具待开发）"，前端 `web/app.js` 也有提示。但需确认 `schema.js` 对 `signedUrl.secret` 是否强制非空——若允许"开签名留空 secret"，属可用性 bug（非安全漏洞）。
-- 类型：可用性风险 / 输入校验缺口
+- 现象（原担忧）：`guard.js:289` 规定"未配置密钥时无法校验；此时拦截而不是放行"。即 `signedUrl.enabled=true` 且 `secret` 为空 → 所有请求 403，站点自锁。属 fail-closed 正确安全行为；文档（08/11/12/04/05）已统一标注"⚠️ 实验特性（签发工具待开发）"，前端 `web/app.js` 也有提示。
+- **二次全面复核（2026-08-11 23:15，确认属误判，非真正待改项）**：原 B2 的核心待确认点——"schema 是否强制 `signedUrl.secret` 非空"——经实读源码确认**已被满足**：
+  1. `src/config/schema.js:530-534`：`const signedEnabled = bool(su.enabled, ...); const signedSecret = str(su.secret, '', 512); if (signedEnabled && !signedSecret) { errors.push('启用签名 URL 时必须设置 secret'); }` —— **配置校验阶段已强制 secret 非空**。
+  2. `src/config/schema.js:754-757`：`normSecurity` 的 `errors` 被 push 到 `c.errors`，只要 `c.errors.length` 即 `return { ok:false, errors }`，**配置保存被拒绝，不会落库**。
+  3. `grep` 确认 `normSecurity` 调用方唯一（仅 schema.js:754 经 `normSite`），且 `contracts.js:272` 仅含 typedef 类型描述、**无独立运行时校验**，校验完全集中在 schema 层，无旁路写入入口绕过该校验。
+  4. `src/config/defaults.js:269-274`：`DEFAULT_SIGNED_URL = { enabled:false, secret:'' }`，默认关闭；不存在"默认开启空密钥"的出厂残态。
+- **结论**：`schema.js` 已在**配置保存层**堵死"开启签名却留空 secret"的写入路径，`guard.js:289` 的 fail-closed 拦截只是**纵深防御**（即便配置被旁路写入也安全），**不构成可用性 bug**。`signedUrl` 全站 403 自锁的担忧路径在正确配置流程下不可达。B2 **属误判，无需代码改动**，标记为跳过。
+- 类型：原判"可用性风险 / 输入校验缺口" → 复核后证实校验已存在，缺口不成立。
 - 方向：—
-- 是否需确认：是——确认 schema 是否要求 secret 非空。
+- 是否需确认：**否（已复核闭环）**，无需修复。
 
 ### 🟢 B3. `ratelimit.js` `resetGlobalRateLimit`/`resetRateLimitMemory` 死代码（低·冗杂）
 
@@ -120,41 +136,71 @@
 
 > 方向标注：**代码领先**（md 落后）/ **文档领先**（md 领先/代码落后）/ **都错**。
 
-### 🟡 C1. `docs/04-configuration.md` match `target` 枚举漏列 `origin`（中·代码领先）
+### 🟢 C1. `docs/04-configuration.md` match `target` 枚举漏列 `origin`（中·代码领先）—— **已修复**
 
 - 文档位置：`docs/04-configuration.md:196`（列 15 个值，缺 `origin`）。
 - 代码真相：`src/config/defaults.js:189-193` 的 `MATCH_TARGETS` 含 `origin`；`web/app.js:954` 有 `{value:'origin', label:'回源目标（源站 ID…）'}`。
 - 差异：`origin` 是"③ 首要分流后按负载均衡选出的回源对象"维度，前端与 schema 都支持，文档枚举漏列。
 - 方向：代码领先（文档落后）
 - 是否需确认：否，补 `origin` 即可。
+- **二次全面复核（2026-08-11 23:19，确认问题真实存在，非误判）**：
+  1. 实读 `src/config/defaults.js:189-193`：`MATCH_TARGETS` 冻结数组共 **16** 个值，末尾为 `'origin'`；`docs/04-configuration.md:196` 原文列 15 个（至 `referer` 结束），**确无 `origin`** → 漏列属实，非误判。
+  2. 交叉佐证：`web/app.js:955` 前端下拉确有 `{value:'origin', label:'回源目标（源站 ID，由 ③ 首要分流按负载均衡选出）'}`；`src/config/schema.js:351` `enumOf(c.target, MATCH_TARGETS, '')` 接受 `origin` → 代码层 `origin` 维度已全链路接通，仅文档落后。
+- **修复（2026-08-11 23:19）**：`docs/04-configuration.md:196` 在 `referer` 后补 ` / \`origin\``，枚举由 15 → 16 项，与 `MATCH_TARGETS` 逐一对齐；原 15 项顺序/名称不变。
+- **修复后二次验证（静态逐符号比对）**：修复后文档枚举 = `host,path,fullUrl,query,extension,filename,directory,method,protocol,header,cookie,clientIp,clientCountry,userAgent,referer,origin`（16 项），与 `MATCH_TARGETS` 完全相等；文档漏列项 = 无，文档多余项 = 无 → C1 **全面解决**（代码领先→文档同步）。
 
-### 🟡 C2. `docs/11-architecture.md` 目录树引用不存在的 `proxy/image.js`（中·文档领先）
+### 🟢 C2. `docs/11-architecture.md` 目录树引用不存在的 `proxy/image.js`（中·文档领先）—— **已修复**
 
-- 文档位置：`docs/11-architecture.md:49`（`proxy/image.js # 图片优化`）、第 104、151 行亦引用。
-- 代码真相：`src/proxy/` 下无 `image.js`（搜索 0 结果）；图片优化逻辑在 `src/proxy/headers.js` 等内，未独立成文件。
-- 方向：文档领先（代码无该文件）
-- 是否需确认：否，删除该文件名引用或补真实位置。
+- 文档位置：`docs/11-architecture.md:49`（`proxy/image.js # 图片优化`）、流程描述 `proxy.image()`（原行 108）。
+- **二次全面复核（2026-08-11 23:23，确认问题真实存在，非误判，并纠正原 mdlist 摘要两处误述）**：
+  1. 实读 `docs/11-architecture.md:48-49`：目录树确列 `└── image.js # 图片优化（Accept 协商 webp/avif，仅 CF）`。`search_file` 在 `src/proxy/` 递归搜 `image.js` 返回 **0 文件**；`src/` 下搜 `*image*.js` 也 **0 文件** → **该模块确不存在**。
+  2. 实读 `docs/11-architecture.md:106`（原行号）：流程描述 `├─ proxy.image()：图片优化（CF 协商 webp/avif；EO 降级原图）`。`grep` 在 `src/` 全仓搜 `.image(` 与 `imageOptimization` **0 命中** → **`proxy.image()` 调用在代码里也不存在**；图片优化属 CF 平台原生 `fetch` 协商能力，无独立 JS 模块。
+  3. **纠正原 mdlist 摘要误述**：① 摘要称"第 104、151 行亦引用 image.js" 不准确——行 104 实为 `fallbackStatusCodes`（属 C5）、行 151 是能力对比表"图片优化(webp/avif)"功能行（非路径引用）；真实第二处引用是流程描述的 `proxy.image()`（原行 108）。② 摘要称"图片优化逻辑在 `src/proxy/headers.js` 等内" 不成立——`src/proxy/` 内无任何 webp/avif 逻辑，图片优化依赖平台原生能力。C2 实为**文档虚构模块 + 虚构调用**，非"逻辑移了位置"。
+- 方向：文档领先（代码无该文件/该调用）
+- 是否需确认：否。
+- **修复（2026-08-11 23:23）**：`docs/11-architecture.md`
+  - 目录树：删除 `└── image.js # 图片优化` 行，并将上一行 `cache.js` 的 `├──` 改为 `└──`（变为末节点），保持树形正确。
+  - 流程描述：将虚构的 `proxy.image()：图片优化（CF 协商 webp/avif；EO 降级原图）` 改为如实描述「图片优化：依赖 CF 平台原生 fetch 协商 webp/avif（**无独立 JS 模块**，`src/proxy/` 下不存在 image.js）；EO 因无该能力自动降级为原图」。
+- **修复后二次验证**：`search_content` 在 `docs/11-architecture.md` 再搜 `proxy/image.js` / `proxy.image()` → **0 命中**；`search_file` 在 `src/proxy/` 搜 `image.js` 仍 0 文件。文档已不再引用不存在的模块/调用，C2 **全面解决**（文档与代码现状对齐：图片优化为平台能力，无独立源文件）。
 
-### 🟡 C3. `docs/04-configuration.md:71` 误称 `wrangler.toml` 已带 `sockets` 兼容标志（中·文档与 toml 矛盾）
+### 🟢 C3. `docs/04-configuration.md:71` 误称 `wrangler.toml` 已带 `sockets` 兼容标志（中·文档与 toml 矛盾）—— **已修复**
 
-- 文档位置：`docs/04-configuration.md:71`（"CF 端自定义回源 Host 必须用 Workers 形态部署（`wrangler.toml` 已带 `sockets` 兼容标志）"）。
-- 代码真相：`wrangler.toml:11-14` 注释明确"**不要在此加 sockets**"，`compatibility_flags = ["nodejs_compat"]`；`cloudflare:sockets` 由 `socketEngine.js` 运行时动态 `import`（build.mjs:273 显式列出虚拟模块）。文档表述与 toml 及 03/08/09 多篇"不需要 sockets flag"的描述直接矛盾。
+- 文档位置：`docs/04-configuration.md:72/74`（说明段："CF 端自定义回源 Host…必须用 Workers 形态部署（`wrangler deploy`，`wrangler.toml` 已带 `sockets` 兼容标志）…"）。
+- **二次全面复核（2026-08-11 23:27，确认问题真实存在，非误判）**：
+  1. 实读 `docs/04-configuration.md:74`：原文确写"`wrangler.toml` 已带 `sockets` 兼容标志"。
+  2. 实读 `wrangler.toml:14-18`：注释"**不要在此加 "sockets"** —— workerd 无此 flag，会导致 wrangler dev / deploy 直接启动失败（No such compatibility flag: sockets）"；`compatibility_flags = ["nodejs_compat"]`（**无 sockets**）。
+  3. 代码真相：`src/proxy/engines/socketEngine.js:95` 运行时 `import("cloudflare:sockets")`，`build.mjs:281` 显式将其列为 esbuild 虚拟模块；多份文档（08-faq:28、09-local-dev:58、03-deploy:232）均确认"**不需要**声明 sockets flag"。→ 文档"已带 sockets 兼容标志"与 toml 及代码现实**直接矛盾**，属错误描述。
 - 方向：文档领先（错误描述）
-- 是否需确认：否，改为"Workers 形态（`cloudflare:sockets` 运行时动态加载，无需 flag）"。
+- 是否需确认：否。
+- **修复（2026-08-11 23:27）**：`docs/04-configuration.md:74` 删除"`wrangler.toml` 已带 `sockets` 兼容标志"，改为"**`cloudflare:sockets` 由 `socketEngine.js` 运行时动态 `import`，无需在 `wrangler.toml` 声明 `sockets` 兼容标志（`compatibility_flags` 仅有 `nodejs_compat`；加 `sockets` 反而会因 workerd 无此 flag 导致启动失败）**"。
+- **修复后二次验证**：`search_content` 在 `docs/04-configuration.md` 再搜"已带 sockets 兼容标志" → **0 命中**；`grep wrangler.toml` 确认 `compatibility_flags = ["nodejs_compat"]` 且 toml 注释明确禁加 sockets，与修复后文档一致 → C3 **全面解决**（文档与 toml/代码现实对齐）。
 
-### 🟡 C4. `docs/08-faq.md:128` 规则匹配仍列旧名 `asn/country/scheme`（中·文档内部矛盾/都错）
+### 🟢 C4. `docs/08-faq.md:128` 规则匹配仍列旧名 `asn/country/scheme`（中·文档内部矛盾/都错）—— **已修复**
 
 - 文档位置：`docs/08-faq.md:128`（"可匹配 host/path/…/userAgent/asn/country/scheme 等"）。
 - 代码真相：`asn/country/scheme` 正是 `docs/04-configuration.md:202` 明确宣布**已废弃**的旧名；真实枚举见 `defaults.js:189-199`（`clientCountry`/`clientIp` 等）。
+- **二次全面复核（2026-08-11 23:35，确认问题真实存在，非误判）**：
+  1. 实读 `docs/08-faq.md:128`：原文在 `match.conditions` 可匹配维度语境下列 `…/userAgent/asn/country/scheme 等`，三者均为 `target` 旧名。
+  2. 实读 `docs/04-configuration.md:200`：明确"`asn`/`country`/`scheme` 不再是 `target` 枚举（改为 `clientCountry`/`clientIp` 等）"，与 08 矛盾 → 文档内部不一致成立。
+  3. 代码真相交叉核验：`grep` 在 `src/` 全仓搜 `target==='asn'/'country'` 及 `asn`/`country` 作为 target 引用 = **0 命中**；`src/config/defaults.js:189-193` 的 `MATCH_TARGETS` 含 `protocol`/`clientIp`/`clientCountry`、**不含** `asn`/`country`/`scheme`（作为 target）；`src/proxy/matcher.js:64-65` 实际提取 `protocol`/`clientIp`，`src/contracts.js:158` typedef 亦为 `'protocol'|'header'|'cookie'|'clientIp'|'clientCountry'`。→ 旧名代码层已彻底移除，文档列旧名确属错误。
+  4. 注意 `scheme` 在代码里有**另一活跃含义**：源站回源协议字段 `action.scheme`（04:238、09:152 等），与 `target` 维度无关；故仅作为 target 旧名删除，不影响回源协议 `scheme` 字段的正确性。
 - 方向：都错（08 用旧名，04 已废弃）
-- 是否需确认：否，08 删除 `asn/country/scheme`。
+- 是否需确认：否。
+- **修复（2026-08-11 23:35）**：`docs/08-faq.md:128` 将匹配维度列表中的 `asn/country/scheme` 删除，改为现行维度 `clientCountry/clientIp/protocol`，并补注"旧名 `asn`/`country`/`scheme` 已废弃，对应现行维度为 `clientCountry`/`clientIp`/`protocol`"，与 04 枚举及代码现实对齐。
+- **修复后二次验证**：`search_content` 在 `docs/08-faq.md` 再搜 `asn/country/scheme` / `userAgent/asn` → **0 命中**（仅 mdlist 讨论文字残留）；修复后 08:128 列 `clientIp/clientCountry/referer/userAgent/protocol`，与 `MATCH_TARGETS` 现行枚举一致；代码层 `asn`/`country` target 引用仍 0 → C4 **全面解决**（08 与 04/代码对齐，旧名清除）。
 
-### 🟡 C5. `fallbackStatusCodes` 旧字段名残留于多篇文档（中·代码领先）
+### 🟢 C5. `fallbackStatusCodes` 旧字段名残留于多篇文档（中·代码领先）—— **已修复**
 
 - 文档位置：`docs/11-architecture.md:53,104,235`、`docs/08-faq.md:134`（均写 `fallbackStatusCodes` 如 502/503）。
 - 代码真相：`src/` 全仓无 `fallbackStatusCodes` 字段；实际为 `contracts.js:429` 的 `DEFAULT_RETRY_ON` / schema 的 `retryOn`。
+- **二次全面复核（2026-08-11 23:40，确认问题真实存在，非误判）**：
+  1. `grep -rn "fallbackStatusCodes" src` → **0 命中**，代码层确无此字段。
+  2. 代码真相交叉核验：`src/balancer/failover.js:8,37-40,147-148` 使用 `failover.retryOn`（默认 `DEFAULT_RETRY_ON`）；`src/config/defaults.js:324` `retryOn: DEFAULT_RETRY_ON`；`src/config/schema.js:957-972` 归一 `retryOn`；`src/contracts.js:326` `@property {number[]} retryOn 触发换源的状态码，默认 [500,502,503,504,522,524]`。→ 现行字段名确为 `retryOn`。
+  3. 文档侧 5 处残留：`11-architecture.md:52/103/234`、`08-faq.md:134`（mdlist 摘要行号 53/104/235 为旧偏移，实际已随 C2/C3 编辑上移，但内容点一致）→ 旧名残留属实，属代码领先（文档落后）。
 - 方向：代码领先（旧名残留）
-- 是否需确认：否，全局替换 `fallbackStatusCodes` → `retryOn`。
+- 是否需确认：否。
+- **修复（2026-08-11 23:40）**：将 `docs/11-architecture.md`（3 处）与 `docs/08-faq.md`（1 处）的 `fallbackStatusCodes` 全部替换为 `retryOn`（保留"如 502/503"示例，因 `retryOn` 默认含 502/503，语义一致）：目录树注释 `链式回退（按 order + retryOn 状态码）`、流程 `失败（网络错误 / retryOn 状态码）→ 链式回退`、能力说明 `源站返回 retryOn 状态码（如 502/503）`、FAQ `源站返回 retryOn 状态码（如 502/503）`。
+- **修复后二次验证**：`grep -rn "fallbackStatusCodes" docs/11-architecture.md docs/08-faq.md docs/04-configuration.md docs/12-request-flow.md docs/05-user-guide.md docs/03-deploy.md docs/09-local-development.md docs/10-api-reference.md` → **0 命中**（仅 mdlist 自身历史讨论文字残留，非文档正文）→ C5 **全面解决**（文档术语与代码字段名 `retryOn` 对齐）。
 
 ### 🟢 C6. `docs/04-configuration.md:39` `stickyTtl` 字段文档领先（低·文档领先）
 
@@ -190,13 +236,25 @@
 
 > 关键前提：D 类所有"源文件层已正确"的判断，都依赖 **A1 闭合（重新 build 产物）** 才对线上生效。在 A1 未解决前，线上跑的是旧产物，U 类现象仍可能出现。
 
-### 🟡 D1. 阶段编号/术语漂移：前端"④ 匹配规则""③ 源站"与 docs/12 体系冲突（中·一致性）
+### 🟢 D1. 阶段编号/术语漂移：前端"④ 匹配规则""③ 源站"与 docs/12 体系冲突（中·一致性）—— **已修复（源码层）**
 
 - 位置：`web/app.js:1425`（`④.7 候选源站`）、`:1948`、`:1972`（`流量序列 → ④ 匹配规则`）、`:1847`（`openSiteDrawer` 提示"② 安全 / ③ 源站 / ④ 规则"）。
-- 现象：`docs/12-request-flow.md:290-322` 规定 ③=首要分流、④=URL 规范化、⑤~⑯=规则阶段、⑭=源站、②=安全。但前端把"规则"统称"④ 匹配规则"、把"源站"称为"③"，与文档阶段编号错位；且"④ 匹配规则"在 docs/12 中 ④ 实为"URL 规范化"，用户会在文档里找不到对应阶段（`docs/05-user-guide.md:213` 也写"③ 源站"，与 docs/12 的 ③=首要分流冲突）。
-- 类型：文档-代码一致性（阶段术语漂移）
-- 方向：都错（前端文案与 12 文档体系不一致）
-- 是否需确认：否，建议统一前端文案到 docs/12 的 18 阶段编号。
+- 现象：`docs/12-request-flow.md:290-322` 的「18 阶段映射表」规定 ③=首要分流、④=URL 规范化、⑤~⑯=规则阶段、⑭=回源循环（源站池）、②=安全。但 `web/app.js` 散落的注释/提示文案把"规则"统称"④ 匹配规则"、把"源站"称为"③"、候选源站称"④.7"，与映射表/主 UI 渲染错位（用户会在文档里找不到对应阶段）。
+- **二次全面复核（2026-08-11 23:43，确认问题真实存在，非误判，并澄清根因）**：
+  1. 实读 `web/app.js` 主 UI 渲染段（行 528-607、768）：流量序列主图**已正确**采用 18 阶段体系（`③ 本次回源对象（推导·只读）`、`④ URL 规范化`、`⑨ Origin Rules 含候选源站`、`⑭ 回源循环`），与 docs/12 映射表一致——**主渲染无漂移**。
+  2. 漂移仅存在于 `web/app.js` 的**注释 + 散落提示文案**（部分渲染到用户界面，如 :1847 hint、:1948/:1972 模板预览、:2255/:2472 抽屉说明），共 11 处：`:828`「④ 规则引擎」、`:1413`「④.1/④.2 通用抽屉」、`:1425`「④.7 候选源站」、`:1723`「④.7 候选源站」、`:1847`「源站/规则/安全分别在 ③/④/②」、`:1948/:1972`「④ 匹配规则」、`:2051`「②/④/⑧」、`:2158`「④.5/④.8/⑧.1」、`:2255`「③ 这包…④ 路由规则、⑧ 源站池」、`:2472`「路由规则（④）与源站池（⑧）」。
+  3. 根因澄清：`docs/12-request-flow.md` 自身**序章流程图（行 64-156）与「18 阶段映射表」（行 290-320）编号体系冲突**——序章里 ④=匹配规则、④.7=候选源站；映射表里 ④=URL 规范化、候选源站拆入 ⑨/⑭。前端散落文案采用的是序章流程图细分，与映射表/主 UI 错位。D1 判定"前端与 docs/12 冲突"真实成立，但**主 UI 渲染未错位**，仅零散文案漂移。
+- 类型：文档-代码一致性（阶段术语漂移，范围限于注释/提示文案）
+- 方向：都错（前端零散文案与 docs/12 映射表/主 UI 体系不一致）
+- 是否需确认：否。
+- **修复（2026-08-11 23:43，源码层 `web/app.js`）**：以 docs/12 映射表 + 主 UI 渲染为权威，把 11 处漂移文案统一到 18 阶段：
+  - 规则统称由「④ 匹配规则 / ④ 规则引擎 / ④ 路由规则」→「⑤~⑯ 规则 / 规则（⑤~⑯）」；
+  - 「④.7 候选源站 / ④.1/④.2 通用抽屉 / ④.5/④.8」→「⑨ Origin Rules（候选源站）/ 通用抽屉（⑤~⑯）/ ⑨/⑪/⑭」；
+  - 「源站（③）/源站池（⑧）」→「源站（③ 首要分流 / ⑭ 源站池）/ ⑭ 源站池」；
+  - `:1847` hint、`:2255` frag-note、`:2472` 抽屉说明等用户可见文案同步对齐。
+  - **未改动**主 UI 渲染段（行 528-607 等已正确，避免引入回归）。
+- **修复后二次验证（源码层）**：`search_content` 在 `web/app.js` 再搜 `④ 匹配规则|④.7|④.1|④.2|④.5|④.8|路由规则（④）|源站池（⑧）|②/④/⑧|③ 源站` → **0 命中**（仅 mdlist/docs 讨论文字残留）；主 UI 渲染段 `③ 本次回源对象`/`④ URL 规范化`/`⑨ Origin Rules`/`⑭ 回源循环` 仍在，未被误改。
+- **生效前提（与 A1/D2 一致）**：本修复仅改 `web/app.js` 源文件，需重新 `npm run build`（A1 方案 Y，`minify:false` 保活间接引用）才能进入 `dist/public/assets/app.js` 与 `_worker.js`；当前产物仍为旧文案，待 A1 重建后一并生效。`docs/12-request-flow.md` 序章流程图与映射表的内部编号冲突（④ 双义）建议另立文档项清理，超出 D1 文案对齐范围。
 
 ### 🟢 D2. 源文件层 U1-U5 已正确（复核结论，非新问题）
 
@@ -213,22 +271,22 @@
 |---|---|---|---|---|
 | A1 | 高 | 构建产物过期 / 未重新 build | — | **是（P0）** |
 | B1 | 中 | 逻辑空挂（误删源站风险） | — | 是 |
-| B2 | 中 | 可用性风险（signedUrl 空 secret） | — | 是 |
+| B2 | 中 | 可用性风险（signedUrl 空 secret） | — | **否（误判/已闭环）** |
 | B3 | 低 | 死代码 | — | 否 |
 | B4 | 低 | 未用公共 API | — | 否 |
 | B5 | 低 | 逻辑冗杂（hourKey 三处） | — | 否 |
 | B6 | 低 | 轻微冗余 | — | 否 |
 | B7 | 低 | 注释误导 | — | 否 |
-| C1 | 中 | 文档落后（target 漏 origin） | 代码领先 | 否 |
-| C2 | 中 | 文档领先（proxy/image.js 不存在） | 文档领先 | 否 |
-| C3 | 中 | 文档与 toml 矛盾（sockets flag） | 文档领先 | 否 |
-| C4 | 中 | 文档内部矛盾（asn/country/scheme 旧名） | 都错 | 否 |
-| C5 | 中 | 文档落后（fallbackStatusCodes 旧名） | 代码领先 | 否 |
+| 🟢 C1 | 中 | 文档落后（target 漏 origin） | 代码领先 | 否（已修复） |
+| 🟢 C2 | 中 | 文档领先（proxy/image.js 不存在） | 文档领先 | 否（已修复） |
+| 🟢 C3 | 中 | 文档与 toml 矛盾（sockets flag） | 文档领先 | 否（已修复） |
+| 🟢 C4 | 中 | 文档内部矛盾（asn/country/scheme 旧名） | 都错 | 否（已修复） |
+| 🟢 C5 | 中 | 文档落后（fallbackStatusCodes 旧名） | 代码领先 | 否（已修复） |
 | C6 | 低 | 文档领先（stickyTtl） | 文档领先 | 否 |
 | C7 | 低 | 文档内部不一致（Node 22/20） | 都错 | 否 |
 | C8 | 低 | 文档落后（三步构建） | 文档落后 | 否 |
 | C9 | 低 | 文档不严谨（/auth/me 免登录） | 文档落后 | 否 |
-| D1 | 中 | 阶段术语漂移（前端 vs docs/12） | 都错 | 否 |
+| 🟢 D1 | 中 | 阶段术语漂移（前端零散文案 vs docs/12 映射表） | 都错 | 否（已修复·源码层，待 build 生效） |
 | D2 | — | 源文件 U1-U5 已正确（被 A1 吸收） | — | 随 A1 |
 
 ---

@@ -426,9 +426,3 @@ export function resetCollector() {
   lastFlushAt = Date.now();
   flushing = false;
 }
-
-/** 导出阈值常量，便于管理面展示与其他模块复用。 */
-export const COLLECTOR_LIMITS = Object.freeze({
-  flushCountThreshold: FLUSH_COUNT_THRESHOLD,
-  flushIntervalMs: FLUSH_INTERVAL_MS,
-});

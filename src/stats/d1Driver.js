@@ -18,6 +18,8 @@
 /** 聚合表名。 */
 const TABLE = 'stats_hourly';
 
+import { hourKey } from '../utils/hourKey.js';
+
 /** 建表语句是否已在本 isolate 内执行过（避免每次 flush 都跑一遍 DDL）。 */
 let schemaReady = false;
 
@@ -117,18 +119,6 @@ async function ensureSchema(db) {
 /**
  * 把时间戳格式化为 `yyyymmddhh`（UTC），与 kvDriver 保持一致。
  * @param {number} [ts] 时间戳（ms）
- * @returns {string} 形如 "2026080814"
- */
-function hourKey(ts) {
-  const d = new Date(Number.isFinite(ts) ? ts : Date.now());
-  return (
-    `${d.getUTCFullYear()}` +
-    String(d.getUTCMonth() + 1).padStart(2, '0') +
-    String(d.getUTCDate()).padStart(2, '0') +
-    String(d.getUTCHours()).padStart(2, '0')
-  );
-}
-
 /**
  * 规整 host。虽然全部走参数化绑定不存在 SQL 注入，
  * 但仍然限制字符集与长度，避免脏数据污染统计表。

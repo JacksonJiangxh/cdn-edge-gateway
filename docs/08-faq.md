@@ -125,13 +125,13 @@ EO 没有 `caches.default` API，但**边缘缓存能力真实存在且已启用
 `origins[].addr` 只填 host（如 `oss.com`），路径用 `pathPrefix` 字段。填 `https://oss.com/path` 会报「源站地址不应包含路径」。
 
 **Q：规则怎么写「匹配条件」？**
-新版支持两种方式：① 快捷条件（路径前缀 / 正则 / 扩展名 / 方法）；② 可视化多条件 `match.conditions`（二维数组，外层 OR、内层 AND，可匹配 host/path/query/header/cookie/method/clientIp/referer/userAgent/asn/country/scheme 等）。不填条件 = 匹配全部。详见 [配置详解 §2.2](./04-configuration.md#22-match匹配条件)。
+新版支持两种方式：① 快捷条件（路径前缀 / 正则 / 扩展名 / 方法）；② 可视化多条件 `match.conditions`（二维数组，外层 OR、内层 AND，可匹配 host/path/query/header/cookie/method/clientIp/clientCountry/referer/userAgent/protocol 等；旧名 `asn`/`country`/`scheme` 已废弃，对应的现行维度为 `clientCountry`/`clientIp`/`protocol`）。不填条件 = 匹配全部。详见 [配置详解 §2.2](./04-configuration.md#22-match匹配条件)。
 
 **Q：多条规则谁先生效？**
 按 `priority` **降序**匹配，命中即停。在数字大的规则优先；也可以在「流量序列」里直接**拖拽**规则节点排序，松手自动保存。
 
 **Q：链式回退怎么配？**
-源站池 `policy=chain`，`origins` 按顺序排（主源在前、备源在后）。源站返回 `fallbackStatusCodes`（如 502/503）或网络异常时自动切下一个。
+源站池 `policy=chain`，`origins` 按顺序排（主源在前、备源在后）。源站返回 `retryOn` 状态码（如 502/503）或网络异常时自动切下一个。
 
 **Q：签名 URL 怎么用？**
 ⚠️ 实验特性（待开发）：站点「安全防护」里开启 `signedUrl`，填 `secret` 与有效期 `ttl`，参数名默认 `sign`。访客须带合法签名才能访问。校验侧已生效，但**内置签发工具尚未提供**，需自行用 HMAC-SHA256 生成带签 URL（后续版本会内置签发器）。

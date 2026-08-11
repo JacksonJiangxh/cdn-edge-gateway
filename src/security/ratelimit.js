@@ -227,15 +227,6 @@ export async function checkRateLimit(ctx, host, ip, rpm) {
   }
 }
 
-/**
- * 清空 isolate 内的限流内存表。仅用于测试或配置热更新后重置，生产不必调用。
- * @returns {void}
- */
-export function resetRateLimitMemory() {
-  memCounters.clear();
-  lastSweepMinute = -1;
-}
-
 // ============================================================================
 // 全局流量入口限流（纯 isolate 内存，零存储依赖）
 // ============================================================================
@@ -279,12 +270,4 @@ export function checkGlobalRateLimit(rps) {
   }
 
   return { limited: true, retryAfter: 1 };
-}
-
-/**
- * 重置全局限流计数器（仅测试用）。
- * @returns {void}
- */
-export function resetGlobalRateLimit() {
-  globalSlot = { second: 0, count: 0 };
 }

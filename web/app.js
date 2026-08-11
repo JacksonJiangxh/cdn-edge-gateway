@@ -825,7 +825,7 @@
     return node;
   }
 
-  // 流量序列：挂在 ④ 规则引擎环节下的具体规则节点。点击打开规则编辑器
+  // 流量序列：挂在 ⑤~⑯ 规则引擎环节下的具体规则节点。点击打开规则编辑器
   // （整条规则及其所有 action 都在此编辑，不按 action 类型拆子环节）。
   // draggable=true 时整体可拖拽（手柄 + draggable 属性），用于调整优先级。
   function seqRuleInPack(rule, subs, condCount, host, draggable) {
@@ -1410,7 +1410,7 @@
   function buildRuleCard(rule, poolOptions, site, opts) {
     opts = opts || {};
     // allowedOps：受限模式下，只允许添加/编辑这些操作（一个最小任务包一个抽屉，禁止越界）。
-    // 为 null 表示「完整规则编辑器」（④.1 / ④.2 通用抽屉），不做限制。
+    // 为 null 表示「完整规则编辑器」（通用抽屉，含全部规则阶段 ⑤~⑯），不做限制。
     const allowed = opts.allowedOps ? new Set(opts.allowedOps) : null;
     const hideTargetPool = !!opts.hideTargetPool;
     rule = rule || { id: '', priority: 0, enabled: true, match: { conditions: [] }, action: { poolId: '', rewrite: { type: 'none' }, cache: { enabled: true }, reqHeaders: { set: {}, remove: [] }, respHeaders: { set: {}, remove: [] } } };
@@ -1422,7 +1422,7 @@
     const priority = el('input', { class: 'input', type: 'number', value: rule.priority || 0, placeholder: '数字，越小越靠上（先匹配）' });
     // 目标源站：下拉选择已有源站（单一源站或源站池），也可直接输入其 id；
     // 单一源站与源站池在同一个下拉里，引用方式完全一致（都是 poolId）。
-    // （该字段仅属于 ④.7 候选源站，非 ④.7 的受限抽屉会隐藏它以避免越界。）
+    // （该字段仅属于 ⑨ Origin Rules 的「候选源站」动作，非该包的受限抽屉会隐藏它以避免越界。）
     const poolListId = 'poollist-' + (rule.id || 'new') + '-' + Math.random().toString(36).slice(2, 7);
     const poolSel = el('input', { class: 'input', list: poolListId, value: rule.action.poolId || '', placeholder: '留空=用站点默认源站；或选择本规则专用的源站' });
     const poolDatalist = el('datalist', { id: poolListId }, poolOptions.map((o) => el('option', { value: o.value, label: o.label })));
@@ -1720,7 +1720,7 @@
       section('操作（命中后执行的操作）', allowed
         ? '本抽屉仅允许配置「' + opts.title + '」所属的最小任务包，不可越界添加其它动作类型。'
         : '先选「目标源站」，再点「添加操作」加入需要的动作；每个动作是独立卡片，未添加的不显示', [
-        // 目标源站属于 ④.7 候选源站，非 ④.7 的受限抽屉隐藏，避免越界
+        // 目标源站属于 ⑨ Origin Rules 的「候选源站」动作，非该包的受限抽屉隐藏，避免越界
         ...(hideTargetPool ? [] : [field('目标源站（这条规则命中后回到哪台后端）', el('div', {}, [poolSel, poolDatalist]),
           '决定「命中条件的请求」回源到哪个源站：留空则回退到站点默认源站；也可从「源站」页已有的单一源站 / 源站池里选一个。简单站一般不用改，留空即可。')]),
         ...(shownGroups.length ? [el('div', { class: 'op-add' }, [
@@ -1844,7 +1844,7 @@
 
     const body = el('div', {}, [
       el('div', { class: 'subhead', id: 'sec-basic' }, [el('span', {}, '① 匹配站点')]),
-      el('div', { class: 'hint' }, '按 Host 命中站点配置，决定后续整条管线走哪套设置。源站 / 规则 / 安全分别在 ③ / ④ / ② 的独立抽屉配置，互不越界。'),
+      el('div', { class: 'hint' }, '按 Host 命中站点配置，决定后续整条管线走哪套设置。源站（③ 首要分流 / ⑭ 源站池）、规则（⑤~⑯）、安全（②）各有独立抽屉配置，互不越界。'),
       field('加速域名（Host）', fHost, editing ? '编辑时不能修改，如需更改请在「站点总览」删除重建。' : '你接入加速的域名，例如 example.com。'),
       field('启用', fEnabled),
       field('支持 IPv6 访问', fIpv6),
@@ -1945,7 +1945,7 @@
         const keys = (tpl && tpl.tuning) || [];
         if (!keys.length) {
           tplPreview.textContent = tplSel.value === 'blank'
-            ? '不会生成任何规则，建站后请自行到「流量序列 → ④ 匹配规则」添加。'
+            ? '不会生成任何规则，建站后请自行到「流量序列 → 规则（⑤~⑯）」添加。'
             : '';
           return;
         }
@@ -1969,7 +1969,7 @@
             if (hintEl) hintEl.textContent = (m.hint || '') + humanSecs(Number(inp.value));
           };
         }
-        tplPreview.textContent = '建站后将自动生成 ' + (tpl.ruleCount != null ? tpl.ruleCount : '若干') + ' 条规则，可随时在「流量序列 → ④ 匹配规则」增删改。';
+        tplPreview.textContent = '建站后将自动生成 ' + (tpl.ruleCount != null ? tpl.ruleCount : '若干') + ' 条规则，可随时在「流量序列 → 规则（⑤~⑯）」增删改。';
       };
       tplSel.onchange = renderParams;
 
@@ -2048,7 +2048,7 @@
   }
 
   // ③ 初始回源对象（首要分流）：独立抽屉，只承载「选择回源目标」这一包。
-  // 与 ① 匹配站点彻底分离（一个最小任务包一个抽屉），②/④/⑧ 各有独立抽屉。
+  // 与 ① 匹配站点彻底分离（一个最小任务包一个抽屉），② 安全 / 规则（⑤~⑯）/ ⑭ 源站池各有独立抽屉。
   async function openInitialOriginDrawer(host, anchor) {
     let site;
     try { site = await API.sites.get(host); } catch (e) { toast(e.message, 'err'); return; }
@@ -2155,8 +2155,8 @@
       syncHost();
       syncEngine();
       // 本抽屉只负责「③ 初始回源对象」这一包：地址/端口/协议/前缀/Host/引擎/权重。
-      // 源站级的 rewrite/cache/reqHeaders/respHeaders/超时/跟随3xx 属于 ④.5 / ④.8 / ⑧.1，
-      // 由「路由规则」「源站」抽屉各自管理；这里原样保留，保存时回写，绝不越界改写。
+      // 源站级的 rewrite/cache/reqHeaders/respHeaders/超时/跟随3xx 属于 ⑨ / ⑪ / ⑭，
+      // 由「路由规则」「源站池」抽屉各自管理；这里原样保留，保存时回写，绝不越界改写。
       row._carry = {};
       ['rewrite', 'cache', 'reqHeaders', 'respHeaders', 'originTimeoutMs', 'followRedirect', 'extraHeaders']
         .forEach((k) => { if (o[k] !== undefined) row._carry[k] = o[k]; });
@@ -2252,7 +2252,7 @@
       hhNote,
       hhCustomField,
 
-      el('div', { class: 'hint frag-note' }, '本抽屉只负责 ③ 这包。① 匹配站点、② 安全校验、④ 路由规则、⑧ 源站池细节均有各自独立抽屉，请在「流量序列」中点击对应阶段进入，此处不再重复承载。'),
+      el('div', { class: 'hint frag-note' }, '本抽屉只负责 ③ 首要分流这包。① 匹配站点、② 安全校验、规则（⑤~⑯）、源站池（⑭）细节均有各自独立抽屉，请在「流量序列」中点击对应阶段进入，此处不再重复承载。'),
     ]);
 
     // 新建单一源站编辑区（直接填地址 → 保存时联动创建）
@@ -2469,7 +2469,7 @@
       ]),
     ]);
 
-    openDrawer('安全防护: ' + host, '仅管理 ② 安全校验的 5 个最小任务包。不影响站点基础（①/③）、路由规则（④）与源站池（⑧）。', body, async () => {
+    openDrawer('安全防护: ' + host, '仅管理 ② 安全校验的 5 个最小任务包。不影响站点基础（①/③）、路由规则（⑤~⑯）与源站池（⑭）。', body, async () => {
       // 后端 saveSecurity 已是片段 API：仅合并 security 字段，互不越界
       await API.sites.saveSecurity(host, readSecurity());
       await refreshData();

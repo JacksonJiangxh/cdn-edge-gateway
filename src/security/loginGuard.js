@@ -277,10 +277,3 @@ export async function constantDelay(startedAt) {
     await new Promise((r) => setTimeout(r, remain));
   }
 }
-
-/** 导出常量供管理后台展示与其他模块复用。 */
-export const LOGIN_GUARD_LIMITS = Object.freeze({
-  maxFailures: MAX_FAILURES,
-  lockTtlSec: LOCK_TTL_SEC,
-  constantDelayMs: CONSTANT_DELAY_MS,
-});

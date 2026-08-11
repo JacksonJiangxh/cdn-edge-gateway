@@ -19,6 +19,7 @@
  */
 
 import { getGlobal } from '../config/store.js';
+import { hourKey } from '../utils/hourKey.js';
 
 /** 并发上限：一批最多同时发起多少个驱动查询。 */
 const CONCURRENCY = 10;
@@ -94,19 +95,6 @@ function rate(hit, miss) {
 /**
  * 时间戳 → `yyyymmddhh`（UTC），与两个驱动保持一致。
  * @param {number} ts 时间戳（ms）
- * @returns {string} 小时键
- */
-function hourKey(ts) {
-  const d = new Date(ts);
-  return (
-    `${d.getUTCFullYear()}` +
-    String(d.getUTCMonth() + 1).padStart(2, '0') +
-    String(d.getUTCDate()).padStart(2, '0') +
-    String(d.getUTCHours()).padStart(2, '0')
-  );
-}
-
-/**
  * 生成连续的小时键列表（升序，含当前小时）。
  * @param {number} hours 小时数
  * @returns {string[]} 小时键列表

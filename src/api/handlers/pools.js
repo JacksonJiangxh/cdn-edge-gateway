@@ -34,7 +34,7 @@ async function collectRefs(ctx) {
     else map.set(poolId, [ref]);
   };
 
-  const { sites, truncated } = await listAllSites(ctx);
+  let { sites, truncated } = await listAllSites(ctx);
   /** 尚未迁移的历史站点（仍带内联 origins），用于前端提示 */
   const legacySites = [];
   for (const s of sites) {
@@ -75,7 +75,10 @@ async function collectRefs(ctx) {
       }
     }
   } catch {
-    // 读取失败按「引用信息不完整」处理，由 truncated 语义提示前端谨慎删除
+    // 读取失败：全局规则的引用信息不完整，不可判定某源站"无引用"。
+    // 保守置 truncated=true，使 remove() 走 CONFLICT(409) 拒绝删除，
+    // 避免误删仍被全局规则引用的源站池导致全站 502（fail-open 漏洞 B1）。
+    truncated = true;
   }
 
   return { map, truncated, legacySites };

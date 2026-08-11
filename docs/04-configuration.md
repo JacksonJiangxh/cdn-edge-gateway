@@ -71,7 +71,7 @@
 > | 域名源站 + 自定义 Host | ✅ socket 全功能 | ⚠️ fetch 自动按域名设 Host | ✅ fetch 注入 Host 生效 |
 > | 裸 IP + 自定义 Host + SNI | ✅ socket 全功能 | ❌ 无 socket | ⚠️ 代码层无 SNI；用 **EO 平台级「源站组回源 Host 重写」** 兜底 |
 >
-> - **CF 端**：自定义回源 Host（含裸 IP）必须用 **Workers 形态部署**（`wrangler deploy`，`wrangler.toml` 已带 `sockets` 兼容标志），才能拿到 `cloudflare:sockets`。CF Pages 形态无 socket，只能域名源站自动 Host。
+> - **CF 端**：自定义回源 Host（含裸 IP）必须用 **Workers 形态部署**（`wrangler deploy`）。`cloudflare:sockets` 由 `src/proxy/engines/socketEngine.js` **运行时动态 `import`**，**无需在 `wrangler.toml` 声明 `sockets` 兼容标志**（`compatibility_flags` 仅有 `nodejs_compat`；加 `sockets` 反而会因 workerd 无此 flag 导致启动失败，见 `wrangler.toml` 注释）。CF Pages 形态无 socket，只能域名源站自动 Host。
 > - **EO 端**：边缘函数 `fetch` 允许向外部自定义 Host 设置 Host 头，故「域名源站 + 自定义 Host」代码层即可实现；「裸 IP + 自定义 Host + SNI」则配 **EO 源站组 + 回源 Host 重写**（控制台/规则引擎），Makers 函数只 `fetch` 到该源站组，Host 由 EO 平台注入。平台侧完整操作步骤见 [eo-origin-host.md](./07-eo-origin-host.md)。
 > - `engine=fetch` 时在 Cloudflare 上设 `hostHeader=client/custom` 会被静默丢弃（警告），但路由逻辑仍会注入；在 EdgeOne 上注入生效，无需改 `engine`。
 
@@ -193,7 +193,7 @@ conditions: [
 
 | 字段 | 说明 |
 |---|---|
-| `target` | 匹配对象（完整枚举）：`host` / `path` / `fullUrl` / `query` / `extension` / `filename` / `directory` / `method` / `protocol` / `header` / `cookie` / `clientIp` / `clientCountry` / `userAgent` / `referer` |
+| `target` | 匹配对象（完整枚举）：`host` / `path` / `fullUrl` / `query` / `extension` / `filename` / `directory` / `method` / `protocol` / `header` / `cookie` / `clientIp` / `clientCountry` / `userAgent` / `referer` / `origin` |
 | `op` | 操作符：见下方表格 |
 | `key` | 当 `target=header/cookie` 时必填（头的名字，如 `x-token`） |
 | `values[]` | 匹配值列表（多值之间 OR）；`op=exists/notExists` 时不需要 |

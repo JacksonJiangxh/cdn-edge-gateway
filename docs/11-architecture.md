@@ -45,12 +45,11 @@ cdn-edge-gateway/
 │   │   ├── matcher.js      # 规则匹配（多条件 OR 组 AND，按优先级）
 │   │   ├── rewrite.js      # 路径重写（prefix/strip/regex）
 │   │   ├── cachekey.js     # 缓存键生成（回源 URL + host 维度 + 代次 + 自定义维度）
-│   │   ├── cache.js        # 边缘缓存读写（CF 用 caches.default；EO 走响应头委托 EDGE_HEADER + 同站 fetch 节点缓存 eoEdgeEngine.js）
-│   │   └── image.js        # 图片优化（Accept 协商 webp/avif，仅 CF）
+│   │   └── cache.js        # 边缘缓存读写（CF 用 caches.default；EO 走响应头委托 EDGE_HEADER + 同站 fetch 节点缓存 eoEdgeEngine.js）
 │   ├── balancer/
 │   │   ├── pick.js         # 选源入口
 │   │   ├── strategy.js     # 调度策略：chain/roundrobin/weighted/random/iphash
-│   │   ├── failover.js     # 链式回退（按 order + fallbackStatusCodes）
+│   │   ├── failover.js     # 链式回退（按 order + retryOn 状态码）
 │   │   └── circuit.js      # 被动熔断（连续失败隔离，无需 Cron）
 │   ├── config/
 │   │   ├── schema.js       # ★ 配置校验+规范化（唯一数据真相源，所有字段都在这）
@@ -101,11 +100,11 @@ cdn-edge-gateway/
    │     │      命中 → 执行该 rule.action（源站池/重写/Host/头/强制HTTPS/重定向/自定义响应/缓存）
    │     ├─ balancer.pick()：在目标池内按策略选源（chain/roundrobin/weighted/random/iphash）
    │     │      ├─ proxy 回源（fetch/socket 引擎，带 pathPrefix/重写/自定义Host/超时/跟随3xx）
-   │     │      ├─ 失败（网络错误 / fallbackStatusCodes）→ 链式回退下一源站
+   │     │      ├─ 失败（网络错误 / retryOn 状态码）→ 链式回退下一源站
    │     │      └─ 连续失败 → 被动熔断隔离（默认 60s，无需 Cron）
    │     ├─ proxy.headers()：入向注入 X-EdgeGateway-Client-IP；出向改写请求/响应头
    │     ├─ proxy.cache()：边缘缓存（CF 用 caches.default API；EO 走响应头委托 + 路径 A 同站 fetch 节点缓存，详见缓存本质章节）
-   │     ├─ proxy.image()：图片优化（CF 协商 webp/avif；EO 降级原图）
+   │     ├─ 图片优化：依赖 CF 平台原生 fetch 协商 webp/avif（**无独立 JS 模块**，`src/proxy/` 下不存在 image.js）；EO 因无该能力自动降级为原图
    │     └─ proxy.pipeline()：组装最终响应，注入品牌头 Server: EdgeGateway / Via: 1.1 EdgeGateway
    │
    └─ stats.collector()：异步记录访问统计（KV/D1）
@@ -232,7 +231,7 @@ const originResp = await requestWithFailover(ctx, [pick], rule, effectiveHostHea
 | `iphash` | 客户端 IP 哈希取模，稳定落源 | 需要会话粘性的场景（取不到 IP 退化为 chain） |
 
 **链式回退 / 被动熔断**
-- 源站返回 `fallbackStatusCodes`（如 502/503）或网络异常 → 自动切下一可用源站。
+- 源站返回 `retryOn` 状态码（如 502/503）或网络异常 → 自动切下一可用源站。
 - 某源站连续失败 → 自动隔离一段时间（默认 60s），无需 Cron，Pages/EdgeOne 均可用。
 
 ---

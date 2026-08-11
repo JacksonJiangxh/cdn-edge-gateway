@@ -96,7 +96,7 @@ function ipMatchesRule(ip, rule) {
 
     const baseInt = ipv4ToInt(base);
     const ipInt = ipv4ToInt(target);
-    // IPv6 CIDR 不支持，退化为字符串前缀判断，避免误放行
+    // 仅支持 IPv4 CIDR：base/target 任一无法解析为 IPv4（如 IPv6）则视为不匹配，直接 false
     if (baseInt === null || ipInt === null) return false;
     if (bits === 0) return true;
     const mask = bits === 32 ? 0xffffffff : (0xffffffff << (32 - bits)) >>> 0;

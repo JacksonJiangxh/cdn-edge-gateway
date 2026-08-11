@@ -71,16 +71,7 @@ const MAX_SHARD_READS_PER_QUERY = SHARD_COUNT * 3;
  * 把时间戳格式化为 `yyyymmddhh`（UTC）。
  * 统一用 UTC，避免不同边缘节点时区不一致导致同一小时被写进两个桶。
  * @param {number} [ts] 时间戳（ms），缺省为当前时间
- * @returns {string} 形如 "2026080814"
- */
-export function hourKey(ts) {
-  const d = new Date(Number.isFinite(ts) ? ts : Date.now());
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(d.getUTCDate()).padStart(2, '0');
-  const h = String(d.getUTCHours()).padStart(2, '0');
-  return `${y}${m}${day}${h}`;
-}
+import { hourKey } from '../utils/hourKey.js';
 
 /**
  * 规整 host，防止非法字符污染 KV 键空间。
