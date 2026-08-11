@@ -616,6 +616,11 @@ function normRule(input, idx) {
     errors.push(`${label} 回源 Host 为 custom 时必须填写 custom 值`);
   }
 
+  // 规则级回源连接参数（⑨ Origin Rules）：覆盖源站物理属性，空串/0 表示回退源站
+  const aEngine = enumOf(a.engine, ['', 'fetch', 'socket', 'r2'], '');
+  const aScheme = enumOf(a.scheme, ['', 'http', 'https'], '');
+  const aPort = int(a.port, 0, 0, 65535);
+
   return {
     value: {
       id,
@@ -647,6 +652,9 @@ function normRule(input, idx) {
         forceHttpsStatus: int(a.forceHttpsStatus, 301, 301, 308),
         followRedirect: bool(a.followRedirect, false),
         originTimeoutMs: int(a.originTimeoutMs, 0, 0, 120000),
+        engine: aEngine,
+        scheme: aScheme,
+        port: aPort,
       },
     },
     errors,

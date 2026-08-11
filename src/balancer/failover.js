@@ -77,8 +77,25 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
   }
 
   for (let attempt = 0; attempt < totalAttempts; attempt++) {
-    const origin = selectOrigin(pool, ctx, excludeIds);
-    if (!origin) break; // 没有可用源站了
+    const selected = selectOrigin(pool, ctx, excludeIds);
+    if (!selected) break; // 没有可用源站了
+
+    // ---- 合并「规则级回源连接参数」到源站物理属性 ----
+    // ⑨ Origin Rules：engine / scheme / port 由规则 action 覆盖源站物理属性。
+    // 规则未设（engine=''/scheme=''/port=0）则回退源站自身值，保持向后兼容。
+    // 用临时副本，绝不写入 pool 里的原始 origin —— 否则会污染熔断统计与后续请求。
+    const ra = rule?.action || {};
+    const effScheme = ra.scheme || selected.scheme || 'https';
+    const effPort = Number(ra.port) > 0 ? Number(ra.port)
+      : Number(selected.port) > 0 ? Number(selected.port)
+      : (effScheme === 'http' ? 80 : 443);
+    const effEngine = ra.engine || selected.engine || 'fetch';
+    const origin = {
+      ...selected,
+      scheme: effScheme,
+      port: effPort,
+      engine: effEngine,
+    };
 
     excludeIds.push(origin.id);
     ctx.debug.tried.push(origin.id);
@@ -88,18 +105,18 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
 
     // ---- 合并源站级与规则级配置 ----
     // 源站级打底，规则级覆盖
-    const mergedRewrite = mergeRewrite(origin.rewrite, rule?.action?.rewrite);
-    const mergedReqHeaders = mergeHeaderOps(origin.reqHeaders, rule?.action?.reqHeaders);
-    const mergedClientIpHeader = mergeClientIpHeader(origin.clientIpHeader, rule?.action?.clientIpHeader);
+    const mergedRewrite = mergeRewrite(origin.rewrite, ra.rewrite);
+    const mergedReqHeaders = mergeHeaderOps(origin.reqHeaders, ra.reqHeaders);
+    const mergedClientIpHeader = mergeClientIpHeader(origin.clientIpHeader, ra.clientIpHeader);
 
     // 超时：规则级 > 源站级 > 池级
     const originTimeout = Number(origin.originTimeoutMs) || 0;
-    const ruleTimeout = Number(rule?.action?.originTimeoutMs) || 0;
+    const ruleTimeout = Number(ra.originTimeoutMs) || 0;
     const timeoutMs = ruleTimeout > 0 ? ruleTimeout : originTimeout > 0 ? originTimeout : poolTimeout;
 
     // 跟随重定向：规则级优先，否则源站级
-    const followRedirect = rule?.action?.followRedirect !== undefined
-      ? rule.action.followRedirect === true
+    const followRedirect = ra.followRedirect !== undefined
+      ? ra.followRedirect === true
       : origin.followRedirect === true;
 
     // 构造临时规则对象以复用 buildOriginUrl
@@ -107,16 +124,6 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
 
     let originUrl;
     if (origin.engine === 'r2') {
-      // R2 回源只需 pathname（key 由 r2Engine 解析），没有公网 Host 概念，
-      // 用占位 authority 构造一个合法 URL 以避免 new URL 抛错。
-      const rewritten = applyRewrite(ctx.url.pathname, effectiveRule.action.rewrite);
-      const fullPath = origin.pathPrefix
-        ? joinPath(origin.pathPrefix, rewritten)
-        : rewritten;
-      originUrl = new URL('https://r2.invalid');
-      originUrl.pathname = fullPath;
-      originUrl.search = ctx.url.search;
-    } else {
       // 回源 Host 按「源站级 → 规则级 → 站点级」解析：每个 origin 独立算自己的 Host，
       // 解决「同一源站组多源站各自 Host 不同」的场景（规则级 custom 可覆盖单个源站）。
       const originHostHeader = resolveHostHeader(rule?.action?.hostHeader, origin.hostHeader, hostHeader);

@@ -233,7 +233,16 @@ conditions: [
 | `respHeaders` | 改**响应**头（返回前）`{set:{},remove:[]}` | 空 |
 | `followRedirect` | 回源跟随 3xx（最多 3 次） | `false` |
 | `originTimeoutMs` | 回源超时（0=用引擎默认，上限 120000ms） | `0` |
+| `engine` | 回源引擎（⑨ Origin Rules 连接参数）：`''`=沿用源站 / `fetch` / `socket` / `r2` | `''`（沿用源站） |
+| `scheme` | 回源协议（⑨ Origin Rules 连接参数）：`''`=沿用源站 / `http` / `https` | `''`（沿用源站） |
+| `port` | 回源端口（⑨ Origin Rules 连接参数）：`0`=沿用源站（按 scheme 取 443/80） | `0`（沿用源站） |
 | `cache` | 规则级缓存（见下） | 关 |
+
+> **回源连接参数与旧版「源站级规则」的关系**：早期版本把 `engine` / `scheme` / `port`
+> 直接写在每个源站对象上作为「源站级规则」。新版流量序列统一为**纯两层架构**（全站级 + 站点级），
+> 这些物理属性改由 **⑨ Origin Rules** 的 `action.engine` / `action.scheme` / `action.port` 表达：
+> 用匹配条件 `回源目标 = 某源站id` + 上述连接参数动作，即可在一条流量线上表达
+> 「不同源站走不同端口 / 协议 / 引擎」。规则未设（空串/0）时回退源站自身属性，向后兼容。
 
 **rewrite（路径重写）**
 | `type` | 行为 | 配置 |

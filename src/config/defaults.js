@@ -240,6 +240,10 @@ export const DEFAULT_RULE_ACTION = Object.freeze({
   forceHttps: false,
   followRedirect: false,
   originTimeoutMs: 0, // 0 = 沿用源站池 failover.timeoutMs
+  // 回源连接参数（⑨ Origin Rules）：空/0 表示回退源站物理属性，由 failover 合并决定
+  engine: '',   // '' = 沿用源站 engine；可填 fetch/socket/r2
+  scheme: '',   // '' = 沿用源站 scheme；可填 http/https
+  port: 0,      // 0 = 沿用源站 port（按 scheme 取 443/80）
 });
 
 /**

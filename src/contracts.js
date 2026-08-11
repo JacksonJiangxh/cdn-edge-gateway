@@ -184,6 +184,14 @@
  * @property {number}   [forceHttpsStatus] 强制 HTTPS 跳转状态码，默认 301（301-308）
  * @property {boolean}  [followRedirect]  回源跟随 3xx 重定向
  * @property {number}   [originTimeoutMs] 覆盖回源超时
+ * —— 以下三项为「回源连接参数」（对应 ⑨ Origin Rules）：规则级覆盖源站物理属性，未设则回退源站 ——
+ * @property {'fetch'|'socket'|'r2'} [engine]  回源引擎（规则级优先；与源站 engine 同取值，未设回退源站 engine）
+ * @property {'http'|'https'}    [scheme]  回源协议（规则级优先；未设回退源站 scheme，默认 https）
+ * @property {number}   [port]             回源端口（规则级优先；未设回退源站 port，默认按 scheme 取 443/80）
+ *
+ * 设计意图：旧版「源站级规则」（给每个源站单独配 port/protocol/engine/path/host）被统一收编到
+ * 流量序列的 ⑨ Origin Rules —— 用 `回源目标(=源站 id)` 作为匹配条件 + 上述连接参数动作，即可在
+ * 纯「全站级 + 站点级」两层规则架构下，表达「不同源站走不同端口/协议/引擎」的差异化回源。
  */
 
 /**

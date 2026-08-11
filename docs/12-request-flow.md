@@ -8,7 +8,8 @@
 
 > 单一事实来源：本图把「单回源源站」与「多源站源站组」两种场景**合并为一条流水线**，
 > 仅在「选源站 / 回源循环」两个环节用【单源站】【源站组】分支标注差异。
-> 每一个最细化的小步骤 = 前端一个独立抽屉（边界明确、功能明确、互不越界）。
+> 全图共 18 个阶段，阶段之间相互独立（AND）；每个规则型阶段内部是 OR（按 priority 降序从上到下匹配，命中即跳出本阶段进入下游）。
+> 站点序列某阶段无任何设置时，自动回落「全站通用规则」作为实际生效。
 >
 > 代码依据：`src/proxy/pipeline.js` `src/api/router.js` `src/proxy/matcher.js`
 > `src/security/guard.js` `src/balancer/failover.js` `src/balancer/strategy.js`
@@ -60,13 +61,15 @@
          限流(sec.rateLimit.enabled) 开启 且 超限(rpm) → 429 + Retry-After (block:'ratelimit')
          └─ 以上 5 包全部通过 ─► 继续 ③
    ▼
-③ 首要分流：先选定「初始回源对象」—— 整条管线的「首要规则条件」
+③ 首要分流：由负载均衡**实际选出**一个具体的「本次回源对象」（不是虚拟占位）
+   │   ★ 单源站 → 就是该源站本身；源站池 → 按 chain/roundrobin/随机/加权/IP哈希 实际选出的某一个 oX。
+   │   ★ 这个具体对象成为后续 ⑤~⑱ 规则的「回源目标」匹配维度（target=origin / originAddr），
+   │     在一条线上即可用它做多分支：如「路径=/img/ 且 回源目标=o1 → action」「… 回源目标=o2 → action」，
+   │     ⑦~⑱ 全部共用一条线，⑩ 确定实际源站 / ⑭ 回源循环 是真实只读的实际生效结果。
    │
-   │   ★★★ 概念区分（重要）★★★
-   │     「初始回源对象」(initialOrigin) ≠ 「最终回源动作对象」(effectiveOrigin)。
-   │     - initialOrigin：本步③选出，仅作为规则引擎的 origin 匹配维度（oriX AND 规则），
-   │       是「路由分流依据」，并不等于真正发请求的目标。
-   │     - effectiveOrigin：⑧回源循环里真正 fetch 的目标，会再经「回源改写」加工
+   │   「本次回源对象」(initialOrigin) ≠ 「最终回源动作对象」(effectiveOrigin，在 ⑭ 才成形)：
+   │     - initialOrigin：本步③按负载均衡实际选出，作为规则引擎的 origin 匹配维度（oriX AND 规则）。
+   │     - effectiveOrigin：⑭ 回源循环里真正 fetch 的目标，会再经「回源改写」加工
    │       （规则 action 的 rewrite/hostHeader/inlineOrigins/poolId 改写 + 故障转移换源），
    │       可能与 initialOrigin 落到不同的真实服务上。
    │
@@ -201,21 +204,26 @@
                excludeIds.push(oX.id)              ← 试过即排除, 【源站组】下轮换换源
                ctx.debug.tried.push(oX.id); ctx.debug.originId=oX.id
                │
-               ├─ ⑧.1 合并本源站配置(源站级打底, 规则级覆盖) → 形成「回源改写」输入
-               │     rewrite     = mergeRewrite(oX, rule)  ← 规则 rewrite 改写路径
-               │     reqHeaders  = oX.extraHeaders < 规则reqHeaders
-               │     clientIpHeader = 取自 源站/规则
-               │     timeout     = 规则originTimeoutMs > oX.originTimeoutMs > 池timeoutMs > 10000
-               │     followRedirect = 规则指定 ? : oX.followRedirect
-               │     oXHost      = resolveHostHeader(规则级, oX.hostHeader, effectiveHostHeader)  ← 回源改写·host
-               │                    ★★【源站组】每个源站算自己的Host (同池3源站各自不同)
-               │
-               ├─ ⑧.2 构造回源 URL buildOriginUrl(ctx, oX, rule, oXHost)  ← 回源改写·path/addr/port/host
-               │     rewritten = applyRewrite(pathname, rule.action.rewrite)  ← 规则 rewrite 改写路径
-               │     fullPath  = oX.pathPrefix ? joinPath(oX.pathPrefix, rewritten) : rewritten
-               │     scheme/addr/port = oX.scheme/oX.addr/oX.port
-               │     authority = oXHost.mode==='custom' ? custom(支持host:port)  ← 可能被规则改写为别的域名
-               │               : 'client' ? ctx.url.hostname : oX.addr
+              ├─ ⑧.1 合并本源站配置(源站级打底, 规则级覆盖) → 形成「回源改写」输入
+              │     rewrite     = mergeRewrite(oX, rule)  ← 规则 rewrite 改写路径
+              │     reqHeaders  = oX.extraHeaders < 规则reqHeaders
+              │     clientIpHeader = 取自 源站/规则
+              │     timeout     = 规则originTimeoutMs > oX.originTimeoutMs > 池timeoutMs > 10000
+              │     followRedirect = 规则指定 ? : oX.followRedirect
+              │     ★ 回源连接参数(⑨ Origin Rules)：engine/scheme/port 由规则 action 覆盖源站物理属性
+              │         effEngine = ra.engine || oX.engine || 'fetch'
+              │         effScheme = ra.scheme || oX.scheme || 'https'
+              │         effPort   = ra.port>0 ? ra.port : oX.port || (effScheme==='http'?80:443)
+              │         （用临时副本，绝不污染池内原始 oX，以免影响熔断统计/后续请求）
+              │     oXHost      = resolveHostHeader(规则级, oX.hostHeader, effectiveHostHeader)  ← 回源改写·host
+              │                    ★★【源站组】每个源站算自己的Host (同池3源站各自不同)
+              │
+              ├─ ⑧.2 构造回源 URL buildOriginUrl(ctx, oX, rule, oXHost)  ← 回源改写·path/addr/port/host
+              │     rewritten = applyRewrite(pathname, rule.action.rewrite)  ← 规则 rewrite 改写路径
+              │     fullPath  = oX.pathPrefix ? joinPath(oX.pathPrefix, rewritten) : rewritten
+              │     scheme/addr/port = effScheme/oX.addr/effPort  ← 已并入⑧.1的⑨连接参数覆盖
+              │     authority = oXHost.mode==='custom' ? custom(支持host:port)  ← 可能被规则改写为别的域名
+              │               : 'client' ? ctx.url.hostname : oX.addr
                │     ★ originUrl 即为「最终回源动作对象」(effectiveOrigin) 的真实目标
                │     originUrl.pathname=fullPath, search=ctx.url.search
                │
@@ -279,32 +287,36 @@
 
 ---
 
-## 流量序列步骤 ↔ 前端抽屉（最小任务包映射）
+## 流量序列步骤 ↔ 前端抽屉（18 阶段映射）
 
-> 每个最细化小步骤 = 一个独立抽屉（边界明确、功能明确、互不越界）。
+> 顺序固定不可更改，共 18 阶段；阶段之间相互独立（AND），规则型阶段内部按 priority 降序 OR 匹配（命中即跳出本阶段）。
+> 站点序列某阶段无设置时，回落「全站通用规则」(getGlobalRules) 同阶段兜底。
 > 前端已实现 basics / security / rules 三个独立片段抽屉 + 规则内 action 操作卡片，
 > 本表即「前端切片段」的权威依据。
 
-| 流量序列步骤 | 前端抽屉 / 卡片 | 后端片段 API | 管理字段 |
-|---|---|---|---|
-| ① 匹配站点 | 站点基础抽屉 | `PUT /sites/:host/basics` | host / enabled / ipv6Support |
-| ②.1 IP 访问规则 | 安全防护抽屉 · IP 访问控制 | `PUT /sites/:host/security` | ipWhitelist / ipBlacklist |
-| ②.2 WAF · UA/Referer | 安全防护抽屉 · UA黑名单 / 防盗链 | `PUT /sites/:host/security` | uaBlacklist / refererMode / refererList |
-| ②.3 自动程序 | 安全防护抽屉 · 自动程序（独立最小任务包） | `PUT /sites/:host/security` | botManagement |
-| ②.4 Access · 令牌鉴权 | 安全防护抽屉 · 签名 URL | `PUT /sites/:host/security` | signedUrl |
-| ②.5 速率限制 | 安全防护抽屉 · 请求限速 | `PUT /sites/:host/security` | rateLimit |
-| ③ 首要分流 | 站点基础抽屉 · 源站方式（选已有源站 / 新建单一源站） | `PUT /sites/:host/basics` | poolId（传 origins 时自动建 single 源站后回填） |
-| ④.1/④.2 匹配规则 | 路由规则抽屉 | `PUT /sites/:host/rules` | rules[].match / getGlobalRules |
-| ④.3 终止型动作 | 规则卡片 · 操作：强制HTTPS / 重定向 / 直接响应 | `PUT /sites/:host/rules` | action.forceHttps / redirect / directResponse |
-| ④.4 修改请求头 | 规则卡片 · 操作：回源请求头 | `PUT /sites/:host/rules` | action.reqHeaders |
-| ④.5 回源改写·路径 | 规则卡片 · 操作：路径重写 | `PUT /sites/:host/rules` | action.rewrite |
-| ④.6 回源改写·Host | 规则卡片 · 操作：回源 Host | `PUT /sites/:host/rules` | action.hostHeader |
-| ④.7 回源改写·候选源站 | 规则卡片 · 目标源站组 / 源站池抽屉 | `PUT /sites/:host/rules` + `PUT /pools/:id` | action.poolId / inlineOrigins / pool.origins |
-| ④.8 修改响应头 | 规则卡片 · 操作：节点响应头 | `PUT /sites/:host/rules` | action.respHeaders |
-| ④.8 缓存策略 | 规则卡片 · 操作：缓存配置 | `PUT /sites/:host/rules` | action.cache |
-| ④.8 客户端IP/超时/跟随 | 规则卡片 · 操作：客户端IP透传 / 回源超时 / 跟随3xx | `PUT /sites/:host/rules` | action.clientIpHeader / originTimeoutMs / followRedirect |
-| ⑤ 实际源站池 | （无独立抽屉，由③+④.7 推导） | — | — |
-| ⑥ 缓存键 | （无独立抽屉，由④.8缓存策略+源站cache+站点cacheGen合并） | — | — |
-| ⑦ 查边缘缓存 | （无独立抽屉，运行时行为） | — | — |
-| ⑧ 回源循环 | 源站池抽屉（源站地址/策略/故障转移） | `PUT /pools/:id` | origins[].addr/port/scheme/pathPrefix / strategy / failover |
-| ⑨ clone / ⑩ 响应头 / ⑪ 写缓存 / ⑫ 统计 | （无独立抽屉，随 rules/pool 落库） | — | — |
+| 阶段 | 前端卡片 | 可编辑抽屉 / 兜底 | 后端片段 API | 管理字段 |
+|---|---|---|---|---|
+| ① 匹配站点 | seqStage ① | 站点基础抽屉 | `PUT /sites/:host/basics` | host / enabled / ipv6Support |
+| ②.1 IP 访问规则 | seqStage ②.1 | 安全防护抽屉 · IP 访问控制 | `PUT /sites/:host/security` | ipWhitelist / ipBlacklist |
+| ②.2 WAF · UA/Referer | seqStage ②.2 | 安全防护抽屉 · UA/防盗链 | `PUT /sites/:host/security` | uaBlacklist / refererMode / refererList |
+| ②.3 自动程序 | seqStage ②.3 | 安全防护抽屉 · 自动程序 | `PUT /sites/:host/security` | botManagement |
+| ②.4 Access · 令牌鉴权 | seqStage ②.4 | 安全防护抽屉 · 签名 URL | `PUT /sites/:host/security` | signedUrl |
+| ②.5 速率限制 | seqStage ②.5 | 安全防护抽屉 · 请求限速 | `PUT /sites/:host/security` | rateLimit |
+| ③ 首要分流 | seqStage ③ | 初始回源对象抽屉 · 源站方式 | `PUT /sites/:host/basics` | poolId |
+| ④ URL 规范化 | seqStage ④（只读占位） | 暂未实现，跳过 | — | — |
+| ⑤ URL 重写 | seqStage ⑤ + 规则列表 | 受限规则抽屉 · URL 重写 | `PUT /sites/:host/rules` | action.rewrite |
+| ⑥ 重定向规则 | seqStage ⑥ + 规则列表 | 受限规则抽屉 · 重定向 | `PUT /sites/:host/rules` | action.redirect |
+| ⑦ 强制 HTTPS / 直接响应 | seqStage ⑦ + 规则列表 | 受限规则抽屉 · 终止型 | `PUT /sites/:host/rules` | action.forceHttps / directResponse |
+| ⑧ 修改请求头 | seqStage ⑧ + 规则列表 | 受限规则抽屉 · 回源请求头 | `PUT /sites/:host/rules` | action.reqHeaders |
+| ⑨ Origin Rules | seqStage ⑨ + 规则列表 | 受限规则抽屉 · Origin Rules | `PUT /sites/:host/rules`（+`PUT /pools/:id`） | action.hostHeader / action.engine / action.scheme / action.port / poolId / inlineOrigins |
+| ⑩ 确定实际源站 | seqStage ⑩（推导只读） | — | — | — |
+| ⑪ Cache Rules | seqStage ⑪ + 规则列表 | 受限规则抽屉 · Cache Rules | `PUT /sites/:host/rules` | action.cache |
+| ⑫ 缓存键 | seqStage ⑫ | 站点基础抽屉（cacheGen） | `PUT /sites/:host/basics` | cacheGen |
+| ⑬ 查缓存 | seqStage ⑬（运行时只读） | — | — | — |
+| ⑭ 回源循环 | seqStage ⑭ + 子步骤 | 源站池抽屉（地址/策略/故障转移） | `PUT /pools/:id` | origins[] / strategy / failover |
+| ⑮ clone | seqStage ⑮（运行时只读） | — | — | — |
+| ⑯ 改写响应头 / Response Cache Rule | seqStage ⑯ + 规则列表 | 受限规则抽屉 · 改写响应头 | `PUT /sites/:host/rules` | action.respHeaders |
+| ⑰ 写缓存 | seqStage ⑰（运行时只读） | — | — | — |
+| ⑱ 返回用户 | seqStage ⑱（固定行为） | — | — | — |
+
+> 全站通用规则（兜底）视图：在「站点选择」里选「全站通用规则（兜底默认）」，同样按 18 阶段展示全局规则，编辑入口为「全站通用规则编辑器」。
