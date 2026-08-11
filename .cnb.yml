@@ -21,7 +21,7 @@
 #   EO_SECRET                   —— EdgeOne API Token（EO Pages 控制台 → API Token 新建）
 #   EO_PAGES_PROJECT            —— 可选，EO Pages 项目名，默认 cdn-edge-gateway
 .secret-envs: &secret-envs
-  - ${CNB_SECRET_ENVS:-https://cnb.cool/xzydm/xzsecret/-/blob/main/cdn-edge-gateway.yml}
+  - https://cnb.cool/xzydm/xzsecret/-/blob/main/cdn-edge-gateway.yml
 
 # ---------------- 校验步骤（仅手动校验按钮使用，绝不含部署） ----------------
 .ci-stages: &ci-stages

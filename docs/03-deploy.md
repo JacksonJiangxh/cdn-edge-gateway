@@ -63,29 +63,70 @@ npm run build
 
 ---
 
-## 第 3 步：创建并绑定存储（KV 必做）
+## 第 3 步：创建并绑定存储
 
-配置全存在 KV，**不绑服务起不来**。流程是「**先创建命名空间 → 再绑定到项目**」，两步都要做。变量名**必须**为下表（拼错服务就读不到配置）：
+网关的配置全存在 **KV**，所以 KV 是**必做**项；**R2、D1 按需**（不用的话不用建）。三类存储都是「**先创建 → 再绑定到项目**」两步，变量名（binding）必须严格按下表，拼错服务就读不到。
 
-| 绑定类型 | 变量名 | 何时需要 |
-|---|---|---|
-| KV namespace | `CDN_KV` | **必做** |
-| R2 bucket | `CDN_R2` | 源站 `engine=r2` 时 |
-| D1 database | `CDN_DB` | `statsDriver=d1` 时（EO 无 D1，统计回落 KV） |
+| 绑定类型 | 变量名 | 何时需要 | 说明 |
+|---|---|---|---|
+| KV namespace | `CDN_KV` | **必做** | 存全部配置（站点/源站池/规则/全局），不绑服务起不来 |
+| R2 bucket | `CDN_R2` | 源站 `engine=r2` 时 | **仅 Cloudflare**；回源到 R2 桶，走骨干网不出公网、不计 egress |
+| D1 database | `CDN_DB` | `statsDriver=d1` 时 | 统计库；**EO 无 D1**，EO 请保持 `statsDriver=kv`（默认） |
 
-**① 先创建命名空间（KV 必做）**
+> **门槛判断**：绝大多数用户只建 KV 就够了。只有「想让某个源站回源到 R2 桶」才建 R2；只有「CF 上想把访问统计存进 D1 而不是 KV」才建 D1。下面三种都给完整步骤，按你需要的来。
 
-- **CF**：Dashboard → **Workers & Pages** → 左侧 **KV** → **Create a namespace**，起名（如 `cdn-kv`）。创建后记住它的 **Namespace ID**（后面绑定要用）。
+### 3.1 KV（必做）
+
+**① 创建命名空间**
+
+- **CF**：Dashboard → **Workers & Pages** → 左侧 **KV** → **Create a namespace**，起名（如 `cdn-kv`）。记下 **Namespace ID**。
 - **EO**：控制台 → **存储 → KV 存储** → **创建命名空间**，起名（如 `cdn-kv`）。
 
-> 这只是"建一个空仓库"，还没挂到你的服务上。R2 / D1 同理先创建（按需）。
+**② 绑定到项目**（Variable name 必须写 `CDN_KV`）
 
-**② 再绑定到你的项目**（变量名必须写 `CDN_KV`）
+- **CF**：你的 Worker/Pages → **Settings → Variables / Bindings** → **Add** → 选 KV namespace → 填 `CDN_KV`，关联到刚创建的命名空间。
+- **EO**：项目设置 → **存储绑定** → 添加 KV 绑定，变量名 `CDN_KV`，关联命名空间。
 
-- **CF**：Dashboard → 你的 Worker/Pages → **Settings → Variables / Bindings** → **Add** → 选 KV namespace，Variable name 填 `CDN_KV`，绑定到刚才创建的命名空间。
-- **EO**：项目设置 → **存储绑定** → 添加 KV 绑定，变量名 `CDN_KV`，关联到刚才创建的命名空间。
+### 3.2 R2（仅 Cloudflare，按需）
 
-> 桶名（如 `cdn-assets`）≠ 绑定变量名（`CDN_R2`）。源站配置里填的是**变量名**。
+用于源站 `engine:'r2'`：Worker 进程内直接读 R2 桶，**不出公网、不计 egress 带宽费**，比「fetch 你的 R2 自定义域名」省得多。
+
+**① 创建桶**
+
+- **CF**：Dashboard → **R2** → **Create bucket**，起名（如 `cdn-assets`）。桶**无需**开启 Public Access / 自定义域——Worker 鉴权读取即可，更安全。
+- **EO**：不支持 R2 binding，`engine:'r2'` 在 EO 运行时返回 502，请改用 `fetch` + 私有签名回源或平台对象存储方案。
+
+**② 绑定到项目**（Variable name 必须写 `CDN_R2`）
+
+- **CF**：你的 Worker/Pages → **Settings → Variables / Bindings** → **Add** → 选 R2 bucket → 填 `CDN_R2`，关联到刚创建的桶。
+
+**③ 在源站配置里指定**（管理面或 `config/global` 的 `origins[]`）
+
+```json
+{ "engine": "r2", "r2Binding": "CDN_R2", "r2KeyMode": "none" }
+```
+
+> 桶名（`cdn-assets`）≠ 绑定变量名（`CDN_R2`）。源站配置里 `r2Binding` 填的是**变量名** `CDN_R2`，不是桶名。更多 key 映射规则见 [04 配置详解](./04-configuration.md)。
+
+### 3.3 D1（仅 Cloudflare，按需）
+
+用于把访问统计从默认 KV 改存 D1（查询更顺手）。EO 无 D1，保持默认 `statsDriver=kv` 即可。
+
+**① 创建数据库**
+
+- **CF**：Dashboard → **Workers & Pages** → 左侧 **D1** → **Create database**，起名（如 `edge-cdn-stats`）。记下 **database_id**。
+
+**② 绑定到项目**（Variable name 必须写 `CDN_DB`）
+
+- **CF**：你的 Worker/Pages → **Settings → Variables / Bindings** → **Add** → 选 D1 database → 填 `CDN_DB`，关联到刚创建的库。
+
+**③ 开启 D1 统计**（管理面或 `config/global`）
+
+```json
+{ "statsDriver": "d1" }
+```
+
+> 不写则默认 `kv`，统计落 KV，无需建 D1。
 
 ---
 
