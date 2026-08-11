@@ -164,6 +164,7 @@ async function buildInlineUI(frontendJs, css) {
   }
 
   // --- 注入 JS ---
+  // 前端源码原样内联（不转义反引号/${）。
   const scriptTag = `<script>\n${frontendJs}\n</script>`;
   html = html.replace(/<script[^>]+src=["'](?:\.\/)?(?:api|app)\.js["'][^>]*>\s*<\/script>/gi, '');
   if (/<\/body>/i.test(html)) {
@@ -174,15 +175,25 @@ async function buildInlineUI(frontendJs, css) {
 
   html = minifyHtml(html);
 
+  // 关键修复：UI_HTML 会被 esbuild 在打包 worker 时改写成反引号模板字面量。
+  // 若内部残留反引号（app.js 大量使用模板字符串），外层模板字符串会在该反引号处
+  // 提前闭合，使 UI_HTML 尾部的 </html> 等内容泄漏成裸代码，破坏内联脚本语法
+  // （典型表现：EXAMPLES 数组的 '^(.*)$' 被插入 </html>，浏览器报
+  // Invalid or unexpected token）。
+  // 解决：对 html 做 base64 编码，字符串内只含 [A-Za-z0-9+/=]，绝无反引号/<>/$
+  // 等特殊字符，esbuild 改写字符串时边界不可能破裂。运行时由 adminPage 解码。
+  const uiHtmlB64 = Buffer.from(html, 'utf8').toString('base64');
+
   const out = `/**
  * 自动生成文件 —— 请勿手动编辑
  * 由 build.mjs 从 web/ 目录内联生成（无静态托管环境兜底用）
  * 生成时间: ${new Date().toISOString()}
  */
-export const UI_HTML = ${JSON.stringify(html)};
-// 以下两导出供 _worker.js 在「无独立静态托管」时也能透传管理面静态资源（兜底）
-export const UI_CSS = ${JSON.stringify(css ?? '')};
-export const UI_JS = ${JSON.stringify(frontendJs ?? '')};
+// UI_HTML 以 base64 存储（见上方注释），运行时由 adminPage 解码，避免 esbuild
+// 把超长含反引号的 HTML 改写成模板字面量时边界破裂污染内联脚本。
+export const UI_HTML_B64 = ${JSON.stringify(uiHtmlB64)};
+// UI_CSS 较短且不含反引号风险，仍按需透传；为一致也做 base64。
+export const UI_CSS_B64 = ${JSON.stringify(Buffer.from(css ?? '', 'utf8').toString('base64'))};
 `;
 
   await mkdir(SRC, { recursive: true });

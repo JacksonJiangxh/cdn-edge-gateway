@@ -75,15 +75,22 @@ export async function tryServePanelStatic(ctx, req, adminPath) {
         /* ASSETS 不可用则回退内联兜底 */
       }
     }
-    // 回退：从 ui.gen.js 内联字节透传（无静态目录环境也完整可用）
+    // 回退：从 ui.gen.js 内联字节透传 CSS（无静态目录环境也完整可用）。
+    // 注意：不再单独透传 app.js。管理面根路径走 UI_HTML 内联，其 <script> 已包含
+    // 完整前端逻辑，浏览器不会再来请求 /assets/app.js，故此处对 JS 资源直接返回
+    // null，交给 disguise 兜底。
+    if (!isCss) return null;
     try {
       const mod = await import('../ui.gen.js');
-      const body = isCss ? mod.UI_CSS : mod.UI_JS;
-      if (body) {
+      const b64 = mod.UI_CSS_B64;
+      if (b64) {
+        const body = typeof atob === 'function'
+          ? Buffer.from(b64, 'base64').toString('utf8')
+          : Buffer.from(b64, 'base64').toString('utf8');
         return new Response(body, {
           status: 200,
           headers: {
-            'content-type': isCss ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8',
+            'content-type': 'text/css; charset=utf-8',
             'cache-control': 'public, max-age=86400, immutable',
             'x-content-type-options': 'nosniff',
           },
@@ -114,7 +121,14 @@ export async function renderAdminPage(ctx, adminPath) {
   try {
     // 动态 import：未执行构建时 ui.gen.js 可能不存在，避免整体崩溃
     const mod = await import('../ui.gen.js');
-    html = mod.UI_HTML;
+    // UI_HTML 以 base64 存储（避免 esbuild 改写超长含反引号字符串时边界串扰），
+    // 运行时解码。兼容历史旧版导出 UI_HTML（直接字符串）。
+    const raw = mod.UI_HTML_B64 ?? mod.UI_HTML;
+    if (raw) {
+      html = typeof atob === 'function' && !/[\u0000-\u0080]/.test(raw)
+        ? Buffer.from(raw, 'base64').toString('utf8')
+        : (mod.UI_HTML_B64 ? Buffer.from(raw, 'base64').toString('utf8') : raw);
+    }
   } catch {
     html = FALLBACK_HTML;
   }
