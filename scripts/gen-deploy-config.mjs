@@ -132,8 +132,8 @@ console.log(
     : "⚠ 远程未探测到 CDN_KV/CDN_R2/CDN_DB 绑定（请先在 Dashboard 创建并绑定，binding 名须为 CDN_KV/CDN_R2/CDN_DB）"
 );
 
-process.on("exit", () => {
-  try {
-    unlinkSync(OUT_TOML);
-  } catch {}
-});
+// ⚠️ 注意：不要在脚本内注册 process.on("exit", unlinkSync(...))。
+// 当前部署流程是「先 node 生成 wrangler.deploy.toml，再由 wrangler deploy -c
+// 读取它」的两段式。若在此进程退出时删除该文件，wrangler 进程拿到的就是
+// 已删除的文件（ENOENT）。临时文件由调用方（deploy:cf / CI）在部署完成后
+// 显式 rm -f 清理，这里只负责生成，绝不自行删除。
