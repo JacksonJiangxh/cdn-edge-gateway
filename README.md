@@ -108,7 +108,7 @@ build.mjs                 # 三步构建：内联兜底 + dist/public + 打包 _
 
 ## 快速上手（最短路径）
 
-> 要求 **Node.js ≥ 20**。完整分步教程见 [02 环境准备](./docs/02-prerequisites.md)。
+> 要求 **Node.js ≥ 22**（Wrangler v4 要求 Node ≥ 20.19，推荐 22）。完整分步教程见 [02 环境准备](./docs/02-prerequisites.md)。
 
 ```bash
 # 方式 A：本地马上跑（零账号、不需要任何云平台）

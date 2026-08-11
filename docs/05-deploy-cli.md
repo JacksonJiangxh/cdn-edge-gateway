@@ -17,7 +17,7 @@
 node -v && npx wrangler --version
 ```
 
-**预期结果**：分别输出 `v20+` 和 `⛅️ wrangler 3.x.x`。
+**预期结果**：分别输出 `v22+`（Wrangler v4 要求 Node ≥ 20.19，推荐 22）和 `⛅️ wrangler 4.x.x`。
 
 ---
 

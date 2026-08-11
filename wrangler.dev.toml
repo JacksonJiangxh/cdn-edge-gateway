@@ -16,7 +16,10 @@
 
 name = "edge-cdn-dev"
 main = "_worker.js"
-compatibility_date = "2024-09-23"
+# 兼容性日期必须与生产 wrangler.toml 保持一致，避免本地与生产运行时行为漂移。
+# 2025-01-01 起 nodejs_compat 的 Node 兼容层已稳定，且足以支撑本项目用到的
+# ReadableStream / WritableStream / TransformStream / crypto / structuredClone 等 API。
+compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
 [vars]

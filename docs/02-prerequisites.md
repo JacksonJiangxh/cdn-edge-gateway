@@ -9,16 +9,16 @@
 
 ## 步骤 1：确认 Node.js 版本
 
-本项目要求 **Node.js ≥ 20**（构建脚本用到了新版 API，18 会报错）。
+本项目要求 **Node.js ≥ 22**（Wrangler v4 要求 Node ≥ 20.19，推荐 22，18 会报错）。
 
 ```bash
 node -v
 ```
 
-**预期结果**：输出 `v20.x.x` 或更高，例如：
+**预期结果**：输出 `v22.x.x` 或更高，例如：
 
 ```
-v20.11.1
+v22.11.0
 ```
 
 <details>
@@ -118,23 +118,26 @@ npm run build
   ✓ 构建完成
 ```
 
-同时会生成两个产物：
+构建产物在 `dist/public/` 下：
 
 ```bash
 ls dist/public
 ```
 
 ```
-__panel  index.html
+assets  index.html
 ```
 
-> `__panel` 是默认的 `ADMIN_PATH`。如果你设置了自定义值，这里的目录名会跟着变——
-> 这是正常的，管理面静态资源就放在这个路径下。
+> `assets/` 里是管理面静态资源（`app.css` / `app.js`），`index.html` 是站点根页。
+> **注意：这里不会出现以 `ADMIN_PATH` 命名的目录。**
+> `ADMIN_PATH` 是【纯运行时】参数（构建期不读取它，见 [04 §6](./04-configuration.md)），
+> 管理面静态资源一律走固定的 `assets/` 物理路径，与入口前缀解耦——
+> 改 `ADMIN_PATH` 只需在运行时环境变量里设，无需重新构建，产物结构也永远不变。
 
 <details>
 <summary>❌ 构建报错「产物缺失」，点这里</summary>
 
-先确认 Node 版本 ≥ 20（步骤 1），再清空产物重试：
+先确认 Node 版本 ≥ 22（步骤 1），再清空产物重试：
 
 ```bash
 rm -rf dist node_modules
@@ -168,7 +171,7 @@ npx wrangler --version
 
 进入下一篇前，确认以下三项都为 ✅：
 
-- [ ] `node -v` ≥ v20
+- [ ] `node -v` ≥ v22
 - [ ] `npm install` 成功，无报错
 - [ ] `npm run build` 输出 `✓ 构建完成`
 
