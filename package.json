@@ -12,6 +12,7 @@
     "dev:nobuild": "node scripts/dev.mjs --no-build",
     "dev:pages": "npm run build && wrangler pages dev .",
     "deploy": "npm run build && wrangler deploy",
+    "deploy:cf": "npm run build && node scripts/gen-deploy-config.mjs && wrangler deploy -c wrangler.deploy.toml && rm -f wrangler.deploy.toml",
     "deploy:pages": "npm run build && wrangler pages deploy ."
   },
   "keywords": [

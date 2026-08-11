@@ -326,12 +326,12 @@ conditions: [
 |---|---|---|---|---|
 | `ADMIN_PASSWORD` | **Secret**（加密） | 运行时 | 管理面初始登录密码 | 是 |
 | `JWT_SECRET` | **Secret**（加密） | 运行时 | 登录态签名，`openssl rand -hex 32` 生成 | 是 |
-| `ADMIN_PATH` | Variable（明文） | **仅运行时** | 管理面入口前缀（浏览器访问用），建议随机串（**第一层防护**） | 是 |
+| `ADMIN_PATH` | **不进变量页** | 运行时（KV） | 管理面入口前缀（浏览器访问用），建议随机串（**第一层防护**）；由管理面保存到 KV，优先级最高，部署时用默认 `__panel` 兜底 | 否（部署后管理面改） |
 | `CLOUD_PLATFORM` | Variable（明文） | 运行时 | `edgeone`(EO) / `pages`(CF Pages) / 不填(CF Workers) | EO/Pages 必填 |
 | `CLOUDFLARE_API_TOKEN` | Secret（CI 用） | CI 运行时 | CF 部署令牌（Workers:Edit 或 Pages:Edit） | 仅 CI |
 | `EO_SECRET` | Secret（CI 用） | CI 运行时 | EO Pages API Token | 仅 CI |
 
-> **为什么这 6 个必须一起配齐？**
+> **为什么这些运行时变量必须一起配齐？**
 > - `ADMIN_PASSWORD` + `JWT_SECRET` 是管理面能不能登录的门槛，明文 Variable 等于把后台密码公开。
 > - `ADMIN_PATH` 是**隐藏后台入口前缀**（浏览器访问用），第一层防护（见下方说明）。
 > - `CLOUD_PLATFORM` 决定运行时降级逻辑，**填错或漏填会让 EO/Pages 功能残缺**（如 EO 无 `nodejs_compat` 行为差异、caches 不可用被静默降级）。
@@ -346,20 +346,17 @@ conditions: [
 
 因此：
 
-- **`ADMIN_PATH` 是纯运行时变量**：运行时优先级 **KV 显式配置 > `ADMIN_PATH` 环境变量 > 默认 `__panel`**。
-- **改 `ADMIN_PATH` 不需要重新构建**，重启/重新部署即生效。彻底消除了「构建期与运行时取值不一致导致管理面 404」的坑。
-- 各部署方式只需在**运行时**设这一个值（统一在 Dashboard 环境变量 / CI Secret / `.dev.vars`），不再区分"构建期注入点"：
-  | 部署方式 | `ADMIN_PATH` 设置位置（保密，勿提交进仓库） |
-  |---|---|
-  | 05 部署指南 方式 ①（Workers 命令行静态挂载） | `npx wrangler secret put ADMIN_PATH`（推荐）或 Dashboard 环境变量 |
-  | 05 部署指南 方式 ③（CF Pages） | Dashboard 环境变量 `ADMIN_PATH` |
-  | 05 部署指南 方式 ②（Workers 粘贴） | Dashboard 环境变量 `ADMIN_PATH` |
-  | 兜底 | 仓库 `wrangler.toml [vars] ADMIN_PATH = "__panel"`（仅公开默认值，仅本地/兜底用，切勿填随机串提交） |
-  | 05 部署指南 方式 ④（EO Pages） | 控制台环境变量 `ADMIN_PATH` |
-  | CNB / GitHub 流水线 | 密钥仓库 / Secrets 的 `ADMIN_PATH`（仅运行时读取，build 不依赖） |
+- **`ADMIN_PATH` 是纯运行时值**：运行时优先级 **KV 显式配置（管理面保存） > 内置默认 `__panel`**。env 层（若用户在 Dashboard 主动设了 `ADMIN_PATH`）也作为兜底生效，但**推荐用法不是变量**。
+- **改 `ADMIN_PATH` 不需要重新构建**：在管理面改完存 KV 即生效，彻底消除了「构建期与运行时取值不一致导致管理面 404」的坑。
+- **不要在变量页面设 `ADMIN_PATH`**：部署脚本刻意不传该变量，根 `wrangler.toml` 也不写死，使变量页面不出现它——避免小白误以为入口一直是 `__panel`、而实际 KV 里已是别的值。正确做法：
+  1. 部署后用默认前缀 `__panel` 访问管理面（`https://域名/__panel`）；
+  2. 在管理面把「管理面路径」改成你的随机串并保存 → 存入 KV；
+  3. 之后运行时读 KV 的值（最高优先级生效），用新前缀访问。
+  （若你确实在 Dashboard 主动设了 `ADMIN_PATH` 变量，运行时 env 层仍会兜底生效，见 `src/config/store.js`，但这不是推荐路径。）
 
 > **Workers 形态（05 方式 ①② / CNB deploy_cf_workers / GitHub deploy-cf-workers）曾经的大坑已消除**：
 > 旧设计 build 期读 `ADMIN_PATH` 决定产物路径，若 toml 改了而 build 前没 `export` 同名变量，上线后管理面 404。新架构 build **完全忽略** `ADMIN_PATH`，此坑不再存在。
+> 另，**`ADMIN_PATH` 写进 `wrangler.toml [vars]` 会被 `wrangler deploy` 覆盖掉 Dashboard 已设的 Secret**，且会让变量页面出现该值误导小白（2026-08-11 部署事故根因之一）。现已改为：**根 `wrangler.toml` 不再写死 `ADMIN_PATH`，部署脚本 `gen-deploy-config.mjs` 刻意不传该变量**——运行时用内置默认 `__panel` 兜底，部署后由用户在管理面改成随机串存进 KV（最高优先级生效）。手动部署请统一用 `npm run deploy:cf`。
 
 ### ⚠️ `ADMIN_PATH` 的暴露面（已修复）
 

@@ -7,7 +7,10 @@
 
 name = "cdn-edge-gateway"
 main = "_worker.js"
-compatibility_date = "2025-01-01"
+# compatibility_date 必须足够新以支撑 [cache] 顶层字段（Workers Cache / Smart Cache）。
+# 该字段仅需较新的 compatibility_date（官方示例 2026-08-10），无需额外 compatibility_flag。
+# 同步保持与 wrangler.dev.toml 一致，避免本地与生产运行时行为漂移。
+compatibility_date = "2026-08-11"
 # 注意：不要在此加 "sockets" —— workerd 无此 flag，会导致 wrangler dev / deploy
 # 直接启动失败（No such compatibility flag: sockets）。
 # cloudflare:sockets 由 src/proxy/engines/socketEngine.js 运行时动态 import，
@@ -37,6 +40,24 @@ keep_vars = true
 #===============================================================================
 assets = { directory = "./dist/public", binding = "ASSETS", html_handling = "none", not_found_handling = "none" }
 
+# 显式关闭 Preview URLs，避免 workers.dev 路由下被默认开启（见部署日志 WARNING）。
+preview_urls = false
+
+# 开启可观测性（日志 + 追踪）。部署日志曾显示远程此项为 true 被本地默认 false 覆盖，
+# 此处显式开启，使 wrangler deploy 保留/恢复该设置（与远程原值一致）。
+observability = { enabled = true }
+
+# 开启 Cloudflare Workers Cache（面板 "Cache" 开关的 toml 等价项）。
+# 作用：为 fetch handler 返回的 HTTP 响应设置【默认缓存行为】，
+#       命中时 CF 边缘直接返回缓存响应，不进 Worker 代码，不消耗 CPU。
+# 注意：本项目 src/platform/cache.js 已用 caches.default API 自行管理边缘缓存，
+#       与平台级 Smart Cache 是两套机制。开启后平台默认缓存可能在代码逻辑之外
+#       按响应头（Cache-Control / CDN-Cache-Control）缓存 fetch 响应；
+#       代码里的缓存键/主动清除逻辑不受影响，但清除需同时顾及两层。
+#       若只想用代码层缓存、关闭平台默认缓存，改 enabled = false。
+[cache]
+enabled = true
+
 #===============================================================================
 # 部署职责划分（toml 与可视化并行，但同一操作只由一边负责，不重复）
 # ----------------------------------------------------------------------------
@@ -55,9 +76,15 @@ assets = { directory = "./dist/public", binding = "ASSETS", html_handling = "non
 #
 # ⚠️ 关键：同一个绑定不要两边都写「你要做这个」。下方 KV/R2/D1 默认注释掉，
 #    仅作「纯本地 dev 且不想开 Dashboard」时的备用写法；走 CI / Dashboard 部署时
-#    请保持注释状态，改去控制台绑——这样 CI 的 `wrangler deploy` 只上传代码+资产，
-#    不会因占位符 ID 报错，也不会和可视化已绑的重复声明。
-#    完整说明与操作顺序见 docs/05-deploy-cli.md 的「Cloudflare Workers 部署职责表」。
+#    请保持注释状态，改去控制台绑。
+#
+# 🔑 但「注释掉 = wrangler 会清空远程绑定」是历史坑（见 2026-08-11 部署日志）：
+#    wrangler deploy 全量覆盖，本地没声明就删远端。已用
+#    scripts/gen-deploy-config.mjs 解决——部署前探测 Dashboard 已绑定的
+#    KV/R2/D1 与已设的 ADMIN_PATH，动态生成 wrangler.deploy.toml 再部署，
+#    从而「保留远程绑定、不覆盖远程变量」，且根 toml 始终干净、不暴露资源 ID。
+#    所以小白流程不变：先 Dashboard 创建并绑定 → 再点部署按钮，绑定不会被清。
+#    完整说明见 docs/05-deploy-cli.md 的「Cloudflare Workers 部署职责表」。
 #===============================================================================
 
 #-------------------------------------------------------------------------------
@@ -98,15 +125,19 @@ assets = { directory = "./dist/public", binding = "ASSETS", html_handling = "non
 # database_id = "在此填 wrangler d1 create edge-cdn-stats 输出的 database_id"
 
 #-------------------------------------------------------------------------------
-# 非敏感环境变量（toml 负责，wrangler deploy 自动带上）
+# ADMIN_PATH —— 【不写死在此，刻意不传】
+# ----------------------------------------------------------------------------
+# 设计：adminPath 的生效值 = 「KV 中管理面保存的值 > 内置默认 __panel」。
+# 历史坑：本文件曾写死 ADMIN_PATH = "__panel"，导致 wrangler deploy 把
+# Dashboard 里小白提前设好的 ADMIN_PATH Secret 覆盖成明文、且锁死为 __panel；
+# 后来又试图让部署脚本「远程优先注入」，但这仍会让变量页面出现 ADMIN_PATH，
+# 小白误以为入口一直是 __panel，而实际 KV 里已是别的值（认知错乱）。
+# 最终方案：部署【完全不传】ADMIN_PATH，运行时用内置默认 __panel 兜底，
+# 部署后由用户在管理面把入口前缀改成自己的随机串并存进 KV（最高优先级生效）。
+# 根 toml 保持干净：不暴露任何存储 ID、不写死管理面入口前缀、变量页面无此变量。
+# 注：若用户确实在 Dashboard 主动设了 ADMIN_PATH，运行时 env 层仍作兜底生效
+#     （见 src/config/store.js），但推荐用法是「管理面改 + 存 KV」。
 #-------------------------------------------------------------------------------
-[vars]
-# 管理面路径段（第一层安全防护，强烈建议改成随机字符串）。
-# ADMIN_PATH 是【纯运行时】变量：build 阶段不读取它（见 build.mjs），
-# 管理面静态资源走固定的 /assets 物理路径，与 ADMIN_PATH 解耦。
-# 此处 __panel 仅作缺省兜底；运行时改环境变量即可平滑变更入口前缀，无需重新构建。
-# 优先级：KV 显式配置 > 运行时 ADMIN_PATH 环境变量 > 本处默认值。
-ADMIN_PATH = "__panel"
 
 #-------------------------------------------------------------------------------
 # Secrets —— 【绝不进 toml】，单独注入其中一种方式即可（不要两种都做）：
@@ -115,4 +146,6 @@ ADMIN_PATH = "__panel"
 #         npx wrangler secret put CNB_AUTH   # 可选，源站 extraHeaders 用 @secret:CNB_AUTH 引用
 #   Dashboard：Worker → Settings → Variables → 设为 Secrets 类型
 # （secrets 在 wrangler 中无 toml 字段，只能命令注入或 UI 填）
+# ⚠️ ADMIN_PASSWORD / JWT_SECRET 是认证凭据，必须用 Secret 类型；
+#    ADMIN_PATH 不在 Secrets 之列（见上方说明，由管理面存 KV 管理）。
 #-------------------------------------------------------------------------------

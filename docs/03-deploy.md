@@ -132,19 +132,33 @@ npm run build
 
 ## 第 4 步：设置运行时变量与密钥
 
-`ADMIN_PASSWORD` / `JWT_SECRET` / `ADMIN_PATH` 是**运行时变量**，构建期不读，改了无需重新构建。
+`ADMIN_PASSWORD` / `JWT_SECRET` 是**运行时密钥**，构建期不读，改了无需重新构建。
 
 | 变量 | 类型 | 值怎么来 | 说明 |
 |---|---|---|---|
 | `ADMIN_PASSWORD` | **Secret / 密钥** | 你的强密码 | 管理面登录密码 |
 | `JWT_SECRET` | **Secret / 密钥** | 终端跑 `openssl rand -hex 32` 的输出 | 登录态签名，勿用简单串 |
-| `ADMIN_PATH` | Secret / 变量 | 随机串，如 `p-8f3k9x2q` | **第一层防护，必须改，不能留默认 `__panel`** |
 
-- **CF**：Worker/Pages → **Settings → Environment Variables**。密码类两项选 **Secret（加密）** 类型；`ADMIN_PATH` 可 Secret 或普通变量。
-- **EO**：项目设置 → **环境变量**：`ADMIN_PASSWORD`(密钥) / `JWT_SECRET`(密钥) / `ADMIN_PATH`(变量) / 额外加 **`CLOUD_PLATFORM=edgeone`**（必填，驱动平台识别；CF 侧代码自动探测可省略）。
+- **CF**：Worker/Pages → **Settings → Environment Variables**。两项均选 **Secret（加密）** 类型。
+- **EO**：项目设置 → **环境变量**：`ADMIN_PASSWORD`(密钥) / `JWT_SECRET`(密钥) / 额外加 **`CLOUD_PLATFORM=edgeone`**（必填，驱动平台识别；CF 侧代码自动探测可省略）。
 
-> ⚠️ **`ADMIN_PATH` 不要写进仓库的 `wrangler.toml`**（会暴露入口）。`wrangler.toml` 只留公开兜底默认值 `__panel`，上线用 `npx wrangler secret put ADMIN_PATH` 或控制台设。运行优先级：**Secret > Dashboard 环境变量 > `wrangler.toml` 兜底默认值**。
->
+### 🔑 关于 `ADMIN_PATH`（管理面入口前缀）—— 不要在变量页面设置
+
+`ADMIN_PATH` **不是**需要你在变量页面配置的变量，它由「管理面保存到 KV」管理，优先级最高：
+
+```
+KV 中管理面保存的值  >  内置默认 __panel
+```
+
+**推荐流程**：
+1. 部署时用**内置默认 `__panel`** 兜底（部署脚本刻意不传该变量，变量页面不会出现 `ADMIN_PATH`，避免误以为入口一直是 `__panel`）。
+2. 部署后首次登录管理面：访问 `https://你的域名/__panel`（默认前缀）。
+3. 在管理面把「管理面路径」改成你自己的随机串（如 `p-8f3k9x2q`）并保存 → **存入 KV**，此后运行时永远读 KV 的值（最高优先级生效）。
+4. 下次访问就用新前缀。
+
+> ⚠️ 不要去变量页面设 `ADMIN_PATH`：那样变量页会出现它，小白容易误以为入口恒为那个值，而实际 KV 里已是别的——认知错乱。若你确实在 Dashboard 主动设了 `ADMIN_PATH`，运行时 env 层仍会作为兜底生效（`src/config/store.js`），但推荐用法是「管理面改 + 存 KV」。
+> ⚠️ 部署脚本 `gen-deploy-config.mjs` 刻意**不处理** `ADMIN_PATH`，根 `wrangler.toml` 也不写死，始终保持干净。手动/CLI 部署用 `npm run deploy:cf` 即可。
+
 > `CLOUD_PLATFORM` 是「平台识别」变量，**不是认证凭据**，也不进流水线。
 
 ---
@@ -153,8 +167,11 @@ npm run build
 
 各平台默认不缓存函数响应，不开则每请求都进函数、消耗额度。
 
-- **CF Workers/Pages**：Settings → Cache / Functions，把对应 Cache 开关设为 **Enabled**。
+- **CF Workers**：本项目 `wrangler.toml` 已内置顶层 `[cache] enabled = true`（Workers Cache / Smart Cache，为 fetch handler 响应设默认缓存行为），**无需在面板手动开**，部署即生效。该字段要求 `compatibility_date` ≥ 较新版本（本仓库已升到 `2026-08-11`），无需额外 compatibility_flag。
+- **CF Pages**：Settings → Cache / Functions，把对应 Cache 开关设为 **Enabled**（Pages 不读 `wrangler.toml` 的 `[cache]`，需在面板开）。
 - **EO**：控制台对应缓存开关设为 **Enabled**。配置生效约 1–2 分钟。
+
+> ⚠️ CF Workers 的 `[cache]` 平台级缓存与代码层 `caches.default`（`src/platform/cache.js`）是两层机制：平台层命中时直接返回、不进函数；清除缓存需同时顾及两层（代码层按 URL 删，平台层用 Cache-Tag / API purge）。详见 [06 缓存策略](./06-cache-strategy.md)。
 
 ---
 
@@ -171,21 +188,28 @@ Worker 项目已在第 1 步建好。本机执行：
 ```bash
 npx wrangler login   # 浏览器点 Allow，OAuth 授权
 npx wrangler whoami  # 确认账号
-npm run build && npx wrangler deploy
+npm run deploy:cf    # build + 生成临时 toml（保留远程绑定/变量）+ 部署
 ```
+
+> `npm run deploy:cf` = `npm run build && node scripts/gen-deploy-config.mjs && wrangler deploy -c wrangler.deploy.toml && rm -f wrangler.deploy.toml`。
+> 它会**按 binding 名拉取你在 Dashboard 已绑定的 KV/R2/D1 真实配置并保留**（资源名/id 是你自定义的，原样保留，不被清空）。`ADMIN_PATH` 刻意**不传**——部署后用内置默认 `__panel` 兜底，再于管理面改成随机串存 KV（最高优先级生效）。根 `wrangler.toml` 始终保持干净、不暴露资源 ID。
+> 若你坚持用裸命令 `npx wrangler deploy`（不用临时 toml），务必注意：本地 toml 未声明 KV/R2/D1 时 wrangler 会**清空**远程已绑定的存储——《这就是 2026-08-11 部署事故的根因之一》，强烈建议用 `deploy:cf`。
 
 **预期结果**：
 
 ```
 ✓ 构建完成
+✓ 按 binding 名提取到远程绑定: CDN_KV → xxxx, CDN_R2 → 你的桶名, CDN_DB → 你的库id
+✓ ADMIN_PATH 不注入（部署后用管理面修改并存 KV，优先级最高）
 Uploaded edge-cdn (x.xx sec)
 Published edge-cdn (x.xx sec)
   https://edge-cdn.<你的子域>.workers.dev
 ```
 
-> 流水线 / CI 不用 `wrangler login`（服务器无人点浏览器），改用 `CLOUDFLARE_API_TOKEN`，见分支 A4。
-> 报错 `No such compatibility flag`：确认 `compatibility_flags` 只有 `["nodejs_compat"]`。
-> 后续更新代码只需 `npm run build && npx wrangler deploy`，不影响已绑定的存储、域名、Secrets。
+> 流水线 / CI 不用 `wrangler login`（服务器无人点浏览器），改用 `CLOUDFLARE_API_TOKEN`，见分支 A4；流水线已内置同样的「生成临时 toml」步骤。
+> 报错 `No such compatibility flag`：确认 `compatibility_flags` 只有 `["nodejs_compat"]`（不要加 `sockets`）。
+> 报错 `unknown field cache`：说明 `compatibility_date` 过旧，本仓库已升到 `2026-08-11`，保持同步即可。
+> 后续更新代码只需 `npm run deploy:cf`，不影响已绑定的存储、域名、Secrets。
 
 #### A2. 粘贴代码（不想装命令行，无静态资产）
 
@@ -212,7 +236,7 @@ Published edge-cdn (x.xx sec)
 
 源码同时托管在 GitHub 与 CNB，各有一套**手动**流水线（零自动触发，必须人工点击发起，杜绝生产错乱）。
 
-**先准备 5 个部署凭据**（运行时变量 `ADMIN_PASSWORD`/`JWT_SECRET`/`ADMIN_PATH` **不进流水线**，它们已在第 4 步设好）：
+**先准备 2 个部署凭据**（运行时密钥 `ADMIN_PASSWORD`/`JWT_SECRET` **不进流水线**，它们已在第 4 步设好；`ADMIN_PATH` 不是变量、由管理面存 KV，无需在此准备）：
 
 | 字段 | 用途 | 怎么来 |
 |---|---|---|
@@ -236,11 +260,17 @@ Published edge-cdn (x.xx sec)
 
 > EO 流水线路径：CNB 用 `tencentcom/deploy-eopages` 镜像，GitHub 用 `npx edgeone makers deploy`，部署目录为仓库根 `.`，均只手动触发、支持 preview/production。若已在 EO 控制台连 Git 自动构建，请关掉自动构建以守住「禁止自动部署」约束。
 
+**📌 Workers 流水线已内置「不覆盖远程绑定」保护**：`web_trigger_deploy_cf_workers` 按钮在 `npx wrangler deploy` 之前会先跑 `scripts/gen-deploy-config.mjs`，按 binding 名拉取你在 Dashboard 已绑定的 KV/R2/D1 真实配置并写进一次性 `wrangler.deploy.toml`，部署完即删。所以**点「部署 CF Workers」按钮前，请务必先在 Dashboard 把 KV/R2/D1 绑好（binding 名须为 `CDN_KV`/`CDN_R2`/`CDN_DB`）**，否则部署会清空这些绑定（脚本会打印 `⚠ 未探测到 ... 绑定` 提醒你）。
+>
+> **CF Pages / EO Pages 路线不受影响**：`wrangler pages deploy .` 与 `edgeone makers deploy .` 不读取 `wrangler.toml` 的存储绑定段，其 KV/R2/D1 绑定在各自 Dashboard 设，不会被 toml 覆盖；这两路的变量也在 Dashboard 设，不存在 `ADMIN_PATH` 被 toml 覆盖的问题。只有 **CF Workers 路线**需要临时 toml 机制。
+>
+> 若想本地复现与流水线完全一致的行为：`npm run deploy:cf`（见分支 A1）。
+
 ### 分支 B：EdgeOne —— Makers 部署
 
 项目已在第 1 步建好（Makers 新建并连 Git），第 3–5 步的 KV/变量/缓存也已设好，这里只做 EO 侧收尾：
 
-1. 项目设置 → **环境变量**已含：`ADMIN_PASSWORD`(密钥) / `JWT_SECRET`(密钥) / `ADMIN_PATH`(变量) / `CLOUD_PLATFORM=edgeone`（见第 4 步）。
+1. 项目设置 → **环境变量**已含：`ADMIN_PASSWORD`(密钥) / `JWT_SECRET`(密钥) / `CLOUD_PLATFORM=edgeone`（见第 4 步；`ADMIN_PATH` 不是变量，由管理面存 KV，不在此设）。
 2. **存储 → KV 存储** 创建命名空间 → **存储绑定**，变量名 `CDN_KV`（见第 3 步）。
 3. 推代码：用 **EO 流水线**（见分支 A4 的 EO 部分）或 EO 控制台连 Git 手动触发构建部署。部署目录为仓库根 `.`。
 
@@ -267,7 +297,7 @@ https://<你的域名或 *.workers.dev>/__health
 
 **预期结果**：`{"ok":true,"platform":"cloudflare|edgeone","hasKV":true,...}`。重点确认 `hasKV:true`（否则 KV 变量名没写成 `CDN_KV`）。
 
-再访问管理面 `https://<域名>/<你设的 ADMIN_PATH>`，用 `ADMIN_PASSWORD` 登录成功即完成。
+再访问管理面 `https://<域名>/__panel`（默认前缀，部署后可在管理面改成你自己的随机串并存 KV），用 `ADMIN_PASSWORD` 登录成功即完成。
 
 ---
 
@@ -275,8 +305,8 @@ https://<你的域名或 *.workers.dev>/__health
 
 - [ ] 第 1 步：已在 CF 或 EO 新建项目（二选一，没两边都做）
 - [ ] 第 3 步：KV 已绑定，变量名是 `CDN_KV`
-- [ ] 第 4 步：`ADMIN_PASSWORD` / `JWT_SECRET` 用 Secret 类型；`ADMIN_PATH` 已改随机串（非默认 `__panel`）且未提交进仓库 toml
-- [ ] 第 5 步：缓存开关已开启
+- [ ] 第 4 步：`ADMIN_PASSWORD` / `JWT_SECRET` 用 Secret 类型；`ADMIN_PATH` 不用变量页面设，部署后用默认 `__panel` 登录管理面、改成随机串存 KV；CF Workers 路线用 `npm run deploy:cf` / 流水线按钮
+- [ ] 第 5 步：缓存开关已开启（CF Workers 已在 `wrangler.toml` 内置 `[cache] enabled = true`，部署即生效；CF Pages / EO 需在面板开）
 - [ ] 第 6 步：代码已按所选方式推上去
 - [ ] 第 7 步：自定义域名已绑定
 - [ ] 第 8 步：`/__health` 返回 `ok: true` 且 `hasKV: true`；管理面能登录

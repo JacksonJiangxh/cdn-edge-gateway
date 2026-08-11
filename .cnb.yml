@@ -140,12 +140,23 @@ $:
             set -e
             npx wrangler deploy --dry-run --outdir /tmp/wrangler-dryrun
             echo "✓ 干跑通过，未发布到线上"
+        - name: 生成临时部署配置（保留远程绑定/变量）
+          if: |
+            [ "$dry_run" != "true" ]
+          script: |
+            set -e
+            # 按 binding 名（CDN_KV/CDN_R2/CDN_DB，代码契约恒定）调用 CF API 拉取
+            # 远程已绑定的真实配置（资源 id / 桶名 / 库名是用户自定义，原样保留），
+            # 动态生成 wrangler.deploy.toml；远程已设的 ADMIN_PATH 则不传、绝不覆盖。
+            # 根 wrangler.toml 始终保持干净（不暴露资源 ID、不写死入口前缀）。
+            node scripts/gen-deploy-config.mjs
         - name: 发布到 Workers
           if: |
             [ "$dry_run" != "true" ]
           script: |
             set -e
-            npx wrangler deploy
+            npx wrangler deploy -c wrangler.deploy.toml
+            rm -f wrangler.deploy.toml
             echo "✓ Workers 部署完成"
 
   # ---- 按钮：部署 Cloudflare Pages ----

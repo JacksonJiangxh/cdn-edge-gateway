@@ -15,7 +15,7 @@ branch:
 
       # ---------------- 部署 Cloudflare Workers ----------------
       - name: 🚀 部署 CF Workers
-        description: 手动部署到 Cloudflare Workers（wrangler deploy）
+        description: 手动部署到 Cloudflare Workers（自动保留 Dashboard 已绑定的 KV/R2/D1 与 ADMIN_PATH）
         event: web_trigger_deploy_cf_workers
         inputs:
           dry_run:

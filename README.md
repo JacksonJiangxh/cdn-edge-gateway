@@ -103,10 +103,10 @@ build.mjs                 # 三步构建：内联兜底 + dist/public + 打包 _
 npm install
 npm run dev                 # 启动后打开 http://localhost:8799/__panel
 
-# 方式 B：部署到生产
+# 方式 B：部署到生产（Cloudflare Workers）
 npm install
-npm run build               # 生成 _worker.js + dist/public/ 静态资源
-npx wrangler deploy         # Cloudflare Workers（详见 docs/03-deploy.md）
+npm run deploy:cf           # build + 生成临时 toml（保留远程绑定/变量）+ wrangler deploy
+                           # 详见 docs/03-deploy.md（务必用 deploy:cf，裸 deploy 会清空远程绑定）
 ```
 
 不想用命令行部署？CF 粘贴 / Pages、EdgeOne、以及流水线发版，全部操作步骤见
