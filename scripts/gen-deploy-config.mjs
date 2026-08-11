@@ -48,6 +48,10 @@ function getScriptName() {
 }
 
 // ---- 调 CF API 拉远程 Worker 配置 ----
+// ⚠️ 必须用 /settings 子资源端点 + Accept: application/json。
+// 根脚本端点 GET /workers/scripts/{name} 默认返回 multipart 形式的代码包，
+// JSON.parse 会直接抛错，导致「拉取失败 → 跳过绑定探测 → 部署清空远程绑定」。
+// /settings 端点返回纯 JSON 的 { result: { bindings: [...] } }，稳定可靠。
 function fetchRemoteBindings(scriptName) {
   const token = process.env.CLOUDFLARE_API_TOKEN;
   const account = process.env.CLOUDFLARE_ACCOUNT_ID;
@@ -55,14 +59,14 @@ function fetchRemoteBindings(scriptName) {
     console.log("⚠ 缺少 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID，跳过绑定探测");
     return [];
   }
-  const url = `https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/${scriptName}`;
+  const url = `https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/${scriptName}/settings`;
   try {
     const out = execFileSync(
       "curl",
       [
         "-fsS",
         "-H", `Authorization: Bearer ${token}`,
-        "-H", "Content-Type: application/json",
+        "-H", "Accept: application/json",
         url,
       ],
       { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
@@ -70,7 +74,7 @@ function fetchRemoteBindings(scriptName) {
     const json = JSON.parse(out);
     return (json.result && json.result.bindings) || [];
   } catch (e) {
-    console.log("⚠ 拉取远程绑定失败（可能 Worker 尚未部署过），跳过绑定探测");
+    console.log("⚠ 拉取远程绑定失败（可能 Worker 尚未部署过 / token 无权限），跳过绑定探测");
     return [];
   }
 }
