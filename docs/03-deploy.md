@@ -63,9 +63,9 @@ npm run build
 
 ---
 
-## 第 3 步：绑定存储（KV 必做）
+## 第 3 步：创建并绑定存储（KV 必做）
 
-配置全存在 KV，**不绑服务起不来**。在对应平台控制台绑定，变量名**必须**为下表（拼错服务就读不到配置）：
+配置全存在 KV，**不绑服务起不来**。流程是「**先创建命名空间 → 再绑定到项目**」，两步都要做。变量名**必须**为下表（拼错服务就读不到配置）：
 
 | 绑定类型 | 变量名 | 何时需要 |
 |---|---|---|
@@ -73,8 +73,17 @@ npm run build
 | R2 bucket | `CDN_R2` | 源站 `engine=r2` 时 |
 | D1 database | `CDN_DB` | `statsDriver=d1` 时（EO 无 D1，统计回落 KV） |
 
-- **CF**：Dashboard → 你的 Worker/Pages → **Settings → Variables / Bindings** → 创建/绑定 KV，变量名填 `CDN_KV`。
-- **EO**：控制台 → **存储 → KV 存储** 创建命名空间 → 项目设置 → **存储绑定**，变量名 `CDN_KV`。
+**① 先创建命名空间（KV 必做）**
+
+- **CF**：Dashboard → **Workers & Pages** → 左侧 **KV** → **Create a namespace**，起名（如 `cdn-kv`）。创建后记住它的 **Namespace ID**（后面绑定要用）。
+- **EO**：控制台 → **存储 → KV 存储** → **创建命名空间**，起名（如 `cdn-kv`）。
+
+> 这只是"建一个空仓库"，还没挂到你的服务上。R2 / D1 同理先创建（按需）。
+
+**② 再绑定到你的项目**（变量名必须写 `CDN_KV`）
+
+- **CF**：Dashboard → 你的 Worker/Pages → **Settings → Variables / Bindings** → **Add** → 选 KV namespace，Variable name 填 `CDN_KV`，绑定到刚才创建的命名空间。
+- **EO**：项目设置 → **存储绑定** → 添加 KV 绑定，变量名 `CDN_KV`，关联到刚才创建的命名空间。
 
 > 桶名（如 `cdn-assets`）≠ 绑定变量名（`CDN_R2`）。源站配置里填的是**变量名**。
 
