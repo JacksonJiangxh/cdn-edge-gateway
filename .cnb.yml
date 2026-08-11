@@ -121,12 +121,12 @@ $:
         - name: install
           script: npm ci
         - name: build
-          # ADMIN_PATH 必须与部署后的运行时一致（KV 配置 / ADMIN_PATH 环境变量），
-          # 否则 dist/public 静态资源物理路径与运行时路由错位，管理面资源 404。
-          # 优先级：密钥仓库 ADMIN_PATH 变量 > 默认值 __panel。
+          # ADMIN_PATH 是【纯运行时】变量，build 阶段不读取它（见 build.mjs）。
+          # 管理面静态资源使用固定物理路径 /assets，与 ADMIN_PATH 解耦，
+          # 改管理面入口前缀无需重新构建。运行时在「环境变量」里配 ADMIN_PATH 即可。
           # 必须先 build：wrangler.toml 的 assets 绑定会把 dist/public/ 作为 CF 静态资产
           # 上传，管理面静态资源由此命中边缘缓存、零函数额度（CF Workers 形态专属）。
-          script: ADMIN_PATH="${ADMIN_PATH:-__panel}" npm run build
+          script: npm run build
         - name: 校验凭据
           script: |
             set -e
@@ -164,10 +164,10 @@ $:
         - name: install
           script: npm ci
         - name: build
-          # ADMIN_PATH 必须与部署后的运行时一致（KV 配置 / ADMIN_PATH 环境变量），
-          # 否则 dist/public 静态资源物理路径与运行时路由错位，管理面资源 404。
-          # 优先级：密钥仓库 ADMIN_PATH 变量 > 默认值 __panel。
-          script: ADMIN_PATH="${ADMIN_PATH:-__panel}" npm run build
+          # ADMIN_PATH 是【纯运行时】变量，build 阶段不读取它（见 build.mjs）。
+          # 管理面静态资源使用固定物理路径 /assets，与 ADMIN_PATH 解耦，
+          # 改管理面入口前缀无需重新构建。运行时在「环境变量」里配 ADMIN_PATH 即可。
+          script: npm run build
         - name: 校验凭据
           script: |
             set -e
@@ -206,10 +206,10 @@ $:
         - name: install
           script: npm ci
         - name: build
-          # ADMIN_PATH 必须与部署后的运行时一致（KV 配置 / ADMIN_PATH 环境变量），
-          # 否则 dist/public 静态资源物理路径与运行时路由错位，管理面资源 404。
-          # 优先级：密钥仓库 ADMIN_PATH 变量 > 默认值 __panel。
-          script: ADMIN_PATH="${ADMIN_PATH:-__panel}" npm run build
+          # ADMIN_PATH 是【纯运行时】变量，build 阶段不读取它（见 build.mjs）。
+          # 管理面静态资源使用固定物理路径 /assets，与 ADMIN_PATH 解耦，
+          # 改管理面入口前缀无需重新构建。运行时在「环境变量」里配 ADMIN_PATH 即可。
+          script: npm run build
         - name: 发布到 EO Pages
           imports: *secret-envs
           image: tencentcom/deploy-eopages:latest

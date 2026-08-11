@@ -63,11 +63,9 @@ jobs:
         run: npm ci
 
       - name: 构建（含产物自检）
-        # ADMIN_PATH 必须贯穿「构建期静态路径」与「运行时路由」：构建期产出
-        # dist/public/{adminPath}/assets/*，运行时 getAdminPath 读 KV/ADMIN_PATH，
-        # 二者不一致则管理面静态资源 404。缺省 __panel。
-        env:
-          ADMIN_PATH: ${{ vars.ADMIN_PATH || '__panel' }}
+        # ADMIN_PATH 是【纯运行时】变量，build 阶段不读取它（见 build.mjs）。
+        # 管理面静态资源使用固定物理路径 /assets，与 ADMIN_PATH 解耦，
+        # 改管理面入口前缀无需重新构建。运行时在 Pages 环境变量里配 ADMIN_PATH 即可。
         run: npm run build
 
       - name: 校验凭据

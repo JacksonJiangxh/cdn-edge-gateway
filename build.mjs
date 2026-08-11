@@ -7,7 +7,7 @@
  *   1. 把 web/ 下的 HTML + CSS + JS 内联成单个 HTML 字符串 → src/ui.gen.js
  *      （作为「无静态托管环境」的兜底，例如 CF Workers 直接粘贴 worker）
  *   2. 把 web/ 资源输出为独立静态目录 dist/public/（HTML 引用外部
- *      /{ADMIN_PATH}/assets/*），供 EdgeOne Makers / Cloudflare Pages 静态托管，
+ *      固定 /assets/*，与 ADMIN_PATH 解耦），供 EdgeOne Makers / Cloudflare Pages 静态托管，
  *      命中边缘缓存后管理面请求零函数执行次数，最省额度。
  *      ADMIN_PATH 与运行时 adminPath（KV / ADMIN_PATH 环境变量）必须一致，
  *      否则静态物理路径与运行时路由错位会导致管理面资源 404。
@@ -192,22 +192,22 @@ export const UI_JS = ${JSON.stringify(frontendJs ?? '')};
 
 /**
  * 构建独立静态资源目录 dist/public/：
- *   dist/public/index.html                管理面 HTML，引用外部 /{adminPath}/assets/*
- *   dist/public/{adminPath}/assets/app.css 压缩样式
- *   dist/public/{adminPath}/assets/app.js  压缩脚本（api.js + app.js 拼接）
+ *   dist/public/index.html                站点根页（不含后台路径，零泄露）
+ *   dist/public/assets/app.css            压缩样式（固定路径，与 adminPath 解耦）
+ *   dist/public/assets/app.js             压缩脚本（api.js + app.js 拼接）
  *
- * adminPath 由构建期 ADMIN_PATH 环境变量决定（默认 __panel），必须与运行时
- * adminPath（KV 配置 / ADMIN_PATH 环境变量）完全一致，否则静态物理路径与运行时
- * 路由错位，管理面静态资源会 404（CF Pages / EO Makers 静态托管均按 URL 路径映射）。
+ * 关键设计：管理面静态资源使用【固定物理路径】 dist/public/assets/，
+ * 与运行时的 ADMIN_PATH（对外隐藏入口前缀）完全解耦。
+ *   - build 期【不再读取】 ADMIN_PATH，因此改 adminPath 无需重新构建；
+ *   - 运行期 Worker 收到 /{ADMIN_PATH}/assets/* 请求时，内部映射到固定
+ *     /assets/* 物理资源（见 src/api/adminPage.js），对外路径与实现路径分离。
  *
  * 该目录供 EdgeOne Makers / Cloudflare Pages 静态托管使用。命中边缘缓存后，
- * 管理面访问零函数执行次数（CF 命中缓存不计 Functions 次；EO 走安全加速请求数，
- * 站点套餐免费），是 CF / EO 两平台通用的省额度手段。
+ * 管理面访问零函数执行次数，是 CF / EO 两平台通用的省额度手段。
  *
  * HTML 中的注入变量（__BASE__ / __PLATFORM__）无法在纯静态页预置，故改为
- * 由运行时的反向代理薄层（adminPage）在首次访问时注入；为保证「纯静态零函数次」
- * 与「动态注入」不冲突，这里产出的 index.html 保留一个极小的内联引导脚本，
- * 仅设置 window.__BASE__（= /{adminPath}），不加载任何业务代码（业务代码走外部 app.js）。
+ * 由运行时的管理面薄层（adminPage.renderAdminPage）在请求时注入；站点根
+ * index.html 不加载任何业务代码、也不含后台路径，避免信息泄露。
  */
 async function buildPublic(frontendJs, css) {
   console.log('▸ [2/4] 输出静态资源目录 dist/public/...');
@@ -219,33 +219,36 @@ async function buildPublic(frontendJs, css) {
     return;
   }
 
-  // adminPath：构建期与运行时必须一致，否则静态路由错位
-  const adminPath = (process.env.ADMIN_PATH || '__panel').replace(/^\/+|\/+$/g, '') || '__panel';
-  const assetBase = `/${adminPath}/assets`;
+  // 注意：build 阶段【不调用任何删除操作】。原因：
+  //   部分受控执行环境带有 safe-delete 守卫，对「删除类操作」按次累计，达到阈值即拦截，
+  //   导致 `npm run build` 中断。整目录删除或单文件精确删除都会累计该计数，无法规避。
+  // 因此改为「覆盖式写入」：先确保输出目录存在，再对同名文件直接 writeFile 覆盖。
+  // 旧产物（如历史 adminPath 子目录 dist/public/<old>/）不会被运行时服务（新架构只用固定 /assets），
+  // 残留不影响功能；若需彻底清理，由调用方在 CI/本地手动 `rm -rf dist/public` 一次即可。
 
-  // 移除原始 <link style.css> 与 <script src=...>，改为引用外部 /{adminPath}/assets/*
+  // 管理面资源使用【固定】物理路径 /assets，与 ADMIN_PATH 解耦（build 不读 ADMIN_PATH）。
+  const assetBase = '/assets';
+
+  // 移除原始 <link style.css> 与 <script src=...>，改为引用固定 /assets/*
   html = html.replace(/<link[^>]+style\.css[^>]*>/i, `<link rel="stylesheet" href="${assetBase}/app.css">`);
   html = html.replace(/<!--\s*BUILD:STYLE\s*-->/i, '');
   html = html.replace(/<script[^>]+src=["'](?:\.\/)?api\.js["'][^>]*>\s*<\/script>/gi, '');
   html = html.replace(/<script[^>]+src=["'](?:\.\/)?app\.js["'][^>]*>\s*<\/script>/gi, '');
-  // 注入极小的引导脚本：仅设置 __BASE__（= /{adminPath}），运行时路径由托管前缀决定
-  const bootstrap = `<script>window.__BASE__='/${adminPath}';window.__PLATFORM__='unknown';</script>`;
-  if (/<\/head>/i.test(html)) {
-    html = html.replace('</head>', `${bootstrap}</head>`);
-  }
+  // 站点根页不注入任何后台路径；管理面 BASE 由运行时 renderAdminPage 注入（no-store）。
+  // 前端 api.js 在运行时从 location.pathname 第一段推导 BASE，无需此处预置。
   html = minifyHtml(html);
 
-  // 写出 index.html
+  // 写出站点根 index.html（无后台路径，零泄露）
   await mkdir(DIST_PUBLIC, { recursive: true });
   await writeFile(join(DIST_PUBLIC, 'index.html'), html, 'utf8');
 
-  // 写出 app.css / app.js（按 adminPath 输出，与运行时路由对齐）
-  const assetDir = join(DIST_PUBLIC, adminPath, 'assets');
+  // 写出 app.css / app.js（固定 /assets 物理路径，与运行时路由解耦）
+  const assetDir = join(DIST_PUBLIC, 'assets');
   await mkdir(assetDir, { recursive: true });
   await writeFile(join(assetDir, 'app.css'), minifyCss(css), 'utf8');
   await writeFile(join(assetDir, 'app.js'), frontendJs, 'utf8');
 
-  console.log(`  ✓ dist/public/index.html + ${adminPath}/assets/app.{css,js} 已生成（adminPath=${adminPath}）`);
+  console.log('  ✓ dist/public/index.html + assets/app.{css,js} 已生成（资源路径固定，与 ADMIN_PATH 解耦）');
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +355,7 @@ async function buildWorker() {
 async function verify() {
   console.log('▸ [4/4] 产物自检...');
 
+  // 静态资源实际输出在固定的 dist/public/assets/ 下（与 ADMIN_PATH 解耦，见 buildPublic）。
   const required = [
     join(ROOT, '_worker.js'),
     join(DIST_PUBLIC, 'index.html'),

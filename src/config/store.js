@@ -189,11 +189,21 @@ export async function getGlobal(ctx) {
     cfg = res.value;
   } else {
     cfg = cloneGlobal();
-    // KV 中尚无配置时，用环境变量作为 adminPath 的初始来源
-    const envPath = ctx.env?.ADMIN_PATH;
-    if (typeof envPath === 'string' && /^[a-zA-Z0-9_/-]+$/.test(envPath)) {
-      cfg.adminPath = envPath.replace(/^\/+/, '').replace(/\/+$/, '') || cfg.adminPath;
-    }
+  }
+
+  // 环境变量的 adminPath 作为「覆盖层」：
+  //   - 当 KV 中【未显式配置】adminPath（即仍为内置默认 __panel，或 KV 空）时，
+  //     用环境变量覆盖，满足「ADMIN_PATH 是可随时变更的运行时变量」这一设计——
+  //     首次部署即可通过环境变量注入随机路径，无需进入管理面手动改。
+  //   - 当用户已在管理面【显式】配置过 adminPath（非默认值），KV 优先，不被环境变量覆盖。
+  // 优先级最终为：KV 显式配置 > env.ADMIN_PATH > 内置默认 __panel。
+  const envPath = ctx.env?.ADMIN_PATH;
+  if (
+    typeof envPath === 'string' &&
+    /^[a-zA-Z0-9_/-]+$/.test(envPath) &&
+    (cfg.adminPath === '__panel' || cfg.adminPath == null || cfg.adminPath === '')
+  ) {
+    cfg.adminPath = envPath.replace(/^\/+/, '').replace(/\/+$/, '') || cfg.adminPath;
   }
 
   // 【顺序要求】必须先更新 _ttlMs 再 memSet，否则本次写入会沿用上一次的 TTL。

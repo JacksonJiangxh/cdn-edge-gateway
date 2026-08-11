@@ -1,7 +1,13 @@
-# 管理面使用教程（小白向）
+# 07 · 管理面使用教程
+
+> **管理面使用教程（小白向）**
+>
+> 上一篇：[06 可视化部署](./06-deploy-dashboard.md) ｜ 下一篇：[08 缓存策略](./08-cache-strategy.md)
+>
+> 返回 [文档中心](./README.md)
 
 > 本文手把手教你在网页上把网关跑起来：**登录 → 建站点（直接填源站 或 选源站组）→ 配规则 → 看流量序列**。
-> 字段含义速查见 [配置详解](./configuration.md)；想用命令行/脚本批量配见 [API 参考](./api-reference.md)。
+> 字段含义速查见 [配置详解](./04-configuration.md)；想用命令行/脚本批量配见 [API 参考](./12-api-reference.md)。
 
 登录地址：`https://你的域名/<ADMIN_PATH>`（本地默认 `http://127.0.0.1:8799/__panel`，密码 `local-dev-pass`）。
 

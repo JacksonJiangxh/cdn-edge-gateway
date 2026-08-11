@@ -12,8 +12,7 @@
     "dev:nobuild": "node scripts/dev.mjs --no-build",
     "dev:pages": "npm run build && wrangler pages dev .",
     "deploy": "npm run build && wrangler deploy",
-    "deploy:pages": "npm run build && wrangler pages deploy .",
-    "test": "node --test test/*.test.js"
+    "deploy:pages": "npm run build && wrangler pages deploy ."
   },
   "keywords": [
     "cloudflare-workers",

@@ -8,7 +8,11 @@
 name = "cdn-edge-gateway"
 main = "_worker.js"
 compatibility_date = "2025-01-01"
-compatibility_flags = ["nodejs_compat", "sockets"]
+# 注意：不要在此加 "sockets" —— workerd 无此 flag，会导致 wrangler dev / deploy
+# 直接启动失败（No such compatibility flag: sockets）。
+# cloudflare:sockets 由 src/proxy/engines/socketEngine.js 运行时动态 import，
+# 无需 flag；平台不支持时自动降级到 fetch 引擎。
+compatibility_flags = ["nodejs_compat"]
 keep_vars = true
 
 #===============================================================================
@@ -40,7 +44,6 @@ assets = { directory = "./dist/public", binding = "ASSETS", html_handling = "non
 #
 #   【toml 负责，wrangler deploy 自动带上】
 #     - assets 静态资产层（代码/构建产物的一部分，应版本化）
-#     - 非敏感变量 ADMIN_PATH（构建期与运行时需一致）
 #
 #   【可视化负责，部署前一次性在 Dashboard 点完，无需知道 ID】
 #     - KV 命名空间创建 + 绑定 CDN_KV（UI 里选命名空间即绑，根本不用记 namespace id）
@@ -54,7 +57,7 @@ assets = { directory = "./dist/public", binding = "ASSETS", html_handling = "non
 #    仅作「纯本地 dev 且不想开 Dashboard」时的备用写法；走 CI / Dashboard 部署时
 #    请保持注释状态，改去控制台绑——这样 CI 的 `wrangler deploy` 只上传代码+资产，
 #    不会因占位符 ID 报错，也不会和可视化已绑的重复声明。
-#    完整说明与操作顺序见 docs/deployment.md 的「Cloudflare Workers 部署职责表」。
+#    完整说明与操作顺序见 docs/05-deploy-cli.md 的「Cloudflare Workers 部署职责表」。
 #===============================================================================
 
 #-------------------------------------------------------------------------------
@@ -98,7 +101,11 @@ assets = { directory = "./dist/public", binding = "ASSETS", html_handling = "non
 # 非敏感环境变量（toml 负责，wrangler deploy 自动带上）
 #-------------------------------------------------------------------------------
 [vars]
-# 管理面路径段（强烈建议改成随机字符串，这是第一层安全防护）
+# 管理面路径段（第一层安全防护，强烈建议改成随机字符串）。
+# ADMIN_PATH 是【纯运行时】变量：build 阶段不读取它（见 build.mjs），
+# 管理面静态资源走固定的 /assets 物理路径，与 ADMIN_PATH 解耦。
+# 此处 __panel 仅作缺省兜底；运行时改环境变量即可平滑变更入口前缀，无需重新构建。
+# 优先级：KV 显式配置 > 运行时 ADMIN_PATH 环境变量 > 本处默认值。
 ADMIN_PATH = "__panel"
 
 #-------------------------------------------------------------------------------

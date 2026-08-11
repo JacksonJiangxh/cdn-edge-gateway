@@ -15,7 +15,7 @@
 //   承载「不依赖 KV 的重活」——大数据转码、AI 推理、独立 MySQL/Blob 业务、后台批处理等。
 //   一旦引入这类场景，应在 cloud-functions/ 下新增路由，而非塞进本 Edge 入口。
 //   跨平台存储统一策略：CF 侧未来用 D1、EO 侧对应用 Blob（对象存储，cloud-functions 经 SDK 访问），
-//   两者封装在同一存储抽象层之后，调用方无感知（详见 docs/architecture.md 的「存储抽象」章节）。
+//   两者封装在同一存储抽象层之后，调用方无感知（详见 docs/10-architecture.md 的「存储抽象」章节）。
 //
 // 静态资源（dist/public/ 下的 index.html、assets/*）由 Makers 自动托管，
 // 与函数路由冲突时静态资源优先，无需在 edgeone.json 里写 routes。

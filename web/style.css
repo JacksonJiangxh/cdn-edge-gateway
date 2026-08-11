@@ -997,7 +997,7 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
   font-size: 11px; color: var(--muted); opacity: .8;
   font-style: italic;
 }
-/* 大阶段分组标题（对应 flow.md 的 ①②③…） */
+/* 大阶段分组标题（对应 11-request-flow.md 的 ①②③…） */
 .seq-group {
   position: relative;
   display: flex; align-items: flex-start; gap: 10px;

@@ -5,8 +5,8 @@
   "framework": "others",
   "buildCommand": "npm run build",
   "installCommand": "npm ci",
-  "outputDirectory": "dist/public",
+  "outputDirectory": ".",
   "env": {
-    "NODE_VERSION": "18"
+    "NODE_VERSION": "20"
   }
 }

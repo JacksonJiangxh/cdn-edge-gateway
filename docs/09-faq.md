@@ -1,6 +1,63 @@
-# 常见问题 FAQ
+# 09 · 常见问题 FAQ
 
-> 遇到坑先查这里。本地开发专属问题见 [本地开发 §8](./local-development.md#8-常见报错排查)。
+> **常见问题 FAQ**
+>
+> 上一篇：[08 缓存策略](./08-cache-strategy.md) ｜ 下一篇：[10 系统架构](./10-architecture.md)
+>
+> 返回 [文档中心](./README.md)
+
+> 遇到坑先查这里。本地开发专属问题见 [03 本地开发](./03-local-development.md)。
+
+---
+
+## 启动与构建报错（新手最常撞的几个）
+
+**Q：`npm run build` 报「产物缺失」怎么办？**
+先确认 Node 版本 ≥ 20（`node -v`）。本项目构建脚本要求 Node 20+，18 会出各种怪问题。
+仍失败就清空重来：
+
+```bash
+rm -rf dist node_modules && npm install && npm run build
+```
+
+**Q：`npm run dev` 报 `No such compatibility flag: sockets`？**
+`wrangler.toml` 里被加了 workerd 不存在的 flag。正确写法只保留 `nodejs_compat`：
+
+```toml
+compatibility_flags = ["nodejs_compat"]
+```
+
+`cloudflare:sockets` 是运行时动态 `import` 的，**不需要**声明 flag；
+平台不支持时会自动降级到 fetch 引擎（此时 `/__health` 里 `hasSocket:false`，属正常）。
+
+**Q：`npm run dev` 报 `Address already in use`？**
+上次的进程没退干净。杀掉后重启，或直接换端口：
+
+```bash
+pkill -f workerd; pkill -f wrangler
+# 或
+npm run dev -- --port 8080
+```
+
+**Q：本地登录管理面返回 500 / `INTERNAL` 错误？**
+先看 `/__health` 里的 `hasKV`：
+
+- `hasKV: false` → 没有 KV 绑定，配置无处存取，登录必然 500。
+  本地请用 `npm run dev`（它会通过 `wrangler.dev.toml` 自动挂上模拟的 `CDN_KV`），
+  **不要**直接裸跑 `npx wrangler dev`。
+- `hasKV: true` 仍失败 → 检查 `.dev.vars` 里的 `ADMIN_PASSWORD` 与你输入的是否一致。
+
+**Q：本地管理面密码是多少？**
+`local-dev-pass`。由 `npm run dev` 首次运行时自动写入 `.dev.vars`
+（该文件已被 `.gitignore` 忽略，不会提交）。忘了可以直接打开这个文件看。
+
+**Q：改了 `ADMIN_PATH`，旧路径还能访问到管理面？**
+旧构建产物残留在 `dist/public/` 下。当前构建脚本每次会先清空该目录，
+若你用的是旧版本，手动清一次再构建：
+
+```bash
+rm -rf dist && npm run build
+```
 
 ---
 
@@ -32,7 +89,7 @@
 **Q：EdgeOne 上缓存是怎么工作的 / 统计没数据？**
 EO 没有 `caches.default` API，但**边缘缓存能力真实存在且已启用**（`hasEdgeCache=true`）——只是走两条 EO 专属路径而非 CF 的 Cache API：
 - **路径 B（响应头委托）**：网关在响应上下发 `CDN-Cache-Control`，**由 EO 边缘按响应头缓存**（TTL 由策略 `edgeTtl` 决定）。这是所有 EO 请求都享受的缓存。
-- **路径 A（同站 fetch 委托节点缓存）**：对「无自定义回源 Host 的可缓存请求」，边缘函数内 `fetch(同站加速域名)`（HOST 与 host 头一致）会走 EO 节点缓存——**命中后零函数调用**，真正省额度；未命中则由 EO 按平台「源站组 + 回源 Host 重写」回源（详见 `docs/eo-origin-host.md`，需预先在 EO 控制台配好源站组）。有自定义回源 Host 的请求因无法用同站 fetch 表达，仍走项目多源站逻辑回源 + 路径 B 响应头缓存。
+- **路径 A（同站 fetch 委托节点缓存）**：对「无自定义回源 Host 的可缓存请求」，边缘函数内 `fetch(同站加速域名)`（HOST 与 host 头一致）会走 EO 节点缓存——**命中后零函数调用**，真正省额度；未命中则由 EO 按平台「源站组 + 回源 Host 重写」回源（详见 `docs/13-eo-origin-host.md`，需预先在 EO 控制台配好源站组）。有自定义回源 Host 的请求因无法用同站 fetch 表达，仍走项目多源站逻辑回源 + 路径 B 响应头缓存。
 
 区别：EO 下无法像 CF 那样「主动按键清除」（`cacheGen` 整站清除只作用于 `caches.default`），EO 缓存只能等 TTL 自然过期或用 `Cache-Tag` + 平台 purge。统计方面：EO 无 D1，统计回退 KV。确认 `CLOUD_PLATFORM=edgeone` 已设，管理面「系统信息」页 `hasEdgeCache` 应为 true、`hasCacheApi`（caches API）应为 false、`eoEdgeCache` 应为 true、`hasD1` 应为 false。
 
@@ -56,7 +113,7 @@ EO 没有 `caches.default` API，但**边缘缓存能力真实存在且已启用
 `origins[].addr` 只填 host（如 `oss.com`），路径用 `pathPrefix` 字段。填 `https://oss.com/path` 会报「源站地址不应包含路径」。
 
 **Q：规则怎么写「匹配条件」？**
-新版支持两种方式：① 快捷条件（路径前缀 / 正则 / 扩展名 / 方法）；② 可视化多条件 `match.conditions`（二维数组，外层 OR、内层 AND，可匹配 host/path/query/header/cookie/method/clientIp/referer/userAgent/asn/country/scheme 等）。不填条件 = 匹配全部。详见 [配置详解 §2.2](./configuration.md#22-match匹配条件)。
+新版支持两种方式：① 快捷条件（路径前缀 / 正则 / 扩展名 / 方法）；② 可视化多条件 `match.conditions`（二维数组，外层 OR、内层 AND，可匹配 host/path/query/header/cookie/method/clientIp/referer/userAgent/asn/country/scheme 等）。不填条件 = 匹配全部。详见 [配置详解 §2.2](./04-configuration.md#22-match匹配条件)。
 
 **Q：多条规则谁先生效？**
 按 `priority` **降序**匹配，命中即停。在数字大的规则优先；也可以在「流量序列」里直接**拖拽**规则节点排序，松手自动保存。
@@ -75,7 +132,7 @@ EO 没有 `caches.default` API，但**边缘缓存能力真实存在且已启用
 ## 本地开发相关
 
 **Q：本地 `npm run dev` 起不来 / 一直要 CF 账号？**
-默认 `wrangler dev` 是本地模式，不连 Cloudflare、不需要 token。若报错要 `CLOUDFLARE_API_TOKEN`，通常是误带了 `-r/--remote`。清掉即可。详见 [本地开发 §8](./local-development.md#8-常见报错排查)。
+默认 `wrangler dev` 是本地模式，不连 Cloudflare、不需要 token。若报错要 `CLOUDFLARE_API_TOKEN`，通常是误带了 `-r/--remote`。清掉即可。详见 [03 本地开发](./03-local-development.md)。
 
 **Q：本地忘了 `.dev.vars` 里的管理密码怎么办？**
 默认是 `local-dev-pass`。若改过又忘了：编辑 `.dev.vars` 把 `ADMIN_PASSWORD` 改回已知值，再 `npm run dev:clean` 清空本地 KV 后重启，首次登录会用新密码重置。
@@ -94,7 +151,7 @@ EO 没有 `caches.default` API，但**边缘缓存能力真实存在且已启用
 不会。所有日志仅 `console.*` 输出，只在 dev 终端可见；不接 Analytics Engine / logpush，不向任何外部 endpoint 回传。统计只落你自己的 KV/D1。
 
 **Q：管理面要不要做防护？**
-建议：① `ADMIN_PATH` 用随机串；② `ADMIN_PASSWORD` 强密码；③ 必要时加 IP 白名单 / 签名 URL。详见 [配置详解 §3](./configuration.md#3-安全security)。
+建议：① `ADMIN_PATH` 用随机串；② `ADMIN_PASSWORD` 强密码；③ 必要时加 IP 白名单 / 签名 URL。详见 [配置详解 §3](./04-configuration.md#3-安全security)。
 
 ---
 

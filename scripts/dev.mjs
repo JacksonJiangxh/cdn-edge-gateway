@@ -31,6 +31,9 @@ const port = getOpt("--port", "8799");
 const clean = hasFlag("--clean");
 const noBuild = hasFlag("--no-build");
 const cfMode = hasFlag("--cf");
+// 管理面入口前缀：允许本地用 --admin-path xxx 或环境变量 ADMIN_PATH 覆盖，
+// 用于演示「纯运行时变量、可随时变更、无需重新构建」。缺省走代码默认 __panel。
+const adminPath = getOpt("--admin-path", process.env.ADMIN_PATH || "");
 // 默认监听 0.0.0.0，便于 CNB / 云开发等容器环境的临时公网 URL 访问；
 // 用 --local 可回退到仅 127.0.0.1 的本地模式。
 const localOnly = hasFlag("--local");
@@ -41,7 +44,7 @@ const DEFAULT_DEV_VARS = `# 本地开发 Secrets（已被 .gitignore 忽略，�
 ADMIN_PASSWORD=local-dev-pass
 JWT_SECRET=0011223344556677889900aabbccddeeff0011223344556677889900aabbccddeeff
 
-# 声明本地模拟 EdgeOne 能力集（关闭 caches.default / 统计回退 KV）
+# 声明本地模拟 EdgeOne 能力集
 CLOUD_PLATFORM=edgeone
 `;
 if (!existsSync(devVars)) {
@@ -84,14 +87,26 @@ console.log(`    管理面: http://${localOnly ? "127.0.0.1" : "0.0.0.0"}:${port
 // 在 CNB / 云开发等容器环境里，临时公网 URL 会转发到容器端口，
 // 需要 --ip 0.0.0.0 绑定所有网卡才能被外部访问；--local 时回退到回环监听。
 // 注意：wrangler 的 --host 是「上游转发 host」，并非「监听地址」，此处用 --ip。
+// 本地 dev 走独立的 wrangler.dev.toml，其中额外声明了 CDN_KV 绑定。
+// wrangler 会用 Miniflare 在 .wrangler/ 下模拟 KV，不需要云端账号或真实 namespace id。
+// 缺这个绑定时 getKV() 返回 null，登录与保存配置会直接 500，
+// 干净 clone 下 `npm run dev` 就走不完「登录管理面」这一步。
+// 该文件只在本地生效：wrangler deploy 仍读根 wrangler.toml + 控制台完成的绑定。
 const wranglerArgs = [
   "dev",
+  "-c",
+  "wrangler.dev.toml",
   ...(localOnly ? [] : ["--ip", "0.0.0.0"]),
   "--port",
   port,
   "--var",
   `CLOUD_PLATFORM=${platform}`,
 ];
+// ADMIN_PATH 作为纯运行时变量，通过 --var 注入（--var 优先级高于 toml [vars]）。
+// 配置了才注入，避免空字符串覆盖默认值。
+if (adminPath) {
+  wranglerArgs.push("--var", `ADMIN_PATH=${adminPath}`);
+}
 
 const child = spawn("npx", ["wrangler", ...wranglerArgs], {
   cwd: root,

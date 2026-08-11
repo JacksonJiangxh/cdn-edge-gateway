@@ -691,7 +691,7 @@
     return wrap;
   }
 
-  // 流量序列：阶段分组标题（对应 flow.md 的 ①②③… 大阶段）
+  // 流量序列：阶段分组标题（对应 11-request-flow.md 的 ①②③… 大阶段）
   function seqGroup(no, title, desc) {
     return el('div', { class: 'seq-group' }, [
       el('span', { class: 'seq-group-no', text: no }),

@@ -1,0 +1,179 @@
+# 02 · 环境准备
+
+> 上一篇：[01 项目概述](./01-overview.md) ｜ 下一篇：[03 本地开发与验证](./03-local-development.md)
+
+本篇结束后，你会有一个**依赖装好、构建通过**的本地仓库。
+预计耗时 10 分钟。
+
+---
+
+## 步骤 1：确认 Node.js 版本
+
+本项目要求 **Node.js ≥ 20**（构建脚本用到了新版 API，18 会报错）。
+
+```bash
+node -v
+```
+
+**预期结果**：输出 `v20.x.x` 或更高，例如：
+
+```
+v20.11.1
+```
+
+<details>
+<summary>❌ 版本低于 20 或提示 command not found，点这里</summary>
+
+推荐用 nvm 安装，不污染系统环境：
+
+```bash
+# macOS / Linux
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+# 重开终端后执行
+nvm install 20
+nvm use 20
+```
+
+Windows 用户：到 [nodejs.org](https://nodejs.org/) 下载 20 LTS 安装包，一路下一步。
+
+装完重新执行 `node -v` 确认。
+</details>
+
+---
+
+## 步骤 2：确认 npm 可用
+
+```bash
+npm -v
+```
+
+**预期结果**：输出版本号，例如 `10.2.4`。npm 随 Node 一起安装，正常情况无需单独装。
+
+---
+
+## 步骤 3：克隆仓库
+
+```bash
+git clone <你的仓库地址>
+cd <仓库目录名>
+```
+
+**预期结果**：当前目录下能看到 `package.json`、`src/`、`web/` 等文件：
+
+```bash
+ls
+```
+
+```
+LICENSE  README.md  _worker.js  build.mjs  docs  edge-functions
+edgeone.json  index.js  package.json  scripts  src  web  wrangler.toml
+```
+
+---
+
+## 步骤 4：安装依赖
+
+```bash
+npm install
+```
+
+**预期结果**：结尾出现类似输出（数字不用完全一致）：
+
+```
+added 89 packages, and audited 90 packages in 12s
+found 0 vulnerabilities
+```
+
+> 本项目运行时**零依赖**，`node_modules` 里装的只是构建/部署工具（esbuild、wrangler）。
+> 装出来几十 MB 是正常的，不会进入线上产物。
+
+<details>
+<summary>❌ 卡住或报网络错误，点这里</summary>
+
+国内网络建议换源后重试：
+
+```bash
+npm config set registry https://registry.npmmirror.com
+npm install
+```
+</details>
+
+---
+
+## 步骤 5：执行一次构建，验证环境
+
+这是**验证环境是否真的可用**的关键一步。
+
+```bash
+npm run build
+```
+
+**预期结果**：四个步骤全部通过，最后出现 `构建完成`：
+
+```
+▸ [1/4] 打包 Worker...
+▸ [2/4] 输出静态资源目录 dist/public/...
+▸ [3/4] 生成入口薄壳...
+▸ [4/4] 产物自检...
+  ✓ 构建完成
+```
+
+同时会生成两个产物：
+
+```bash
+ls dist/public
+```
+
+```
+__panel  index.html
+```
+
+> `__panel` 是默认的 `ADMIN_PATH`。如果你设置了自定义值，这里的目录名会跟着变——
+> 这是正常的，管理面静态资源就放在这个路径下。
+
+<details>
+<summary>❌ 构建报错「产物缺失」，点这里</summary>
+
+先确认 Node 版本 ≥ 20（步骤 1），再清空产物重试：
+
+```bash
+rm -rf dist node_modules
+npm install
+npm run build
+```
+</details>
+
+---
+
+## 步骤 6（可选）：安装 Wrangler
+
+**只有走 [05 命令行部署](./05-deploy-cli.md) 才需要。**
+如果你打算走 [06 可视化部署](./06-deploy-dashboard.md)，**跳过这步**，直接进入下一篇。
+
+Wrangler 已在 `devDependencies` 中，`npm install` 时已装好，用 `npx` 调用即可：
+
+```bash
+npx wrangler --version
+```
+
+**预期结果**：输出版本号，例如：
+
+```
+⛅️ wrangler 3.x.x
+```
+
+---
+
+## 检查清单
+
+进入下一篇前，确认以下三项都为 ✅：
+
+- [ ] `node -v` ≥ v20
+- [ ] `npm install` 成功，无报错
+- [ ] `npm run build` 输出 `✓ 构建完成`
+
+---
+
+## 下一步
+
+→ **[03 本地开发与验证](./03-local-development.md)**：把服务在本机跑起来，进管理面点一遍。

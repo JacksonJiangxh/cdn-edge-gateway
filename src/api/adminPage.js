@@ -20,18 +20,25 @@
  */
 
 /**
- * 尝试以静态方式响应管理面请求。
- *   - GET /{adminPath}/assets/app.css → 透传构建期产出的 CSS（长期缓存）
- *   - GET /{adminPath}/assets/app.js  → 透传构建期产出的 JS（长期缓存）
- *   - GET /{adminPath} | /{adminPath}/ → 返回 SSG + 运行时注入的兜底 HTML
- * 返回 null 表示不是管理面请求，交由调用方继续路由。
+ * 以静态方式响应「已确认为管理面」的请求。
  *
- * adminPath 必须与构建期 ADMIN_PATH、运行时 KV/ADMIN_PATH 完全一致，否则静态
- * 物理路径与运行时路由错位会导致资源 404。为兼容旧产物，仍兜底匹配 /__panel。
+ * ⚠️ 安全边界：本函数**不负责判定「某请求是否属于管理面」**。那道门在 core/app.js
+ * 里完成——只有当请求路径第一段**等于**运行时配置的 adminPath 时，app.js 才会把
+ * 请求交给本函数。本函数拿到的 req 已经是「通过了第一层 adminPath 校验」的请求，
+ * 因此这里**只接受与传入 adminPath 完全一致的路径前缀**，绝不使用「任意前缀」正则，
+ * 否则会绕过第一层防护，让攻击者用任意前缀都能拿到管理面 JS。
+ *
+ *   对外：GET /{adminPath}/assets/app.css|app.js   （adminPath 必须等于配置值）
+ *   对内：固定映射到物理资源 /assets/app.{css,js}（构建期固定路径，与 adminPath 解耦）
+ *   对外：GET /{adminPath} | /{adminPath}/         → 返回运行时注入的兜底 HTML
+ *
+ * 设计：adminPath 仅作为「浏览器访问入口前缀」，运行时把 /{adminPath}/assets/*
+ * 重写为固定的 /assets/* 物理资源。因此 build 期无需读取 ADMIN_PATH，改 adminPath
+ * 不必重新构建。兼容历史默认前缀 /__panel（仅在配置值恰为 __panel 时生效）。
  *
  * @param {import('../contracts.js').Ctx} ctx
- * @param {Request} req
- * @param {string} [adminPath] 运行时的管理面路径段（如 "__panel"），缺省回退 __panel
+ * @param {Request} req 已被 app.js 判定为「属于管理面」的请求
+ * @param {string} adminPath 运行时的管理面入口前缀（如 "__panel"），必须与配置值一致
  * @returns {Promise<Response|null>}
  */
 export async function tryServePanelStatic(ctx, req, adminPath) {
@@ -39,56 +46,57 @@ export async function tryServePanelStatic(ctx, req, adminPath) {
   const url = new URL(req.url);
   const pathname = url.pathname;
 
-  // 静态资源：长期缓存（内容由构建产出，重部署即更新）
-  // 匹配 /{adminPath}/assets/*，并兼容历史 /__panel/assets/*
-  const assetRe = /^\/(?:__panel|[^/]+)\/assets\/(app\.(?:css|js))$/;
-  const m = pathname.match(assetRe);
-  if (m) {
-    const seg = pathname.split('/')[1];
-    // 仅当路径段与运行时 adminPath 一致、或为历史默认 __panel 时才命中
-    if (seg === path || seg === '__panel') {
-      // 优先走 Cloudflare Workers Static Assets 绑定（env.ASSETS）：命中 CF 静态层，
-      // 边缘缓存、零函数计费，与 CF Pages / EO Makers 静态托管等价。
-      // 仅 CF Workers 形态部署（wrangler.toml 含 assets 绑定）时 ctx.env.ASSETS 存在；
-      // 纯 Dashboard 粘贴 _worker.js 时不存在，自动回退到下方 ui.gen.js 内联兜底。
-      const assets = ctx?.env?.ASSETS;
-      if (assets?.fetch) {
-        try {
-          const assetResp = await assets.fetch(req);
-          if (assetResp && assetResp.status < 400) {
-            // 叠加长期缓存头（ASSETS 层已带边缘缓存，此处确保浏览器端强缓存）
-            const headers = new Headers(assetResp.headers);
-            headers.set('cache-control', 'public, max-age=86400, immutable');
-            headers.set('x-content-type-options', 'nosniff');
-            return new Response(assetResp.body, { status: assetResp.status, headers });
-          }
-        } catch {
-          /* ASSETS 不可用则回退内联兜底 */
-        }
-      }
-      // 回退：从 ui.gen.js 内联字节透传（无静态目录环境也完整可用）
-      try {
-        const mod = await import('../ui.gen.js');
-        const isCss = pathname.endsWith('.css');
-        const body = isCss ? mod.UI_CSS : mod.UI_JS;
-        if (body) {
-          return new Response(body, {
-            status: 200,
-            headers: {
-              'content-type': isCss ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8',
-              'cache-control': 'public, max-age=86400, immutable',
-              'x-content-type-options': 'nosniff',
-            },
-          });
-        }
-      } catch {
-        /* 无静态资源则回退内联 HTML */
-      }
-    }
+  // 严格前缀匹配：只接受「配置值本身」作为管理面前缀。不使用 /[^/]+/ 这类宽松匹配，
+  // 否则任意 /x/assets/* 都会被当作管理面资源返回，等于卸掉了第一层防护。
+  const prefix = `/${path}`;
+  if (pathname !== prefix && pathname !== prefix + '/' && !pathname.startsWith(prefix + '/')) {
+    return null;
   }
 
-  // 管理面根路径：返回 SSG + 运行时注入的兜底 HTML
-  if (pathname === `/${path}` || pathname === `/${path}/` || pathname === '/__panel' || pathname === '/__panel/') {
+  // 管理面静态资源：/{adminPath}/assets/* → 重写为固定物理 /assets/*
+  if (pathname.startsWith(prefix + '/assets/')) {
+    const file = pathname.slice((prefix + '/assets/').length);
+    if (file !== 'app.css' && file !== 'app.js') return null; // 只允许这两个白名单文件
+    const isCss = file.endsWith('.css');
+    // 优先走 Cloudflare Workers Static Assets 绑定（env.ASSETS）：ASSETS 按 URL 路径取文件，
+    // 对外是 /{adminPath}/assets/*，物理是 /assets/*，故重写为固定物理路径去取。
+    const assets = ctx?.env?.ASSETS;
+    if (assets?.fetch) {
+      try {
+        const physReq = new Request(url.origin + '/assets/' + file, req);
+        const assetResp = await assets.fetch(physReq);
+        if (assetResp && assetResp.status < 400) {
+          const headers = new Headers(assetResp.headers);
+          headers.set('cache-control', 'public, max-age=86400, immutable');
+          headers.set('x-content-type-options', 'nosniff');
+          return new Response(assetResp.body, { status: assetResp.status, headers });
+        }
+      } catch {
+        /* ASSETS 不可用则回退内联兜底 */
+      }
+    }
+    // 回退：从 ui.gen.js 内联字节透传（无静态目录环境也完整可用）
+    try {
+      const mod = await import('../ui.gen.js');
+      const body = isCss ? mod.UI_CSS : mod.UI_JS;
+      if (body) {
+        return new Response(body, {
+          status: 200,
+          headers: {
+            'content-type': isCss ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8',
+            'cache-control': 'public, max-age=86400, immutable',
+            'x-content-type-options': 'nosniff',
+          },
+        });
+      }
+    } catch {
+      /* 无静态资源则回退内联 HTML */
+    }
+    return null;
+  }
+
+  // 管理面根路径：返回运行时注入 BASE 的兜底 HTML（BASE 用对外前缀，浏览器据此拼 API）
+  if (pathname === prefix || pathname === prefix + '/') {
     return renderAdminPage(ctx, path);
   }
 

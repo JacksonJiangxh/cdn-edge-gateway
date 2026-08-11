@@ -1,0 +1,35 @@
+# 本地开发专用配置（仅供 `npm run dev` 使用，不参与任何线上部署）
+#
+# 作用：给本地 dev 补一个 CDN_KV 绑定。
+#   wrangler 会用 Miniflare 在 .wrangler/ 目录下模拟这个 KV 命名空间，
+#   完全跑在本机，不需要 Cloudflare 账号，也不需要真实 namespace id。
+#
+# 为什么必须有：
+#   网关的配置（站点、源站池、规则）全部存在 KV 里。
+#   没有 CDN_KV 绑定时 getKV() 返回 null，登录和保存配置都会直接报 500。
+#
+# 线上部署不使用本文件：
+#   `wrangler deploy` 只读根目录的 wrangler.toml，
+#   生产的 KV 绑定请在控制台完成（见 docs/05-deploy-cli.md 步骤 2）。
+#
+# 清空本地数据：npm run dev -- --clean
+
+name = "edge-cdn-dev"
+main = "_worker.js"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+# 不在此写死 ADMIN_PATH：留空让运行时缺省回退到代码默认 "__panel"，
+# 同时允许通过 `npm run dev -- --admin-path xxx` 或环境变量 ADMIN_PATH 覆盖
+# （dev.mjs 会以 --var 注入，wrangler 中 --var 优先级高于 toml [vars]）。
+# 这符合「ADMIN_PATH 是纯运行时变量、可随时变更、无需重新构建」的设计。
+
+[assets]
+directory = "dist/public"
+binding = "ASSETS"
+
+[[kv_namespaces]]
+binding = "CDN_KV"
+# 本地模拟无需真实 id，此处仅作占位标识。
+id = "local-dev-kv"
