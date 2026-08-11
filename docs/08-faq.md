@@ -52,17 +52,18 @@ npm run dev -- --port 8080
 （该文件已被 `.gitignore` 忽略，不会提交）。忘了可以直接打开这个文件看。
 
 **Q：改了 `ADMIN_PATH`，旧路径还能访问到管理面？**
-`ADMIN_PATH` 是**纯运行时**变量（构建期不读它，见 [04 §6](./04-configuration.md)），
+`ADMIN_PATH`（运行时生效值 = **KV 中管理面保存的值 > 内置默认 `__panel`**，见 [04 §6](./04-configuration.md)）是**纯运行时**参数（构建期不读它），
 所以这和「构建产物残留」无关——`dist/public/` 下压根不会出现以 admin 路径命名的目录，
 管理面静态资源固定走 `assets/` 物理路径。
 
 旧路径是否还能访问，取决于**运行时此刻还在不在意那个旧段**：
-- 你改的是环境变量 → 重新部署后，运行时只认新段，旧路径（`/{旧}/`、`/{旧}/assets/*`）
-  走数据面（`tryServePanelStatic` 严格只服务已确认的管理面段），不再命中管理面。
-- 你改的是 KV 里的 `adminPath` → 同上，KV 优先级最高，旧段立即失效。
+- 你是在管理面改了入口前缀并存进 KV → KV 优先级最高，旧段立即失效，无需重新部署。
+- 你确实在 Dashboard 主动设了环境变量 `ADMIN_PATH`（不推荐，`store.js` 仅作兜底）→
+  需重新部署后运行时才认新段，旧路径（`/{旧}/`、`/{旧}/assets/*`）走数据面
+  （`tryServePanelStatic` 严格只服务已确认的管理面段），不再命中管理面。
 - 浏览器端只是旧的 `localStorage`/书签还指向旧路径 → 重新进新路径即可，刷新一次 BASE。
 
-一句话：改完重新部署即生效，无需、也无法靠「清构建产物」解决。
+一句话：推荐用法是「管理面改 + 存 KV」即生效，无需重新部署；无需、也无法靠「清构建产物」解决。
 
 ---
 
@@ -85,6 +86,12 @@ npm run dev -- --port 8080
 
 **Q：为什么 EdgeOne 上管理 API 有时在 Node 运行时、有时在 Edge 运行时？**
 这是旧版 EdgeOne Pages（旧目录 `functions/`+`node-functions/`、`routes` 分流）的行为。本项目已迁移到新版 Makers：全部请求经 `edge-functions/[[default]].js` → `_worker.js` 单入口，`platform` 识别为 `edgeone`，KV 键编码与 `configCacheTtl` 下限等 EO 专属逻辑照常生效，无需 `routes` 分流配置。
+
+**Q：我点的是「部署 CF Workers」按钮，系统设置却显示「运行平台 pages」、TCP Socket 不可用？**
+这是**平台探测误判**，不是你部署错了路——你确实是 Workers 部署，socket 能力本应可用。
+原因：CF Workers 的【Static Assets】配置（`wrangler.toml` 里的 `assets = { binding = "ASSETS" }`）会给运行时注入 `env.ASSETS` 绑定；旧版探测逻辑把「存在 `ASSETS` 绑定」当成了 Pages 的标志，于是把开了静态资产层的真·Workers 误判成 `pages`，进而 `detectSocket()` 返回 `false`，丢掉 TCP 回源。
+修复：已改为「仅凭 `CF_PAGES` / `CF_PAGES_BRANCH` / `CONTEXT` 这类 Pages 专属构建变量区分 Workers 与 Pages，`ASSETS` 绑定不再作为判定依据」（见 `src/platform/caps.js`）。**重新部署一次最新代码**即可恢复正常：系统设置应显示「运行平台 workers」、TCP Socket 可用。
+临时绕开（不想等重部署）：去管理面把源站 `engine` 从 `socket` 改成 `fetch` 也能用，但裸 IP / 非标端口 / 自定义 Host 回源场景会受限，建议直接升级代码。
 
 **Q：CF Pages 部署时「输出目录」填什么？**
 填 `.`（仓库根）。**不要填 `dist/public`**：该目录只有管理面的 HTML/JS/CSS，不含根目录的 `_worker.js`，填了会得到一个「管理面能打开、但数据面代理和 `/{ADMIN_PATH}/api/*` 全部 404」的站点（首次部署 KV 空时管理面路径用默认段 `__panel`）。

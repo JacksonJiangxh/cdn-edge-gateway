@@ -9,8 +9,9 @@
  *   2. 把 web/ 资源输出为独立静态目录 dist/public/（HTML 引用外部
  *      固定 /assets/*，与 ADMIN_PATH 解耦），供 EdgeOne Makers / Cloudflare Pages 静态托管，
  *      命中边缘缓存后管理面请求零函数执行次数，最省额度。
- *      ADMIN_PATH 与运行时 adminPath（KV / ADMIN_PATH 环境变量）必须一致，
- *      否则静态物理路径与运行时路由错位会导致管理面资源 404。
+ *      管理面静态资源统一固定输出到 dist/public/assets/，build 期【不读取】
+ *      ADMIN_PATH，因此运行时的 adminPath（KV 或环境变量）可任意变更而无需重新构建，
+ *      运行时 Worker 收到 /{adminPath}/assets/* 会自动映射到固定 /assets/* 物理资源。
  *   3. 用 esbuild 打包 src/entry.js → 根目录 _worker.js
  *
  * 用法：node build.mjs [--no-minify] [--watch]

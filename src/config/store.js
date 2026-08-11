@@ -191,12 +191,14 @@ export async function getGlobal(ctx) {
     cfg = cloneGlobal();
   }
 
-  // 环境变量的 adminPath 作为「覆盖层」：
+  // 环境变量的 adminPath 作为「兜底层」（非推荐路径，仅当用户确实在 Dashboard
+  // 主动设了 ADMIN_PATH 变量时生效）：
   //   - 当 KV 中【未显式配置】adminPath（即仍为内置默认 __panel，或 KV 空）时，
-  //     用环境变量覆盖，满足「ADMIN_PATH 是可随时变更的运行时变量」这一设计——
-  //     首次部署即可通过环境变量注入随机路径，无需进入管理面手动改。
+  //     用环境变量覆盖，作为额外兜底。
   //   - 当用户已在管理面【显式】配置过 adminPath（非默认值），KV 优先，不被环境变量覆盖。
-  // 优先级最终为：KV 显式配置 > env.ADMIN_PATH > 内置默认 __panel。
+  // 正常推荐路径：部署脚本刻意不传 ADMIN_PATH，运行时用内置默认 __panel 兜底，
+  // 部署后由用户在管理面把入口前缀改成随机串并存进 KV（最高优先级生效）。
+  // 优先级最终为：KV 显式配置 > env.ADMIN_PATH（兜底）> 内置默认 __panel。
   const envPath = ctx.env?.ADMIN_PATH;
   if (
     typeof envPath === 'string' &&

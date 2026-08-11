@@ -65,7 +65,8 @@ jobs:
       - name: 构建（含产物自检）
         # ADMIN_PATH 是【纯运行时】变量，build 阶段不读取它（见 build.mjs）。
         # 管理面静态资源使用固定物理路径 /assets，与 ADMIN_PATH 解耦，
-        # 改管理面入口前缀无需重新构建。运行时在 Pages 环境变量里配 ADMIN_PATH 即可。
+        # 改管理面入口前缀无需重新构建。部署用内置默认 __panel 兜底，
+        # 部署后到管理面把入口前缀改成随机串并存进 KV（最高优先级生效）。
         run: npm run build
 
       - name: 校验凭据

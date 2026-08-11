@@ -102,10 +102,14 @@ binding = "${spec.binding}"
 id = "${value}"
 `;
   } else if (type === "r2_bucket") {
+    // jurisdiction 是 CF 后台给 R2 绑定默认附加的字段（如 default / eu / fedramp）。
+    // 远程读取时原样保留，否则 wrangler deploy 对比时会产生空 {} diff warning
+    // （功能不受影响，但会误导用户以为绑定有问题）。
+    const jur = hit.jurisdiction ? `jurisdiction = "${hit.jurisdiction}"\n` : "";
     toml += `
 [[r2_buckets]]
 binding = "${spec.binding}"
-${spec.toField} = "${value}"
+${jur}${spec.toField} = "${value}"
 `;
   } else if (type === "d1") {
     const dbName = hit.database_name ? `database_name = "${hit.database_name}"\n` : "";

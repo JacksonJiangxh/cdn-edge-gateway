@@ -26,7 +26,8 @@ compatibility_flags = ["nodejs_compat"]
 # 不在此写死 ADMIN_PATH：留空让运行时缺省回退到代码默认 "__panel"，
 # 同时允许通过 `npm run dev -- --admin-path xxx` 或环境变量 ADMIN_PATH 覆盖
 # （dev.mjs 会以 --var 注入，wrangler 中 --var 优先级高于 toml [vars]）。
-# 这符合「ADMIN_PATH 是纯运行时变量、可随时变更、无需重新构建」的设计。
+# 仅限本地 dev 使用；生产环境推荐「部署后管理面改 + 存 KV」，
+# 部署脚本刻意不传该变量（见 wrangler.toml / gen-deploy-config.mjs）。
 
 [assets]
 directory = "dist/public"

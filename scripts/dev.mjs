@@ -31,8 +31,10 @@ const port = getOpt("--port", "8799");
 const clean = hasFlag("--clean");
 const noBuild = hasFlag("--no-build");
 const cfMode = hasFlag("--cf");
-// 管理面入口前缀：允许本地用 --admin-path xxx 或环境变量 ADMIN_PATH 覆盖，
-// 用于演示「纯运行时变量、可随时变更、无需重新构建」。缺省走代码默认 __panel。
+// 管理面入口前缀（仅本地 dev 生效）：允许本地用 --admin-path xxx 或环境变量
+// ADMIN_PATH 覆盖，便于演示入口前缀可变更、无需重新构建。缺省走代码默认 __panel。
+// 注意：生产环境推荐「部署后管理面改 + 存 KV」（见 wrangler.toml / gen-deploy-config.mjs），
+// 部署脚本刻意不传 ADMIN_PATH，此处覆盖仅作用于本地 Miniflare 运行时。
 const adminPath = getOpt("--admin-path", process.env.ADMIN_PATH || "");
 // 默认监听 0.0.0.0，便于 CNB / 云开发等容器环境的临时公网 URL 访问；
 // 用 --local 可回退到仅 127.0.0.1 的本地模式。
@@ -102,7 +104,8 @@ const wranglerArgs = [
   "--var",
   `CLOUD_PLATFORM=${platform}`,
 ];
-// ADMIN_PATH 作为纯运行时变量，通过 --var 注入（--var 优先级高于 toml [vars]）。
+// ADMIN_PATH 通过 --var 注入本地 dev 运行时（--var 优先级高于 toml [vars]）。
+// 仅本地 dev 用；生产部署由管理面存 KV 管理，部署脚本刻意不传该变量。
 // 配置了才注入，避免空字符串覆盖默认值。
 if (adminPath) {
   wranglerArgs.push("--var", `ADMIN_PATH=${adminPath}`);

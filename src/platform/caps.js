@@ -152,8 +152,20 @@ function detectEdgeOneRuntime(env, isCf) {
 
 /**
  * 在已确认是 CF 运行时的前提下，区分 Workers 与 Pages Functions。
- * Pages Functions 的 env 上一定挂着 ASSETS 绑定（静态资源 fetcher），
- * 这是目前唯一稳定可用的区分依据。
+ *
+ * ⚠️ 关键陷阱：CF Workers 的【Static Assets】配置（本项目 wrangler.toml 的
+ * `assets = { binding = "ASSETS" }`）也会给运行时注入 `env.ASSETS` 绑定，
+ * 因此不能仅凭 `ASSETS` 绑定存在就判定为 Pages——否则开启了静态资产层的
+ * 真·Workers 部署会被误判成 Pages，进而 `detectSocket()` 返回 false，
+ * 丢掉 TCP 回源能力（见 2026-08-11 部署反馈：点「部署 CF Workers」按钮后
+ * 系统设置却显示平台为 pages、socket 不可用）。
+ *
+ * 可靠的区分依据：
+ *   1. 显式 CLOUD_PLATFORM 声明（workers/pages）
+ *   2. Pages 构建专属变量：CF_PAGES / CF_PAGES_BRANCH / CONTEXT
+ *      —— 只有 Pages 构建会注入这些，Workers（含 Static Assets）不会。
+ *   3. 仅当命中上述 Pages 专属信号才判 pages；否则一律视为 workers
+ *      （即便 env.ASSETS 存在，那是 Workers Static Assets，不是 Pages）。
  * @param {Object} env 环境对象
  * @returns {'workers'|'pages'} 具体平台
  */
@@ -162,9 +174,12 @@ function detectCfSubPlatform(env) {
   if (explicit === 'pages' || explicit === 'cf-pages') return 'pages';
   if (explicit === 'workers' || explicit === 'cf' || explicit === 'cloudflare') return 'workers';
 
-  if (env && env.ASSETS && typeof env.ASSETS.fetch === 'function') return 'pages';
-  // Pages 构建时会注入 CF_PAGES 系列变量
+  // Pages 构建专属变量（Workers Static Assets 不会注入这些）
   if (readEnvVar(env, 'CF_PAGES') != null) return 'pages';
+  if (readEnvVar(env, 'CF_PAGES_BRANCH') != null) return 'pages';
+  if (readEnvVar(env, 'CONTEXT') != null) return 'pages';
+
+  // 注意：env.ASSETS 存在不再判 pages（见上方陷阱说明），视为 workers。
   return 'workers';
 }
 

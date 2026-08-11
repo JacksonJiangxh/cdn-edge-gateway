@@ -123,7 +123,8 @@ $:
         - name: build
           # ADMIN_PATH 是【纯运行时】变量，build 阶段不读取它（见 build.mjs）。
           # 管理面静态资源使用固定物理路径 /assets，与 ADMIN_PATH 解耦，
-          # 改管理面入口前缀无需重新构建。运行时在「环境变量」里配 ADMIN_PATH 即可。
+          # 改管理面入口前缀无需重新构建。部署用内置默认 __panel 兜底，
+          # 部署后到管理面把入口前缀改成随机串并存进 KV（最高优先级生效）。
           # 必须先 build：wrangler.toml 的 assets 绑定会把 dist/public/ 作为 CF 静态资产
           # 上传，管理面静态资源由此命中边缘缓存、零函数额度（CF Workers 形态专属）。
           script: npm run build
@@ -147,8 +148,9 @@ $:
             set -e
             # 按 binding 名（CDN_KV/CDN_R2/CDN_DB，代码契约恒定）调用 CF API 拉取
             # 远程已绑定的真实配置（资源 id / 桶名 / 库名是用户自定义，原样保留），
-            # 动态生成 wrangler.deploy.toml；远程已设的 ADMIN_PATH 则不传、绝不覆盖。
-            # 根 wrangler.toml 始终保持干净（不暴露资源 ID、不写死入口前缀）。
+            # 动态生成 wrangler.deploy.toml。ADMIN_PATH 刻意不传——部署后用内置默认
+            # __panel 兜底，再于管理面改成随机串存 KV（最高优先级生效），避免变量页
+            # 面出现该值误导小白。根 wrangler.toml 始终保持干净（不暴露资源 ID、不写死入口前缀）。
             node scripts/gen-deploy-config.mjs
         - name: 发布到 Workers
           if: |
@@ -177,7 +179,8 @@ $:
         - name: build
           # ADMIN_PATH 是【纯运行时】变量，build 阶段不读取它（见 build.mjs）。
           # 管理面静态资源使用固定物理路径 /assets，与 ADMIN_PATH 解耦，
-          # 改管理面入口前缀无需重新构建。运行时在「环境变量」里配 ADMIN_PATH 即可。
+          # 改管理面入口前缀无需重新构建。部署用内置默认 __panel 兜底，
+          # 部署后到管理面把入口前缀改成随机串并存进 KV（最高优先级生效）。
           script: npm run build
         - name: 校验凭据
           script: |
