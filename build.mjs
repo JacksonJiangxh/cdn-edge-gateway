@@ -157,18 +157,25 @@ async function buildInlineUI(frontendJs, css) {
   // --- 注入 CSS ---
   const styleTag = `<style>${css}</style>`;
   if (/<link[^>]+style\.css[^>]*>/i.test(html)) {
-    html = html.replace(/<link[^>]+style\.css[^>]*>/i, styleTag);
+    // 用函数 replacement 而非字符串 replacement：styleTag 含用户 CSS，
+    // 若含 $' / $& / $$ 等序列会被 String.replace 当作替换符错误展开。
+    html = html.replace(/<link[^>]+style\.css[^>]*>/i, () => styleTag);
     html = html.replace(/<!--\s*BUILD:STYLE\s*-->/i, '');
   } else if (css) {
-    html = html.replace('</head>', `${styleTag}</head>`);
+    html = html.replace('</head>', () => `${styleTag}</head>`);
   }
 
   // --- 注入 JS ---
   // 前端源码原样内联（不转义反引号/${）。
+  // ⚠️ 关键：必须用【函数 replacement】。前端 JS 内含正则/字符串（如 app.js 的
+  // '^(.*)$'），其中的 $' 序列若作为【字符串 replacement】传给 String.replace，
+  // 会被引擎当作替换符展开为"匹配点之后的内容"，把 </body></html> 等 HTML 尾部
+  // 塞进脚本中间，导致内联脚本 SyntaxError（浏览器报 Invalid or unexpected token）、
+  // 整个管理面前端无法执行。函数 replacement 的返回值不会被 $ 展开，可彻底规避。
   const scriptTag = `<script>\n${frontendJs}\n</script>`;
   html = html.replace(/<script[^>]+src=["'](?:\.\/)?(?:api|app)\.js["'][^>]*>\s*<\/script>/gi, '');
   if (/<\/body>/i.test(html)) {
-    html = html.replace(/<\/body>/i, `${scriptTag}</body>`);
+    html = html.replace(/<\/body>/i, () => `${scriptTag}</body>`);
   } else {
     html += scriptTag;
   }
