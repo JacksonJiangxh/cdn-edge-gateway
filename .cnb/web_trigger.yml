@@ -68,3 +68,21 @@ branch:
             description: 留空则用密钥仓库的 EO_PAGES_PROJECT，再无则用 cdn-edge-gateway
             type: input
             required: false
+
+      # ---------------- 清理历史流水线记录 ----------------
+      - name: 🧹 清理历史流水线记录
+        description: 删除当前仓库的历史流水线构建日志（保留最近 N 条），需确认输入 clean
+        event: web_trigger_cleanup_history
+        inputs:
+          confirm:
+            name: 确认
+            description: 输入 clean 才会执行清理（防误触）
+            type: input
+            required: true
+            default: ""
+          keep:
+            name: 保留最近条数
+            description: 只删除超过该数量的旧构建记录，默认保留 50 条
+            type: input
+            required: false
+            default: "50"

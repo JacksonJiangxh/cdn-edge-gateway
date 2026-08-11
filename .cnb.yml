@@ -242,3 +242,49 @@ $:
               -t "$EO_SECRET" \
               -e "$TARGET_ENV"
             echo "✓ EO Pages 部署完成（项目: $PROJECT / 环境: $TARGET_ENV）"
+
+  # ---- 按钮：清理历史流水线记录 ----
+  # 目的：删除当前仓库的历史流水线构建日志，只保留最近 keep 条，避免日志堆积。
+  # 依据 CNB OpenAPI（api.cnb.cool）：
+  #   GET    /{repo}/-/build/logs        列出构建记录（GetBuildLogs，需 repo-cnb-history:r）
+  #   DELETE /{repo}/-/build/logs/{sn}   删除指定构建日志（BuildLogsDelete，需 repo-cnb-trigger:rw）
+  # 认证：Bearer CNB_TOKEN（CI 内置临时令牌，构建结束自动销毁，不落库、更安全）。
+  # 安全：要求 confirm=clean 二次确认；只清理「当前这条以外的」历史旧记录，
+  #       保留最近 keep 条，绝不删除正在运行的本次记录。
+  web_trigger_cleanup_history:
+    - runner:
+        <<: *runner2
+      docker:
+        <<: *docker-image
+      stages:
+        - name: 确认手动触发
+          script: |
+            echo "触发事件: $CNB_EVENT"
+            echo "分支/提交: $CNB_BRANCH @ $CNB_COMMIT_SHORT"
+        - name: 二次确认
+          script: |
+            set -e
+            if [ "${confirm:-}" != "clean" ]; then
+              echo "✗ 确认串不正确（需输入 clean），已中止"
+              exit 1
+            fi
+            echo "✓ 已确认清理"
+        - name: 清理历史流水线记录
+          script: |
+            set -e
+            : "${CNB_TOKEN:?缺少 CNB_TOKEN（CI 内置临时令牌），无法调用 OpenAPI}"
+            KEEP="${keep:-50}"
+            # 仓库路径形如「组织名/仓库名」（不带 .git 后缀），兼容多种 CNB 环境变量命名
+            ORG="${CNB_NAMESPACE:-${CNB_OWNER:-${GITLAB_NAMESPACE:-}}}"
+            REPO="${CNB_REPO_NAME:-${CI_PROJECT_NAME:-$(basename "$PWD")}}"
+            if [ -z "$ORG" ]; then
+              echo "⚠ 无法自动推断组织名（CNB_NAMESPACE/CNB_OWNER 未设置），请检查按钮输入或在脚本中手动指定"
+            fi
+            REPO_PATH="${ORG:+$ORG/}$REPO"
+            echo "仓库: $REPO_PATH / 保留最近 $KEEP 条"
+            # 清理逻辑在独立脚本里（避免 YAML 块标量的 heredoc 缩进陷阱，便于维护与本地调试）
+            python3 scripts/cleanup-cnb-history.py \
+              --repo "$REPO_PATH" \
+              --token "$CNB_TOKEN" \
+              --keep "$KEEP"
+            echo "✓ 清理完成"
