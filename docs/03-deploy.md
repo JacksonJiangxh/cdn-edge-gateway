@@ -292,6 +292,8 @@ Published edge-cdn (x.xx sec)
 
 **📌 该按钮已内置「不覆盖远程绑定」保护**：在 `npx wrangler deploy` 之前会先跑 `scripts/gen-deploy-config.mjs`，按 binding 名拉取你在 Dashboard 已绑定的 KV/R2/D1 真实配置并写进一次性 `wrangler.deploy.toml`，部署完即删。所以**点此按钮前，请务必先在 Dashboard 把 KV/R2/D1 绑好（binding 名须为 `CDN_KV`/`CDN_R2`/`CDN_DB`）**，否则部署会清空这些绑定（脚本会打印 `⚠ 未探测到 ... 绑定` 提醒你）。
 
+> ⚠️ **首次部署（全新 Worker）必须先在 Dashboard 手动建壳并绑好 CDN_KV/CDN_R2/CDN_DB，再点按钮**。探测脚本采用严格模式：若 Worker 从未部署过，`/settings` 接口返回 404 也视作探测失败，流水线会**直接中止**（`process.exit(1)`），不会用空绑定覆盖。这是刻意取舍——宁可卡住首次部署，也不冒清空线上绑定风险。故正确顺序：**先在 Dashboard 创建 Worker → 绑好三个绑定（binding 名固定）→ 再触发本按钮**，而非反过来依赖按钮自动建壳。
+
 > ⚠️ 若系统设置显示「运行平台 pages」、TCP Socket 不可用：这是旧代码的平台探测误判（把 Workers 的 Static Assets 绑定 `ASSETS` 错当成 Pages），**不是你点错了按钮**。修复已合入最新代码，只需「把仓库更新到最新 → 重新点一次本按钮」即可恢复（`caps.js` 改用 `CF_PAGES` 等 Pages 专属变量区分，不再凭 `ASSETS` 绑定误判）。详见 [08 FAQ](./08-faq.md)。
 
 ##### A4b. 部署 CF Pages（按钮）→【Pages 形态，无 TCP 回源】

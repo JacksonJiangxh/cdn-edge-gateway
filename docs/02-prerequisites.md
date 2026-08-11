@@ -111,12 +111,20 @@ npm run build
 **预期结果**：四个步骤全部通过，最后出现 `构建完成`：
 
 ```
-▸ [1/4] 打包 Worker...
+cdn-edge-gateway 构建开始（压缩模式）
+▸ [1/4] 内联前端资源（兜底）...
+  ✓ src/ui.gen.js 已生成 (xxx KB)
 ▸ [2/4] 输出静态资源目录 dist/public/...
-▸ [3/4] 生成入口薄壳...
+  ✓ dist/public/index.html + assets/app.{css,js} 已生成（资源路径固定，与 ADMIN_PATH 解耦）
+▸ [3/4] 打包 Worker...
+  ✓ _worker.js 已生成 (xxx KB)
 ▸ [4/4] 产物自检...
+  ✓ 产物文件完整（4 个）
+  ✓ 入口导出可用: onRequest
   ✓ 构建完成
 ```
+
+> 四个步骤实际为：① 内联前端兜底（生成 `src/ui.gen.js`，用于无静态托管的粘贴部署）→ ② 输出静态资源目录 `dist/public/`（管理面静态资源，固定 `/assets` 路径，与 `ADMIN_PATH` 解耦）→ ③ 打包 Worker（`esbuild` 打包 `src/entry.js` → 根目录 `_worker.js`）→ ④ 产物自检（文件完整性 + `_worker.js` 可加载 + 导出面）。**没有「生成入口薄壳」这一步**（旧架构残留描述，已移除）。
 
 构建产物在 `dist/public/` 下：
 

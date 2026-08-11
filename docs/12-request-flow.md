@@ -50,7 +50,7 @@
    │     ★ 若需更细可按 CF 风格新增指纹/机器学习评分子维度，仍挂在本包内。
    │
    ├─ ②.4 Access · 令牌鉴权 (Token Authentication)   〔对应 CF: Access / Signed Exchanges〕
-   │     签名 URL(sec.signedUrl.enabled) 校验失败 → 403 (block:'signed-url')
+   │     签名 URL(sec.signedUrl.enabled) 校验失败 → 403 (block:'signed-url')  ⚠️ 实验特性（待开发：仅校验，内置签发工具未提供）
    │       - 缺参 / expire 非法 / 密钥空 → 拦截
    │       - now > expire(过期) → 拦截
    │       - 超过最大有效期 ttl → 拦截
@@ -300,7 +300,7 @@
 | ②.1 IP 访问规则 | seqStage ②.1 | 安全防护抽屉 · IP 访问控制 | `PUT /sites/:host/security` | ipWhitelist / ipBlacklist |
 | ②.2 WAF · UA/Referer | seqStage ②.2 | 安全防护抽屉 · UA/防盗链 | `PUT /sites/:host/security` | uaBlacklist / refererMode / refererList |
 | ②.3 自动程序 | seqStage ②.3 | 安全防护抽屉 · 自动程序 | `PUT /sites/:host/security` | botManagement |
-| ②.4 Access · 令牌鉴权 | seqStage ②.4 | 安全防护抽屉 · 签名 URL | `PUT /sites/:host/security` | signedUrl |
+| ②.4 Access · 令牌鉴权 | seqStage ②.4 | 安全防护抽屉 · 签名 URL ⚠️实验特性（签发工具待开发） | `PUT /sites/:host/security` | signedUrl |
 | ②.5 速率限制 | seqStage ②.5 | 安全防护抽屉 · 请求限速 | `PUT /sites/:host/security` | rateLimit |
 | ③ 首要分流 | seqStage ③ | 初始回源对象抽屉 · 源站方式 | `PUT /sites/:host/basics` | poolId |
 | ④ URL 规范化 | seqStage ④（只读占位） | 暂未实现，跳过 | — | — |

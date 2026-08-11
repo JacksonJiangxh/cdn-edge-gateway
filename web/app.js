@@ -507,10 +507,10 @@
         () => openSecurityDrawer(site.host, 'sec-bot'), '安全防护抽屉 · 自动程序（独立最小任务包）'));
 
       const su = sec.signedUrl || {};
-      flow.appendChild(seqStage('🔑', '②.4 Access · 令牌鉴权（签名 URL）',
+      flow.appendChild(seqStage('🔑', '②.4 Access · 令牌鉴权（签名 URL）⚠️实验特性',
         su.enabled ? `已启用 · 参数 ${su.param || 'sign'}${su.ttl ? ' · 有效期 ' + su.ttl + 's' : ''}` : '未启用签名 URL',
         su.enabled ? '已启用' : '未配置', 'sec-token',
-        () => openSecurityDrawer(site.host, 'sec-token'), '安全防护抽屉 · 签名 URL'));
+        () => openSecurityDrawer(site.host, 'sec-token'), '安全防护抽屉 · 签名 URL（内置签发工具待开发）'));
 
       const rl = sec.rateLimit || {};
       flow.appendChild(seqStage('⏱️', '②.5 速率限制',
@@ -525,7 +525,7 @@
       const originId = defPool && defKind === 'single'
         ? (defPool.origins && defPool.origins[0] && defPool.origins[0].id)
         : (defPool ? '按策略选出的 oX' : '');
-      flow.appendChild(seqStage('🎯', '③ 本次回源对象（推导）',
+      flow.appendChild(seqStage('🎯', '③ 本次回源对象（推导·只读）',
         site.poolId
           ? (defPool
             ? (defKind === 'single'
@@ -533,8 +533,11 @@
               : `源站池：${defPool.name || defPool.id} · 策略 ${defPool.strategy || 'roundrobin'} · ${(defPool.origins || []).length} 个源站（每次按策略选出一个 oX 作为回源目标）`)
             : `源站已被删除或不可用：${site.poolId}`)
           : '未设置默认源站',
-        site.poolId ? '已配置' : '未配置', 'sec-origin',
-        () => openInitialOriginDrawer(site.host, 'sec-origin'), '初始回源对象抽屉 · 源站方式'));
+        site.poolId ? '推导' : '未配置', 'sec-origin',
+        // ③ 是由「单站点选定单源站 / 单源站池按负载均衡自动选定」推导出的抽象虚拟临时对象，
+        // 本身不可直接干预；如需更改回源对象，应去「① 站点基础 / 源站池」或「⑨ Origin Rules」编辑。
+        () => toast('③ 是推导出的临时虚拟回源对象，不可直接编辑。如需更改回源对象，请到「① 匹配站点」改默认源站、到「源站」页编辑源站池，或用「⑨ Origin Rules」规则覆盖。', 'info'),
+        null));
 
       // ── ④ URL 规范化（我们当前未实现，作为只读占位，可跳过）────
       flow.appendChild(seqGroup('④', 'URL 规范化', '把请求 URL 统一成标准形态（大小写、尾部斜杠、查询排序等）。本网关暂未实现该阶段，流量直接跳过进入 ⑤'));
@@ -547,23 +550,23 @@
 
       renderRuleStage('⑤', '✂️', 'URL 重写', '按规则改写客户端请求路径（不含源站 pathPrefix）',
         (a) => a.rewrite && a.rewrite.type && a.rewrite.type !== 'none',
-        { title: 'URL 重写规则', owner: '路由规则抽屉 · URL 重写', allowedOps: ['rewrite'], hideTargetPool: true });
+        { title: 'URL 重写规则', owner: '路由规则抽屉 · URL 重写', allowedOps: ['rewrite'], hideTargetPool: true, match: (a) => a.rewrite && a.rewrite.type && a.rewrite.type !== 'none' });
 
       renderRuleStage('⑥', '↪️', '重定向规则', '把请求重定向到其它 URL（命中即终止回源）',
         (a) => a.redirect && a.redirect.enabled,
-        { title: '重定向规则', owner: '路由规则抽屉 · 重定向', allowedOps: ['redirect'], hideTargetPool: true });
+        { title: '重定向规则', owner: '路由规则抽屉 · 重定向', allowedOps: ['redirect'], hideTargetPool: true, match: (a) => a.redirect && a.redirect.enabled });
 
       renderRuleStage('⑦', '🔒', '强制 HTTPS / 直接响应（终止型）', '命中 http 返回 301/307 跳 https，或直接用自定义 body/status 响应，不再回源',
         (a) => a.forceHttps || (a.directResponse && a.directResponse.enabled),
-        { title: '强制 HTTPS / 直接响应规则', owner: '路由规则抽屉 · 强制HTTPS / 直接响应', allowedOps: ['forceHttps', 'directResponse'], hideTargetPool: true });
+        { title: '强制 HTTPS / 直接响应规则', owner: '路由规则抽屉 · 强制HTTPS / 直接响应', allowedOps: ['forceHttps', 'directResponse'], hideTargetPool: true, match: (a) => a.forceHttps || (a.directResponse && a.directResponse.enabled) });
 
       renderRuleStage('⑧', '📤', '修改请求头', '在回源请求发出去之前增 / 删 / 改 HTTP 头',
         (a) => { const h = a.reqHeaders || {}; return (h.set && Object.keys(h.set).length) || (h.remove || []).length; },
-        { title: '修改请求头规则', owner: '路由规则抽屉 · 修改请求头', allowedOps: ['reqHeaders'], hideTargetPool: true });
+        { title: '修改请求头规则', owner: '路由规则抽屉 · 修改请求头', allowedOps: ['reqHeaders'], hideTargetPool: true, match: (a) => { const h = a.reqHeaders || {}; return (h.set && Object.keys(h.set).length) || (h.remove || []).length; } });
 
       renderRuleStage('⑨', '🔀', 'Origin Rules', '更改回源目标：回源 Host、回源连接参数（引擎/协议/端口）或候选源站',
         (a) => a.poolId || (a.inlineOrigins || []).length || (a.hostHeader && a.hostHeader.mode && a.hostHeader.mode !== 'accel') || a.engine || a.scheme || Number(a.port) > 0,
-        { title: 'Origin Rules', owner: '路由规则抽屉 · Origin Rules', allowedOps: ['hostHeader', 'originConn', 'targetPool'], hideTargetPool: false });
+        { title: 'Origin Rules', owner: '路由规则抽屉 · Origin Rules', allowedOps: ['hostHeader', 'originConn', 'targetPool'], hideTargetPool: false, match: (a) => a.poolId || (a.inlineOrigins || []).length || (a.hostHeader && a.hostHeader.mode && a.hostHeader.mode !== 'accel') || a.engine || a.scheme || Number(a.port) > 0 });
 
       // ── ⑩ 确定实际源站（运行时推导，纯只读）──────────────────
       const ovrPool = rules.find((r) => r.action && r.action.poolId);
@@ -579,7 +582,7 @@
 
       renderRuleStage('⑪', '📥', 'Cache Rules（缓存请求设置）', '缓存策略（edgeTtl / SWR / browserTtl / 绕过缓存）等请求级缓存设置',
         (a) => a.cache && (a.cache.enabled || a.cache.mode === 'noCache'),
-        { title: 'Cache Rules', owner: '路由规则抽屉 · Cache Rules（缓存策略）', allowedOps: ['cache'], hideTargetPool: true });
+        { title: 'Cache Rules', owner: '路由规则抽屉 · Cache Rules（缓存策略）', allowedOps: ['cache'], hideTargetPool: true, match: (a) => a.cache && (a.cache.enabled || a.cache.mode === 'noCache') });
 
       // ── ⑫ 缓存键（可干预：站点 cacheGen）──────────────────────
       flow.appendChild(seqGroup('⑫', '缓存键', '合并 policy = 默认 < 源站级 cache < ⑪ Cache Rules；本环节可干预项：站点 cacheGen（代次）。'));
@@ -587,7 +590,7 @@
       const hasCache = cacheRules.some((r) => r.action.cache.enabled);
       flow.appendChild(seqStage('🔖', '⑫ 合并缓存策略 & 构造缓存键',
         `⑪ 缓存动作 ${cacheRules.length} 条 · 站点 cacheGen=${site.cacheGen || 0}${hasCache ? '（已启用节点缓存）' : ''}`,
-        '推导', null, () => openSiteDrawer(site.host, 'sec-basic'), '站点基础抽屉（调整 cacheGen 等）'));
+        '推导', null, () => openCacheGenDrawer(site.host, cacheRules.length, hasCache), '缓存键抽屉（仅调整 cacheGen 代次）'));
 
       // ── ⑬ 查边缘缓存（运行时，纯只读）──────────────────────────
       flow.appendChild(seqGroup('⑬', '查缓存', '命中则直接返回（X-Cache: HIT），未命中继续 ⑭ 真正回源。运行时行为。'));
@@ -634,7 +637,7 @@
       flow.appendChild(seqGroup('⑯', '改写响应头（含 response cache rule）', '回源响应返回用户前的所有响应头改写，以及 CF 风格 response cache rule（响应级缓存控制）。'));
       renderRuleStage('⑯', '📝', '改写响应头 / Response Cache Rule', '增 / 删 / 改响应头，以及响应级缓存控制（response cache rule）',
         (a) => { const h = a.respHeaders || {}; return (h.set && Object.keys(h.set).length) || (h.remove || []).length; },
-        { title: '改写响应头规则', owner: '路由规则抽屉 · 改写响应头 / Response Cache Rule', allowedOps: ['respHeaders'], hideTargetPool: true });
+        { title: '改写响应头规则', owner: '路由规则抽屉 · 改写响应头 / Response Cache Rule', allowedOps: ['respHeaders'], hideTargetPool: true, match: (a) => { const h = a.respHeaders || {}; return (h.set && Object.keys(h.set).length) || (h.remove || []).length; } });
 
       // ── ⑰ 写缓存 ───────────────────────────────────────────────
       flow.appendChild(seqGroup('⑰', '写边缘缓存', '按 ⑫ 的 cacheKey 写入 ⑪ 定义的缓存策略。'));
@@ -1798,6 +1801,33 @@
     openDrawer('全站通用规则（兜底）', '以下规则对所有站点生效，仅当站点自身规则未命中时触发（全局默认设置）', body, onSave);
   }
 
+  // ⑫ 缓存键阶段的专属抽屉：只编辑「站点缓存代次 cacheGen」，不与 ① 站点基础抽屉重复联动。
+  // ⑪ Cache Rules 的缓存策略由「路由规则」抽屉管理；这里的 cacheGen 才是 ⑫ 阶段唯一可干预项。
+  async function openCacheGenDrawer(host, cacheRuleCount, hasCache) {
+    if (!host) { toast('请先创建站点', 'err'); return; }
+    let site;
+    try { site = await API.sites.get(host); } catch (e) { toast(e.message, 'err'); return; }
+    const fGen = el('input', { class: 'input', id: 'f-cachegen', type: 'number', min: '0', value: site.cacheGen || 0 });
+    const body = el('div', {}, [
+      el('div', { class: 'subhead' }, [el('span', {}, '⑫ 缓存键 · 缓存代次')]),
+      el('div', { class: 'hint' },
+        '本抽屉只管理「缓存代次（cacheGen）」这一项，用于一键批量让旧缓存失效（代次 +1 后旧 key 自然失配）。'
+        + '其它缓存设置（edgeTtl / SWR / browserTtl / 绕过缓存）属于 ⑪「Cache Rules」阶段，请在对应阶段的规则抽屉里配置，避免与 ① 站点基础重复。'),
+      field('缓存代次 cacheGen', fGen, '整数，默认 0。修改并保存后即视为「代次 +1」语义（旧缓存 key 失配，下次回源重新填充）。'),
+      el('div', { class: 'hint' },
+        `当前站点 ⑪ 缓存动作 ${cacheRuleCount} 条${hasCache ? '（已启用节点缓存）' : '（未启用节点缓存）'}；代次变更仅影响 cacheKey 维度，不影响缓存策略本身。`),
+    ]);
+    openDrawer('⑫ 缓存键: ' + host, '仅调整缓存代次，使旧缓存批量失效。', body, async () => {
+      const gen = Math.max(0, Number(fGen.value) || 0);
+      const patch = { cacheGen: gen };
+      try {
+        await API.sites.saveBasics(host, patch);
+        toast('已保存缓存代次', 'ok');
+        await refreshData();
+      } catch (e) { toast(e.message, 'err'); }
+    });
+  }
+
   async function openSiteDrawer(host, anchor) {
     let site;
     if (host) {
@@ -2427,10 +2457,11 @@
         botHint1,
         botHint2,
       ]),
-      pack('sec-token', '②.4 Access · 令牌鉴权（签名 URL）', '仅允许携带合法签名的请求访问（常用于私有资源）', [
+      pack('sec-token', '②.4 Access · 令牌鉴权（签名 URL）⚠️实验特性', '仅允许携带合法签名的请求访问（常用于私有资源）。⚠️ 实验特性：校验侧已生效，但内置签名链接签发工具尚未提供，需自行用 HMAC 生成。', [
         el('label', { class: 'check' }, [signEn, el('span', { text: '启用签名 URL 校验' })]),
         signGrid,
         signExpireField,
+        el('div', { class: 'hint warn' }, ['⚠️ 实验特性：内置「生成签名链接」工具待开发，开启后需自行用 HMAC-SHA256 签发带签名的 URL。']),
       ]),
       pack('sec-ratelimit', '②.5 速率限制', '单客户端（按 IP）每分钟最大请求数，超出返回 429', [
         el('label', { class: 'check' }, [rateEn, el('span', { text: '启用请求限速' })]),
@@ -2626,26 +2657,6 @@
     openDrawer('引用详情: ' + (p.name || p.id), '', body, null);
   }
 
-  // 读取「本源站专用回源规则」：仅在用户实际填写时才写入，避免空值污染后端 schema。
-  // 后端 failover 会按「源站级打底、规则级覆盖」合并，因此这里配的东西只对这台源站生效。
-  function readOriginExtra(row, legacy) {
-    const r = row._extraReaders;
-    const out = {};
-    if (!r) return out;
-    const rewrite = r.rewrite();
-    if (rewrite && rewrite.type && rewrite.type !== 'none') out.rewrite = rewrite;
-    const cache = r.cache();
-    if (cache && Object.keys(cache).length) out.cache = cache;
-    const req = r.req();
-    if (req && (req.set && Object.keys(req.set).length || (req.remove && req.remove.length))) out.reqHeaders = req;
-    const resp = r.resp();
-    if (resp && (resp.set && Object.keys(resp.set).length || (resp.remove && resp.remove.length))) out.respHeaders = resp;
-    const to = r.timeout();
-    if (to > 0) out.originTimeoutMs = to;
-    out.followRedirect = r.follow();
-    return out;
-  }
-
   async function openPoolDrawer(id, forceKind) {
     let pool;
     if (id) {
@@ -2685,11 +2696,6 @@
       ]);
       engineSel.value = o.engine || 'fetch';
       engineSel.className = 'input o-engine';
-      // 先声明读取器收集对象（在 row 构造前），IIFE 内只做收集、不持有闭包外的
-      // 引用——与 addInlineOrigin 的修法一致。否则 IIFE 内的 const extraReaders 在
-      // IIFE 执行完即销毁，下方 row._extraReaders = extraReaders 会报
-      // "extraReaders is not defined"，导致整个「新建源站池」抽屉渲染中断。
-      const extraReaders = {};
       // ---- R2 引擎专用字段 ----
       const r2BindingIn = el('input', { class: 'input o-r2-binding', value: o.r2Binding || '', placeholder: 'CDN_R2（必须与 wrangler.toml 的 binding 一致）' });
       const r2KeyPrefixIn = el('input', { class: 'input o-r2-prefix', value: o.r2KeyPrefix || '', placeholder: '如 img/（桶内目录隔离，留空=无）' });
@@ -2749,36 +2755,8 @@
         field('引擎', engineSel, '回源方式：① fetch=标准回源，Host 头由「回源域名/地址」决定（源站只看到自己的域名，最通用，所有平台可用）；② socket=仅 CF Workers 支持，基于裸 TCP 手写 HTTP，可自定义 Host / 回源裸 IP / 非标端口（用于源站要靠 Host 做虚拟主机路由、或只暴露 IP 的场景）；③ r2=回源到 R2 桶（仅 CF，需先在 wrangler.toml 绑定）。'),
         r2Fields,
         weightField,
-        (() => {
-          // ---- 高级：仅本源站生效的回源规则（同池不同源站可各自不同）----
-          // 保留每个编辑器的 read() 引用，提交时调用读取本源站专属配置
-          const rwEd = rewriteEditor(o.rewrite);
-          const cacheEd = cacheEditor(o.cache);
-          const reqEd = headerEditor(o.reqHeaders);
-          const respEd = headerEditor(o.respHeaders);
-          const toInput = el('input', { class: 'input o-timeout', type: 'number', value: o.originTimeoutMs || 0 });
-          const toHint = el('span', { class: 'field-hint muted' });
-          const updTo = () => { toHint.textContent = '等待这台源站响应的最长时间' + humanDuration(Number(toInput.value) || 0) + '（0=用池默认值）'; };
-          toInput.addEventListener('input', updTo); updTo();
-          const followChk = el('input', { class: 'o-follow', type: 'checkbox' });
-          followChk.checked = !!o.followRedirect;
-          Object.assign(extraReaders, {
-            rewrite: rwEd.read, cache: cacheEd.read, req: reqEd.read, resp: respEd.read,
-            timeout: () => Number(toInput.value) || 0,
-            follow: () => followChk.checked,
-          });
-          return section('本源站专用回源规则（可选）', '默认留空＝继承规则/站点的设置。只有「同一池里这台源站需要特殊处理」时才填，例如它路径不同、要单独缓存。', [
-            field('路径重写', rwEd.root, '只改这台源站的回源路径，不影响同池其他源站。'),
-            field('缓存配置', cacheEd.root, '只针对这台源站的缓存策略。'),
-            field('回源请求头', reqEd.root, '只给这台源站加/改回源请求头。'),
-            field('响应头', respEd.root, '只改这台源站返回时的响应头。'),
-            field('回源超时（毫秒）', el('div', {}, [toInput, toHint])),
-            field('', el('label', { class: 'chk' }, [followChk, document.createTextNode(' 跟随源站返回的重定向（仅本源站）')])),
-          ]);
-        })(),
         el('button', { class: 'btn btn-sm btn-danger', text: '移除源站', onclick: () => row.remove() }),
       ]);
-      row._extraReaders = extraReaders;
       syncEngine(); // 回显时根据已有 engine 显隐 R2 字段
       originList.appendChild(row);
     };
@@ -2855,8 +2833,9 @@
                 r2KeyRegexTo: $('.o-r2-to', row).value.trim(),
               }
             : {}),
-          // 本源站专属回源规则（同池不同源站可各自不同）
-          ...readOriginExtra(row, legacy),
+          // 纯两层架构（站点级 + 源站级基础地址/引擎）：源站级不再承载专属回源规则
+          // （路径重写/缓存/请求头/响应头/超时/跟随3xx 一律由「路由规则」按条件绑定，
+          // 旧数据若残留这些字段将由后端 failover 原样保留、但不在此编辑）。
         });
       });
       if (!origins.length) throw new Error(isSingle ? '请填写源站地址' : '至少需要一个源站');
@@ -2994,7 +2973,7 @@
         field('管理面路径', gAdminPath, '留空表示沿用当前已保存的值。'),
         field('Token 有效期（秒）', gTokenTtl, '留空表示沿用当前已保存的值。'),
         field('配置缓存 TTL（秒）', gConfigCacheTtl, '留空表示沿用当前已保存的值。'),
-        field('全局限流（req/s）', gGlobalRateLimit, '全局请求频率上限，0 表示不限制；最少 10 req/s。'),
+        field('全局限流（req/s）⚠️实验特性', gGlobalRateLimit, '⚠️ 实验特性（待开发）：全局请求频率上限，0 表示不限制；最少 10 req/s。当前为实验阶段，不建议生产依赖。'),
         field('启用统计', gStatsEnabled),
         gStatsDriverField,
       ]),

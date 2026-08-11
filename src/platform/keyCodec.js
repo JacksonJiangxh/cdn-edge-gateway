@@ -220,6 +220,11 @@ export function isEncodedKey(s) {
  * 这正是选择「逐字符转义」而非 Base32/Base64 的原因——后者有 5/6 bit
  * 分组对齐，encode(prefix) 不是 encode(full) 的前缀，会破坏 list 语义。
  *
+ * 平台兼容性：CF KV 与 EO KV 的 list() 都支持 prefix 参数（按编码后物理
+ * 键前缀列举）。本函数是「按前缀列举」能力的公共 API 入口，当前调用点尚未
+ * 接入（列举类功能在路线图），保留以支撑后续按前缀扫描/清理，属预留 API，
+ * 非死代码。
+ *
  * @param {string} prefix 逻辑前缀，例如 `stat:`
  * @returns {string} 物理前缀，例如 `stat_3A`
  */

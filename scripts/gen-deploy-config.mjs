@@ -52,12 +52,27 @@ function getScriptName() {
 // 根脚本端点 GET /workers/scripts/{name} 默认返回 multipart 形式的代码包，
 // JSON.parse 会直接抛错，导致「拉取失败 → 跳过绑定探测 → 部署清空远程绑定」。
 // /settings 端点返回纯 JSON 的 { result: { bindings: [...] } }，稳定可靠。
+//
+// 🔒 失败即中断（C6 修复，严格模式 A）：拉取远程绑定是「保留线上绑定、避免清空」的
+//    前置探测。一旦探测失败（凭据缺失 / 网络错误 / token 无权限 / Worker 尚未
+//    部署导致 /settings 返回 404 无绑定信息），**必须让流水线失败退出**，绝不能用
+//    空绑定继续 `wrangler deploy`（全量覆盖语义会清空远程已绑定的 KV/R2/D1）。
+//    正确流程：先在 Dashboard 创建 Worker 并绑定 CDN_KV/CDN_R2/CDN_DB，
+//    再触发部署，脚本才能探测到并保留它们。
+//    ⚠️ 严格模式含义：即使 Worker「从未部署过」（/settings 返回 404）也会被
+//    视为失败而中止流水线——首次部署需先在 Dashboard 手动建壳并绑好
+//    CDN_KV/CDN_R2/CDN_DB，再触发 CI 部署，不可用空绑定覆盖。这是 A 方案的
+//    刻意取舍（宁可卡住首次部署，也不冒清空风险），勿擅自改为「404 放行」。
 function fetchRemoteBindings(scriptName) {
   const token = process.env.CLOUDFLARE_API_TOKEN;
   const account = process.env.CLOUDFLARE_ACCOUNT_ID;
   if (!token || !account) {
-    console.log("⚠ 缺少 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID，跳过绑定探测");
-    return [];
+    console.error(
+      "✗ [gen-deploy-config] 缺少 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID，无法探测远程绑定。\n" +
+      "  请先在仓库 Secret（GitHub Actions）或密钥仓库（CNB）配置这两个变量，\n" +
+      "  否则部署会清空远程已绑定的 KV/R2/D1。流水线中止。"
+    );
+    process.exit(1);
   }
   const url = `https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/${scriptName}/settings`;
   try {
@@ -69,13 +84,24 @@ function fetchRemoteBindings(scriptName) {
         "-H", "Accept: application/json",
         url,
       ],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }
     );
     const json = JSON.parse(out);
+    if (!json.success) {
+      console.error(
+        `✗ [gen-deploy-config] Cloudflare API 返回错误：code=${json.errors?.[0]?.code ?? "?"} ` +
+        `${json.errors?.[0]?.message ?? JSON.stringify(json.errors ?? json)}`
+      );
+      process.exit(1);
+    }
     return (json.result && json.result.bindings) || [];
   } catch (e) {
-    console.log("⚠ 拉取远程绑定失败（可能 Worker 尚未部署过 / token 无权限），跳过绑定探测");
-    return [];
+    console.error(
+      "✗ [gen-deploy-config] 拉取远程绑定失败（网络错误 / token 无权限 / Worker 尚未部署过）。\n" +
+      "  若 Worker 从未部署，请先在 Dashboard 创建并绑定 CDN_KV/CDN_R2/CDN_DB 后再部署。\n" +
+      "  为保护线上绑定不被清空，流水线在此中止，不会继续 wrangler deploy。"
+    );
+    process.exit(1);
   }
 }
 

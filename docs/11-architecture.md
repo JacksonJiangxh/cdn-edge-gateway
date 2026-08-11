@@ -16,7 +16,7 @@
 cdn-edge-gateway 是一个**边缘侧的反向代理网关**。它接管边缘节点收到的请求，按配置决定：
 
 1. 这个域名属于哪个「站点」？
-2. 该站点的「安全防护」是否放行？（防盗链 / IP / UA / 签名 URL / 限流）
+2. 该站点的「安全防护」是否放行？（防盗链 / IP / UA / 签名 URL⚠️实验特性 / 限流）
 3. 哪条「规则」命中？（按优先级逐个匹配，命中则执行其「动作」）
 4. 动作指向哪个「源站池」？池里按什么策略挑一个「源站」？
 5. 请求路径要不要重写？回源 Host 改成什么？要不要强制 HTTPS / 跟随 3xx / 改头 / 缓存？
@@ -95,7 +95,7 @@ cdn-edge-gateway/
    ├─ core/app.js handle():
    │     ├─ 匹配站点（host 精确匹配 / 泛域名 *.example.com / 兜底 404 或伪装页）
    │     ├─ security.guard()：防盗链 / IP / UA → 不合规直接拦截（4xx/伪装）
-   │     ├─ security.sign()：签名 URL 校验（若开启）
+   │     ├─ security.sign()：签名 URL 校验（若开启）⚠️ 实验特性（仅校验，内置签发工具待开发）
    │     ├─ security.auth()：限流（IP 级 RPM）→ 超限 429
    │     ├─ proxy.matcher()：按 priority 降序逐条匹配规则
    │     │      命中 → 执行该 rule.action（源站池/重写/Host/头/强制HTTPS/重定向/自定义响应/缓存）
@@ -246,7 +246,7 @@ const originResp = await requestWithFailover(ctx, [pick], rule, effectiveHostHea
 | | `allowEmptyReferer` | 是否放行空 Referer（直接访问） |
 | UA 过滤 | `uaBlacklist` | 命中即拦截的 UA 列表 |
 | IP 控制 | `ipBlacklist` / `ipWhitelist` | CIDR 或单 IP，上限各 64 条；**白名单优先** |
-| 签名 URL | `signedUrl.{enabled,secret,ttl,param}` | HMAC 签名，过期失效 |
+| 签名 URL | `signedUrl.{enabled,secret,ttl,param}` | HMAC 签名，过期失效 ⚠️ 实验特性（校验生效，内置签发工具待开发） |
 | 限流 | `rateLimit.{enabled,rpm}` | 单 IP 每分钟请求数上限，超限 429 |
 
 安全在**站点级**配置，也可在**全局**（`global.security` + `global.ipWhitelist`）兜底。

@@ -193,26 +193,30 @@ conditions: [
 
 | 字段 | 说明 |
 |---|---|
-| `target` | 匹配对象：`host` / `path` / `query` / `header` / `cookie` / `method` / `clientIp` / `referer` / `userAgent` / `asn` / `country` / `scheme` / `protocol` |
+| `target` | 匹配对象（完整枚举）：`host` / `path` / `fullUrl` / `query` / `extension` / `filename` / `directory` / `method` / `protocol` / `header` / `cookie` / `clientIp` / `clientCountry` / `userAgent` / `referer` |
 | `op` | 操作符：见下方表格 |
 | `key` | 当 `target=header/cookie` 时必填（头的名字，如 `x-token`） |
 | `values[]` | 匹配值列表（多值之间 OR）；`op=exists/notExists` 时不需要 |
 | `ignoreCase` | 是否忽略大小写（默认 true） |
 
+> ⚠️ 旧版命名已废弃：`asn`/`country`/`scheme` 不再是 `target` 枚举（改为 `clientCountry`/`clientIp` 等）；`eq`/`neq`/`in`/`notIn`/`contains` 已更名为下方标准操作符，旧名会被 schema 校验**拒绝**（视为无效条件跳过）。请使用下表名称。
+
 常用操作符 `op`：
 
 | op | 含义 | 示例 |
 |---|---|---|
-| `eq` | 等于（任一值） | `path` `eq` `/robots.txt` |
-| `neq` | 不等于 | `method` `neq` `POST` |
-| `in` | 在列表里 | `extIn` 等价于 `path` `in` `[...]` |
-| `notIn` | 不在列表 | |
+| `equal` | 等于（任一值） | `path` `equal` `/robots.txt` |
+| `notEqual` | 不等于 | `method` `notEqual` `POST` |
+| `contain` | 包含 | `userAgent` `contain` `bot` |
+| `notContain` | 不包含 | |
 | `prefix` | 前缀为 | `path` `prefix` `/api` |
+| `notPrefix` | 前缀不为 | |
 | `suffix` | 后缀为 | `path` `suffix` `.webp` |
-| `contains` | 包含 | `userAgent` `contains` `bot` |
+| `notSuffix` | 后缀不为 | |
 | `regex` / `notRegex` | 正则匹配 / 不匹配 | `path` `regex` `^/v\d+/` |
 | `exists` / `notExists` | 头/参数存在 / 不存在 | `header` `key=x-token` `exists` |
 
+> 方式一里的 `pathPrefix` / `pathRegex` / `extIn` / `methodIn` 是等价的快捷写法，会映射到上述 `target`+`op`（`extIn` ≈ `extension` `contain`、 `pathPrefix` ≈ `path` `prefix`）。
 > 没有条件 = 匹配所有请求（常用于「整站默认动作」兜底规则）。
 
 #### 2.3 action（动作）
@@ -293,9 +297,9 @@ conditions: [
 | | `refererList` | 允许的 Referer 域名列表（自动转小写） |
 | | `allowEmptyReferer` | 是否放行空 Referer（直接访问） |
 | UA 过滤 | `uaBlacklist` | 命中即拦截的 UA 列表 |
-| IP 控制 | `ipBlacklist` | 拦截的 IP/CIDR 列表（上限 64 条） |
-| | `ipWhitelist` | 放行名单（优先于黑名单；全局级也可设 `global.ipWhitelist`） |
-| 签名 URL | `signedUrl` | `{enabled, secret, ttl, param}`：开启后需带有效签名才能访问，`ttl` 过期失效，`param` 默认 `sign` |
+| IP 控制 | `ipBlacklist` | 拦截的 IP/CIDR 列表（**单条最多 64 字符**，总条数上限 200） |
+| | `ipWhitelist` | 放行名单（优先于黑名单；全局级也可设 `global.ipWhitelist`）（**单条最多 64 字符**，总条数上限 200） |
+| 签名 URL | `signedUrl` | `{enabled, secret, ttl, param}`：开启后需带有效签名才能访问，`ttl` 过期失效，`param` 默认 `sign`。⚠️ **实验特性（待开发）**：校验侧已生效，但内置签名链接**签发工具尚未提供**，需自行用 HMAC-SHA256 生成带签 URL |
 | 限流 | `rateLimit` | `{enabled, rpm}`：单 IP 每分钟请求数上限，超限返回 429 |
 
 > 全局 `global.security` 与 `global.ipWhitelist` 对所有站点兜底；站点级可覆盖细化。
@@ -324,6 +328,7 @@ conditions: [
 | `logLevel` | 日志级别 | `info` |
 | `security` | 全局安全兜底 | 见上 |
 | `ipWhitelist` | 全局 IP 白名单（对管理面也生效） | 空 |
+| `globalRateLimit` | 全局入口请求频率上限（req/s），0 表示不限制，最少 10 ⚠️ **实验特性（待开发）**：当前为实验阶段，不建议生产依赖 | 0 |
 
 ---
 

@@ -188,8 +188,10 @@ async function runPipeline(ctx) {
     return terminal;
   }
 
-  // 解析回源 Host（规则级 hostHeader 优先，inherit 时回退站点 defaultHostHeader）
-  const effectiveHostHeader = resolveHostHeader(rule?.action?.hostHeader, site.defaultHostHeader);
+  // 解析回源 Host（优先级：规则级 action.hostHeader → 源站级 origin.hostHeader → 站点级 defaultHostHeader）。
+  // 注意：此处尚未选中单个 origin，源站级 hostHeader 留空（undefined），
+  // 由第三参正确承载「站点级 defaultHostHeader」作为最终回退兜底，避免 accel 等站点级模式被错误归到源站级。
+  const effectiveHostHeader = resolveHostHeader(rule?.action?.hostHeader, undefined, site.defaultHostHeader);
 
   // ---- 5. 确定实际源站池（规则可覆盖首要分流的选源）----
   // 优先级：规则级内联源站 > 规则级 poolId（引用任意源站实体）> 站点级默认（已在③选好）。

@@ -85,9 +85,15 @@ curl "http://127.0.0.1:8799/__panel/api/pools/pl_xxx/refs" -H "cookie: ecw_token
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/sites` | 列出所有站点 |
+| `GET` | `/sites/templates` | 获取可套用的站点模板（新建站点时的快捷预设） |
 | `GET` | `/sites/{host}` | 获取单个站点 |
 | `PUT` | `/sites/{host}` | 新建 / 覆盖保存站点。要么传 `poolId` 引用已有源站；要么传单个地址的 `origins`，后端会**自动创建一条 `kind:"single"` 源站**并回填 `poolId`（响应中的 `createdOrigin` 即为新建的源站；地址相同则复用已有条目） |
+| `PUT` | `/sites/{host}/basics` | 仅更新站点基础信息（host / enabled / ipv6Support / cacheGen 等），不动规则与安全 |
+| `PUT` | `/sites/{host}/rules` | 全量更新该站点的规则列表（按 `priority` 降序固化） |
+| `PUT` | `/sites/{host}/security` | 全量更新该站点的安全防护（referer / UA / IP / 签名 URL / 限速 / Bot 等） |
 | `DELETE` | `/sites/{host}` | 删除站点 |
+
+> 分段端点（`/basics`、`/rules`、`/security`）是「整站 PUT」的细粒度拆分，便于前端按模块保存、减少覆盖面；效果与 `PUT /sites/{host}` 整体保存一致。
 
 **示例**：创建站点 + 一条规则（新模型）
 ```bash
@@ -124,6 +130,19 @@ curl -X PUT "http://127.0.0.1:8799/__panel/api/sites/img.example.com" \
 > `match.conditions` 是二维数组：外层 OR、内层 AND。不填 = 匹配全部。
 > `action` 可同时挂多个动作（rewrite + cache + forceHttps + 改头…）。
 > 保存时规则会按 `priority` 降序固化，运行时无需再排序。
+
+---
+
+## 全站通用规则（兜底）
+
+对所有站点生效的兜底规则，独立于各站点规则、优先级最低。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/rules/global` | 列出全站通用规则（兜底默认） |
+| `PUT` | `/rules/global` | 全量更新全站通用规则（按 `priority` 降序固化） |
+
+> 管理面入口：「站点选择」里选「全站通用规则（兜底默认）」，同样按 18 阶段展示并编辑。
 
 ---
 

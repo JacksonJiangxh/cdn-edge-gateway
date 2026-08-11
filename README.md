@@ -12,7 +12,7 @@
 |---|---|
 | 源站只有单 IP，一挂全挂 | 一个「源站池」里放多个源站，按顺序/权重自动切换（链式回退 + 被动熔断） |
 | 想给不同路径走不同源站 | 「规则引擎」按请求特征（路径/扩展名/方法/Header/Cookie/Query）分流 |
-| 不想让人盗链 / 刷流量 | 「安全防护」内置防盗链、UA 过滤、IP 黑白名单、签名 URL、限流 |
+| 不想让人盗链 / 刷流量 | 「安全防护」内置防盗链、UA 过滤、IP 黑白名单、签名 URL⚠️（实验特性，内置签发工具待开发）、限流 |
 | 小水管源站扛不住 | 边缘缓存（Cloudflare 用 `caches.default`；EdgeOne 靠 `CDN-Cache-Control` 响应头委托边缘缓存） |
 | 想看清一整套规则是怎么跑的 | 「流量序列」把请求从进来到返回画成流程图，可点击跳转、可拖拽调优先级 |
 | 部署不想碰命令行 | 可视化管理面，登录后在网页上点着配，配置落 KV |
@@ -79,7 +79,7 @@ src/
 ├── security/             # 防盗链 / IP / UA / 签名 / 限流(guard/sign/ratelimit)
 ├── stats/                # 访问统计（collector 内存聚合 → KV / D1 双驱动）
 ├── api/                  # 管理面后端（/__panel/api/*）+ 静态页优先服务(adminPage)
-│   ├── handlers/         # sites / pools / rules / stats / auth / config / cache
+│   ├── handlers/         # sites / pools / rules / stats / auth / config / cache / system
 │   └── router.js         # 路由表
 ├── platform/             # 平台能力探测（caps: 缓存/D1/Socket/KV/EO Node 运行时）+ cache 封装
 ├── ui.gen.js             # 自动生成的管理面 UI（内联兜底，勿手改）

@@ -7,6 +7,6 @@
   "installCommand": "npm ci",
   "outputDirectory": ".",
   "env": {
-    "NODE_VERSION": "20"
+    "NODE_VERSION": "22"
   }
 }

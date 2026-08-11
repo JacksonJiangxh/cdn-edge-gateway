@@ -3,7 +3,7 @@
  * ============================================================================
  * cdn-edge-gateway 构建脚本
  * ----------------------------------------------------------------------------
- * 三步走：
+ * 四步走：
  *   1. 把 web/ 下的 HTML + CSS + JS 内联成单个 HTML 字符串 → src/ui.gen.js
  *      （作为「无静态托管环境」的兜底，例如 CF Workers 直接粘贴 worker）
  *   2. 把 web/ 资源输出为独立静态目录 dist/public/（HTML 引用外部
@@ -13,6 +13,7 @@
  *      ADMIN_PATH，因此运行时的 adminPath（KV 或环境变量）可任意变更而无需重新构建，
  *      运行时 Worker 收到 /{adminPath}/assets/* 会自动映射到固定 /assets/* 物理资源。
  *   3. 用 esbuild 打包 src/entry.js → 根目录 _worker.js
+ *   4. 产物自检（文件完整性 + _worker.js 可加载 + 导出面），拦住「构建成功但产物不可用」
  *
  * 用法：node build.mjs [--no-minify] [--watch]
  *   默认压缩构建；--no-minify 关闭压缩（本地开发/调试需要可读产物时用）
@@ -147,7 +148,7 @@ async function buildInlineUI(frontendJs, css) {
   }
 
   // --- 注入 CSS ---
-  const styleTag = `<style>${minifyCss(css)}</style>`;
+  const styleTag = `<style>${css}</style>`;
   if (/<link[^>]+style\.css[^>]*>/i.test(html)) {
     html = html.replace(/<link[^>]+style\.css[^>]*>/i, styleTag);
     html = html.replace(/<!--\s*BUILD:STYLE\s*-->/i, '');
@@ -173,7 +174,7 @@ async function buildInlineUI(frontendJs, css) {
  */
 export const UI_HTML = ${JSON.stringify(html)};
 // 以下两导出供 _worker.js 在「无独立静态托管」时也能透传管理面静态资源（兜底）
-export const UI_CSS = ${JSON.stringify(minifyCss(css) ?? '')};
+export const UI_CSS = ${JSON.stringify(css ?? '')};
 export const UI_JS = ${JSON.stringify(frontendJs ?? '')};
 `;
 
@@ -246,7 +247,7 @@ async function buildPublic(frontendJs, css) {
   // 写出 app.css / app.js（固定 /assets 物理路径，与运行时路由解耦）
   const assetDir = join(DIST_PUBLIC, 'assets');
   await mkdir(assetDir, { recursive: true });
-  await writeFile(join(assetDir, 'app.css'), minifyCss(css), 'utf8');
+  await writeFile(join(assetDir, 'app.css'), css, 'utf8');
   await writeFile(join(assetDir, 'app.js'), frontendJs, 'utf8');
 
   console.log('  ✓ dist/public/index.html + assets/app.{css,js} 已生成（资源路径固定，与 ADMIN_PATH 解耦）');
@@ -406,9 +407,12 @@ async function main() {
 
   // 步骤 1+2：前端 JS 共用一份压缩结果，分别产出内联兜底与静态目录
   const css = await readSafe(join(WEB, 'style.css'));
+  // CSS 只压缩一次（C16 修复：原先 buildInlineUI / buildPublic 各调一次 minifyCss，
+  // 幂等但冗余），统一在此处压缩后传入，函数内直接复用。
+  const minCss = minifyCss(css);
   const frontendJs = await buildFrontendJs();
-  await buildInlineUI(frontendJs, css);
-  await buildPublic(frontendJs, css);
+  await buildInlineUI(frontendJs, minCss);
+  await buildPublic(frontendJs, minCss);
 
   // 步骤 3：打包 worker
   await buildWorker();

@@ -387,15 +387,6 @@ export function getKV(env) {
 }
 
 /**
- * 判断当前环境是否具备 KV 持久化能力。
- * @param {Object} env 环境对象
- * @returns {boolean} 是否有可用 KV
- */
-export function hasKV(env) {
-  return pickRawBinding(env) !== null;
-}
-
-/**
  * 预热 KV 适配器（请求生命周期早期调用一次，可选）。
  *
  * 目前 KV 适配器是纯同步包装，无需异步初始化；本函数保留是为了
@@ -403,7 +394,8 @@ export function hasKV(env) {
  * isolate 级适配器缓存，省去首个请求的包装开销。
  *
  * @param {Object} env 平台环境变量
- * @param {Caps} [_caps] 平台能力（当前未使用，保留签名兼容）
+ * @param {Caps} [_caps] 平台能力（保留签名兼容：CF / EO 的 KV 适配路径一致，
+ *        当前无需按 caps 分支，但预留该参以便未来差异化预热）
  * @returns {Promise<KVLike|null>} 适配器或 null
  */
 export async function preloadKV(env, _caps) {

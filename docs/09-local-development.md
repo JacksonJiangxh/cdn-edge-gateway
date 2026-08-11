@@ -152,7 +152,7 @@ npm run dev
 
 1. 进入 **源站池** → 新建池
    - 名称：`test-pool`
-   - 添加源站地址：`https://example.com`
+   - 添加源站地址：`example.com`（**注意：addr 不能带协议**，`https://` 前缀会被拒；协议由源站 `scheme` 字段决定，默认 https）
    - 策略：保持默认（链式回退）
 2. 进入 **站点** → 新建站点
    - 域名：`localhost`

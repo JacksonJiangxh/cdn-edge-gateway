@@ -122,13 +122,13 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
     // 构造临时规则对象以复用 buildOriginUrl
     const effectiveRule = { action: { rewrite: mergedRewrite } };
 
-    let originUrl;
-    if (origin.engine === 'r2') {
-      // 回源 Host 按「源站级 → 规则级 → 站点级」解析：每个 origin 独立算自己的 Host，
-      // 解决「同一源站组多源站各自 Host 不同」的场景（规则级 custom 可覆盖单个源站）。
-      const originHostHeader = resolveHostHeader(rule?.action?.hostHeader, origin.hostHeader, hostHeader);
-      originUrl = buildOriginUrl(ctx, origin, effectiveRule, originHostHeader);
-    }
+    // 回源 Host 按「规则级 → 源站级 → 站点级」解析：每个 origin 独立算自己的 Host，
+    // 解决「同一源站组多源站各自 Host 不同」的场景（规则级 custom 可覆盖单个源站）。
+    // hostHeader 是 pipeline 算出的站点级 effectiveHostHeader（作为第三参兜底），
+    // 因此 fetch/socket/r2 所有引擎都走同一套解析，避免非 r2 源站漏算 URL 与 Host。
+    const originHostHeader = resolveHostHeader(rule?.action?.hostHeader, origin.hostHeader, hostHeader);
+    const originUrl = buildOriginUrl(ctx, origin, effectiveRule, originHostHeader);
+
     const headers = buildOriginHeaders(
       ctx,
       origin,
@@ -242,9 +242,13 @@ async function dispatch(ctx, origin, originUrl, headers, timeoutMs, opts) {
   // 平台允许手动 Host 时（如 EdgeOne 边缘函数 fetch 向外部源站）生效，实现
   // 「域名源站 + 自定义 Host」语义；强制跟随 URL hostname 的平台（CF Workers fetch /
   // CF Pages）自动无效但无害。裸 IP + 自定义 Host 的 SNI 部分依赖平台级回源 Host 兜底。
-  const custom = opts?.hostHeader?.custom;
+  // accel 模式同理：回源 Host 用加速域名（ctx.url.hostname），需显式覆盖默认 addr。
+  const hh = opts?.hostHeader;
+  const custom = hh?.custom;
   if (custom && String(custom).trim() && String(custom).trim() !== String(originUrl.hostname)) {
     headers.set('Host', String(custom).trim());
+  } else if (hh?.mode === 'accel' && ctx.url.hostname && ctx.url.hostname !== String(originUrl.hostname)) {
+    headers.set('Host', ctx.url.hostname);
   }
 
   return fetchOrigin(ctx, origin, originUrl, headers, timeoutMs, opts);

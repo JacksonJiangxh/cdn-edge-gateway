@@ -136,7 +136,10 @@ export function buildOriginUrl(ctx, origin, rule, hostHeader) {
     const [h, p] = String(hostHeader.custom).split(':');
     authorityAddr = h;
     if (p) authorityPort = Number(p);
-  } else if (hostHeader && hostHeader.mode === 'client') {
+  } else if (hostHeader && (hostHeader.mode === 'client' || hostHeader.mode === 'accel')) {
+    // client：用客户端访问域名；accel：用加速域名（单加速域名场景下二者等价，
+    // 均为 ctx.url.hostname）。CF 上 fetch 会忽略 Host 头故 accel 退化但无害；
+    // EO 上 dispatch 会据此显式设置 Host 头，使「加速域名」成为回源 Host。
     authorityAddr = ctx.url.hostname;
   }
   // inherit / origin / 未配置 → 沿用源站 addr（origin 模式语义上等同 addr）
