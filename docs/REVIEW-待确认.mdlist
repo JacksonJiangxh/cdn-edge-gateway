@@ -1,280 +1,241 @@
-# 待确认问题列表（REVIEW mdlist）
+# 待确认问题列表（REVIEW mdlist · 重新审查）
 
-> 生成时间：2026-08-11
-> 性质：**审查发现，未经任何修改**。按用户要求分为「代码层」与「文档一致性」两类，标注严重级别（高/中/低）与问题类型。
+> 生成时间：2026-08-11 21:51
+> 审查方式：**4 名审查员分模块独立审查（只读，未改任何代码）+ 主审复核关键产物**。
+> 分项：A. 构建产物未同步（最高优先级，横跨代码层+构建层）；B. 代码层 bug / 逻辑；C. 文档一致性；D. 流量序列 UI（源文件层 vs 产物层）。
+> 每条标注严重级（高/中/低）、类型、方向（代码领先 / 文档领先 / 都错 / —）、是否需确认。
 > 是否修改、如何修改，留待后续讨论决定。
 
 ---
 
-## 一、代码层问题（bug / 空挂 / 逻辑错乱 / 冗杂）
+## ⚠️ 审查前置结论（最重要）
 
-### 🔴 高严重
+**经独立核查，上一份 REVIEW-待确认.mdlist 中大量"✅ 已修复 / 构建已重新生成"的声明，在「产物层面」并不成立。**
 
-#### C1. failover 中 `originUrl` 对非 r2 源站传入 `undefined`（数据面核心 bug）
-- 位置：`src/balancer/failover.js` 第 125-130 行、第 141 行、第 223-250 行
-- 现象：`let originUrl;` 仅在 `if (origin.engine === 'r2')` 分支内被赋值为 `buildOriginUrl(...)`（第 130 行）。对于占绝大多数的 `fetch`/`socket` 源站，`originUrl` 保持 `undefined`，随后第 141 行 `dispatch(ctx, origin, originUrl, ...)` 把它传给 `dispatch`。`dispatch` 第 250 行 `fetchOrigin(ctx, origin, originUrl, ...)` 使用这个 `undefined`。
-- 推断：fetch 路径的回源 URL 构建逻辑要么在 `fetchOrigin` 内部靠 `origin` 重新构造（那 failover 第 130 行的 r2 分支才需要预构，逻辑分裂），要么 `originUrl` 在 fetch 路径下是必需却缺失 → 直接报错或回源到错误地址。属逻辑错乱/空挂，影响所有非 r2 源站的回源。
-- 类型：bug / 逻辑错乱
-- 待确认：需核对 `fetchOrigin` 内部是否自给 URL。若否，则所有非 r2 源站回源必崩，属 P0。
-- **✅ 已修复（测试判断结论：确认是 P0 真实 bug）**：`fetchOrigin`（fetchEngine.js 第 59 行）执行 `fetch(String(originUrl))`，`originUrl` 为 `undefined` 时变 `fetch("undefined")`，回源到错误相对地址、全体 fetch/socket 源站必崩。修复方式：将 `originUrl` 与 `originHostHeader` 的构建从 `if (engine==='r2')` 内移到所有引擎共用路径（`failover.js` 第 125-131 行），统一 `resolveHostHeader(规则级, 源站级, 站点级)` 三参解析 + `buildOriginUrl(...)`。r2 路径行为与旧版完全一致（仅构建位置前移）。构建已重新生成。
+证据（用 `python3` 对产物文件逐符号统计，结果确凿）：
+- `web/app.js`（源）含流量序列核心函数：`renderRuleStage`×8、`seqStage`×28、`openCacheGenDrawer`×2、`wireRuleDrag`×2、`confined`×7、`openRulesDrawer`×3、"流量序列"文案×23。
+- `src/ui.gen.js`（内联兜底产物）这些符号**全部为 0**；`dist/public/assets/app.js`（静态托管产物）这些符号**全部为 0**；两者连"流量序列""站点管理""拖拽"等字符串文案都是 0。
+- 但 `src/ui.gen.js` 的 HTML 外壳含"流量序列"导航项（说明 index.html 当时已是新版），而 `build.mjs` 的 `buildInlineUI` 逻辑本身正确（正则能匹配并移除 `<script src="api.js/app.js">` 并注入拼接后的 `frontendJs`）。
 
-#### C2. `resolveHostHeader` 调用参数错位，`accel` 回源 Host 模式从未生效
-- 位置：`src/proxy/pipeline.js` 第 192 行；`src/proxy/rewrite.js` 第 197-208 行、第 134-141 行
-- 现象：函数签名 `(ruleHostHeader, originHostHeader, siteHostHeader)`（三参）。但 pipeline 第 192 行只传两个：`resolveHostHeader(rule?.action?.hostHeader, site.defaultHostHeader)`。`site.defaultHostHeader` 被错误填入第二参 `originHostHeader` 的位置，第三参 `siteHostHeader` 实为 `undefined`。
-- 后果：当规则级 `hostHeader.mode` 为 `inherit`/缺失时，内部读 `oh = originHostHeader`，此时 `oh.mode` 拿到的是 `'accel'`（站点默认值），因 `'accel' !== 'inherit'`，直接返回 `{mode:'accel'}`。而 `buildOriginUrl`（rewrite.js 第 134-141 行）**只识别 `custom` 和 `client` 两种 mode**，对 `accel` 无任何分支，`authorityAddr` 退化为源站 `addr`，即等同于 `origin` 语义。`accel`（用加速域名）的文档语义从未生效。
-- 类型：bug（参数错序）+ 描述不符（contracts/defaults 声称支持 accel）
-- **✅ 已修复（测试判断结论：确认是真实 bug，且默认站点全部命中）**：`DEFAULT_SITE_HOST_HEADER.mode='accel'`（站点默认即 accel），原调用把站点级配置错塞进第二参（源站级），且 `buildOriginUrl` 无 accel 分支、`dispatch` 不对 accel 设 Host 头，导致默认站点的"加速域名回源 Host"从未生效（回退成源站 addr）。修复采用「让 accel 真正生效」方向（而非降级文档）：① `pipeline.js` 第 192 行改为三参正确传参 `resolveHostHeader(rule?.action?.hostHeader, undefined, site.defaultHostHeader)`（此时尚未选中 origin，源站级留空）；② `rewrite.js` `buildOriginUrl` 新增 `accel` 分支，authority 取 `ctx.url.hostname`（加速域名，与 client 语义在该场景一致）；③ `failover.js` `dispatch` 对 `hh.mode==='accel'` 也显式 `headers.set('Host', ctx.url.hostname)`，使 EO 等支持自定义 Host 的平台真正下发加速域名。CF 上 fetch 忽略 Host 头故退化但无害。构建已重新生成。
-
-### 🟡 中严重
-
-#### C3. `buildSignedQuery` 空挂：签名 URL 防护只有「拦」没有「签」
-- 位置：`src/security/guard.js` 第 437-444 行；前端 `web/app.js` 无对应调用
-- 现象：该函数注释写明「供管理后台生成防盗链地址」，全项目（含 `web/`）无任何调用点。用户开启「签名 URL」后获得 secret，却无任何工具生成合法签名链接——防护侧能拦截无签名请求，但无法自助签发，等于功能残缺。
-- 类型：逻辑空挂（配套能力缺失）
-- **🔻 已降级为实验特性（待开发）**：校验侧（`guard.js` / `sign.js`）已生效，但内置签发工具（`buildSignedQuery`）缺失。已在前端（`web/app.js` 流量序列卡片 ②.4、安全防护抽屉 `sec-token` 加「⚠️ 实验特性：内置签发工具待开发」提示）与各文档（`04`/`05`/`08-faq`/`12-request-flow`/`11-architecture`/`01-overview`/`README`）统一标注「⚠️ 实验特性（待开发）」。不删除代码，仅标注未就绪。
-
-#### C4. `useCacheApi` 误判为「空挂」（实际是 `cacheMatch/cachePut/cacheDelete` 的内部平台分支依赖）
-- 位置：`src/platform/cache.js` 第 94-97 行
-- 现象（原 mdlist 误判）：原判定称「全项目仅命中自身定义，无任何调用点」「`cacheMatch`/`cachePut`/`cacheDelete` 都改用 `edgeCacheAvailable` 判定，从不走 `useCacheApi`」。
-- 核查（已结合 CF 官方文档纠正）：
-  - `useCacheApi` **不是孤立函数**——它被 `cacheMatch`(L123)、`cachePut`(L165)、`cacheDelete`(L190) 内部直接调用，作为 CF vs EO 的平台分支判定。这三个函数本身是**真实接线**的数据面/管理面 API：`pipeline.js:251` 调 `cacheMatch`、`pipeline.js:336` 调 `cachePut`、`src/api/handlers/cache.js:42` 调 `cacheDelete`。原 mdlist 把「`useCacheApi` 未被外部 import」误当作「无调用点」，混淆了「导出 API 被外部引用」与「内部被同模块函数依赖」。
-  - **CF 官方文档（developers.cloudflare.com/workers/runtime-apis/cache，2026-07 更新）确认**：`caches.default` Cache API 与 `Cache-Control`/`fetch cacheTtl`（Workers Caching）是**两套相互独立的机制**。`caches.default` 用于「Worker 内程序化读写边缘缓存（按自定义键、支持 Cache-Tag 按标签清除、支持合成键整站清除 `cacheGen`）」，但**不跨数据中心**；而 `Cache-Control`/`CDN-Cache-Control` 响应头用于「让 Cloudflare 在不执行 Worker 的情况下直接返回缓存（全局 CDN 级）」。
-  - 本项目的 CF 缓存设计**同时采用两套**：`cache.js` 用 `caches.default.put/match` 程序化托管合成缓存键（这是 `useCacheApi` 返回 true 时走的路径，支持 `cacheGen` 整站清除、自定义键、按标签清除）；同时通过 `buildClientHeaders` 下发 `CDN-Cache-Control` 让 CF 边缘按头缓存（属于 Workers Caching 路径，与本函数无关）。`useCacheApi` 的职责正是**探测当前平台是否具备 `caches.default` 读写能力**——CF 为 true（走 Cache API），EO 为 false（退化为响应头委托 + `caches.default` 永不操作）。这正是它在 `cacheMatch/cachePut/cacheDelete` 内部被调用的原因。
-  - EO 路径下 `useCacheApi` 返回 false，`getCache()` 仍会被调用一次（探测 `caches.default` 是否存在），但结果被缓存到 `_cacheHandle`，后续同 isolate 不再探测，**并非「逻辑冗余」而是一次性惰性探测**，属合理设计。
-- 结论：**非空挂、非冗杂、非误报**。原 C4 判定基于错误的「无调用点」前提，现已纠正。`useCacheApi` 是 CF/EO 双平台缓存分支判定的健康基础设施，**保留**。
-- **CF 官方文档处置建议**：无需改动代码。但若希望 CF 上进一步「跳过 Worker 执行」以省调用，可在 `wrangler.toml`/CF 面板 Cache Rules 配置 `Edge TTL` + `Origin Cache-Control = Ignore if present`（本项目 `docs/06-cache-strategy.md` 已覆盖此最佳实践）；这与 `caches.default` 程序化缓存互补而非替代。
-- **✅ 已修复（纠正误判）**：mdlist 原 C4「空挂」判定作废，改为「健康平台分支 API，保留」。汇总表同步。
-
-#### C5. `checkGlobalRateLimit` 等空挂：全局 Host 扫描限流不生效
-- 位置：`src/security/ratelimit.js` 第 264、288、234 行；`contracts.js` 有 `globalRateLimit` 字段
-- 现象：`checkGlobalRateLimit`/`resetGlobalRateLimit`/`resetRateLimitMemory` 三个函数无调用点。`core/app.js`/`entry.js` 实际未调用 `checkGlobalRateLimit`。`globalRateLimit` 配置项「配了但不生效」，攻击者可用随机 Host 打满 isolate。
-- 类型：逻辑空挂（配置项失效）
-- **🔻 已降级为实验特性（待开发）**：代码侧 `pipeline.js` 已接线 `checkGlobalRateLimit`（`globalCfg.globalRateLimit > 0` 时生效），但功能尚处实验阶段。已在前端（`web/app.js` 全局配置抽屉 `gGlobalRateLimit` 字段加「⚠️ 实验特性（待开发）」标注）与文档（`04` 全局配置节补 `globalRateLimit` 实验特性行）统一标注，不建议生产依赖。
-
-#### C6. `gen-deploy-config.mjs` 拉取远程绑定失败时静默不中断，可能清空绑定
-- 位置：`scripts/gen-deploy-config.mjs` 第 58-61、76-79 行
-- 现象：当 `CLOUDFLARE_API_TOKEN`/`ACCOUNT_ID` 缺失或 CF API 拉取失败，脚本返回空绑定数组但**不中断** `wrangler deploy -c`，可能用空绑定清空远程 KV/R2/D1 绑定。属设计取舍但有 CI 静默清空风险。
-- 类型：逻辑风险（非代码 bug，但需决策）
-- **✅ 已修复（按用户决策）**：`fetchRemoteBindings` 在「凭据缺失 / API 调用异常 / API 返回非 success」时**直接 `process.exit(1)` 中止**，不再返回空数组放行；CNB（`.cnb.yml` 已 `set -e`）与 GitHub（`.github/workflows/deploy-cf-workers.yml` 原直接 `wrangler deploy` 无探测，现已改为先 `node scripts/gen-deploy-config.mjs` 再 `wrangler deploy -c wrangler.deploy.toml`，与 CNB 对齐）两种流水线均会在探测失败时中断，避免用空绑定推送清空线上配置。
-
-### 🟢 低严重（空挂 / 游离 / 冗杂，建议清理）
-
-#### C7. `keyCodec.js`：`isEncodedKey`/`encodePrefix` 调用面核查
-- 位置：第 208-210、226-229 行
-- 现象/核查：`kv.list()` 实际用 `encodeKey` 而非 `encodePrefix`。
-  - `isEncodedKey`：**非空挂**——被 `src/migration/index.js`（部署时键名迁移 `migrateLegacyKeys`）真实调用（判断物理键是否已是合法编码字符集）。
-  - `encodePrefix`：**预留公共 API**——它是「按前缀列举 KV」能力的入口（CF KV 与 EO KV 的 `list()` 均支持 prefix 参数，且本编码方案前缀兼容 `encode(a+b)===encode(a)+encode(b)`，列举语义成立），当前列举类功能在路线图未接入，但删除会破坏后续按前缀扫描能力，**属预留非死代码**。已补 CF/EO 平台兼容注释。
-- **结论**：非旧版残留、非需删；`isEncodedKey` 已在用，`encodePrefix` 为合法预留 API。
-
-#### C8. 测试/重置函数空挂
-- 位置：`_resetKeyCodecCache`(keyCodec.js L232)、`resetCapsCache`(caps.js L323)、`resetCacheHandle`(cache.js L304)
-- 现象：标注「仅供测试」但全项目无测试引用。
-- 核查：`useCacheApi`(cache.js L94) 的处置见 **C4**（已纠正误判——它是 `cacheMatch/cachePut/cacheDelete` 的内部平台分支依赖，非空挂）。三个 reset 函数（`_resetKeyCodecCache`/`resetCapsCache`/`resetCacheHandle`）均为「测试/热重载」辅助 API，属防御性预留，**保留**。
-- **结论**：均为「测试辅助 / 平台兼容公共 API」，非旧版残留死代码，**保留**（不建议删，否则丧失可测试性与热重载支持）。
-
-#### C9. `kv.js`：`hasKV` 空挂；`preloadKV` 第二参 `_caps` 标注「当前未使用」
-- 位置：`hasKV`(原 L394，已删除)、`preloadKV`(L409)
-- 现象核查：能力探测走 `caps.hasKV`（caps.js 基于 binding 形状判断），`kv.js` 的 `hasKV(env)` 函数全项目**零调用**，纯死代码。
-- **✅ 已修复（删除死代码）**：已删除 `hasKV(env)`（C9 中唯一确认零调用的孤立函数）。`preloadKV` 被 `entry.js:79` 真实调用（CF/EO 预热 KV 适配器），第二参 `_caps` 保留为「平台兼容签名预留」（CF/EO 的 KV 适配路径一致，当前无需分支但预留），已完善注释，**保留**。
-
-#### C10. `loginGuard.js`：`LOGIN_GUARD_LIMITS` 导出常量
-- 位置：第 282-286 行
-- 现象：`LOGIN_GUARD_LIMITS` 全项目无调用点。
-- 核查：它是**导出常量**（冻结对象），供管理后台展示登录防护阈值（失败次数/锁定时长/固定延迟）。当前管理面「系统信息/安全」页未渲染该常量，属**「后端常量已就绪、前端未接线」**（新功能未应用，非旧版残留）。
-- **结论**：保留（删除会丢失可复用的阈值常量），建议后续前端在登录防护说明处展示。
-
-#### C11. `stats/collector.js`：`COLLECTOR_LIMITS`/`snapshotStats` 导出 API
-- 位置：第 431、413 行
-- 现象：前端未实现「实时未落盘数据」概览。
-- 核查：`COLLECTOR_LIMITS`（落盘阈值常量）、`snapshotStats`（内存聚合只读快照）均为**后端已就绪的导出 API**，供管理面展示「实时统计/未落盘数」用。当前前端未接入，属**「后端就绪、前端未应用」的真实功能缺口**（非旧版残留）。
-- **结论**：保留（后端能力完整，删之倒退），标注为待前端接线的功能缺口，不视为 bug。
-
-#### C12. `utils/crypto.js`：`toBase64Url`/`sha256Hex`/`base64ToBuf`/`bufToHex` 工具库
-- 位置：第 84、212、66、93 行
-- 现象核查：这些是 **Web Crypto 封装工具**。CF Workers 与 EO Edge Functions **均支持** `crypto.subtle`（SHA-256 / HMAC）与 `atob`/`btoa`，双平台兼容。`hmacSha256` 内部确有重复实现 base64url 转义（未复用 `toBase64Url`），属轻微冗杂。
-- **结论**：均为健康工具库公共 API（`sha256Hex` 等是缓存键/ETag/统计维度生成的通用依赖，签名 URL 等功能也会用到），**非空挂误报、非旧版残留**。仅 `hmacSha256` 内联 base64url 转义可小优化（复用 `toBase64Url`），属低优整洁项，不阻塞。
+**结论**：`web/`（app.js/index.html/api.js）在加入流量序列 UI 后，**即使重新 `npm run build`，产物仍缺失管理面 UI 渲染逻辑**——根因是 `build.mjs` 的 esbuild 压缩（`minify:true`）把 `web/app.js` 中通过对象属性/事件**间接注册**的 UI 函数（流量序列、站点管理等）当作不可达死代码消除（详见 A1 二次审查）。REVIEW.mdlist 把"产物无流量序列"归因为"没重新 build"是**错误判断**；真实是 **build 脚本缺陷导致任何构建都产出残缺管理面**。
 
 ---
 
-## 四、C7–C12 平台兼容性核查小结（CF / EO）
+## A、构建产物未同步（最高优先级）
 
-> 核查结论：**C7–C12 绝大多数「空挂」并非旧版本遗留死代码，而是健康的公共 API / 导出常量 / 平台兼容工具函数**。盲目删除会破坏扩展性与双平台兼容。仅 C9 的 `hasKV(env)` 是确认零调用的真死代码，已删除。
+### 🟢 A1. `src/ui.gen.js` 与 `dist/public/assets/app.js` 均未包含流量序列/管理面 UI，缺失重大功能（高·构建层 bug / 产物过期）—— **已修复（状态1 / 方案 Y）**
 
-| 函数 | 性质判定 | CF 兼容 | EO 兼容 | 处置 |
-|---|---|---|---|---|
-| `isEncodedKey` | 在用（迁移） | ✓ | ✓ | 保留 |
-| `encodePrefix` | 预留公共 API | ✓（KV list prefix） | ✓（KV list prefix） | 保留 |
-| `useCacheApi` | 平台分支 API（`cacheMatch/cachePut/cacheDelete` 内部依赖，非孤立） | ✓ caches.default | ✓ 响应头委托 | 保留（C4 误判已纠正） |
-| `reset*`（测试辅助） | 测试/热重载辅助 | ✓ | ✓ | 保留 |
-| `hasKV(env)` | **真死代码** | — | — | **🗑️ 已删除** |
-| `preloadKV` | 在用（entry 预热） | ✓ | ✓ | 保留 |
-| `LOGIN_GUARD_LIMITS` | 导出常量（前端未接线） | ✓ | ✓ | 保留 |
-| `COLLECTOR_LIMITS`/`snapshotStats` | 后端就绪导出 API（前端未应用） | ✓ | ✓ | 保留 |
-| `toBase64Url`/`sha256Hex`/`base64ToBuf`/`bufToHex` | Web Crypto 工具库 | ✓ | ✓ | 保留 |
-
-#### C13. `index.js` 游离文件
-- 现象：独立通用 CDN Worker，与 `src/`→`_worker.js` 主体零引用（`build.mjs`/薄壳/edge-functions 均不加载），疑似遗留脚手架；在 EO `outputDirectory:"."` 下会被一并上传却无入口。
-- **🗑️ 已删除**：按用户决策，`index.js` 为游离遗留脚手架、与主体零引用，已从仓库删除，避免 EO `outputDirectory:"."` 误上传无入口文件。
-
-#### C14. `keepalive.py` 游离 + 文档缺失
-- 现象：通用 CNB 预览保活脚本，与网关构建/部署无关，全仓文档未提及、无 npm script 调用。
-- **✅ 保留（按用户决策，属误报）**：`keepalive.py` 实际被 CNB 流水线使用——`.cnb.yml` 的 `vscode` 远程开发事件 `launch: python keepalive.py` 用它保活远程开发预览（keepAliveTimeout 3600000）。属 CNB 预览专用，非构建/部署产物，故保留；文档可后续补一句说明其用途。
-
-#### C15. `build.mjs` 注释「三步」实跑四步
-- 位置：第 6-19 行注释 + 实际 `main()` 跑 `[1/4]~[4/4]`（含 `verify` 自检）
-- 现象：步骤计数描述滞后，产物路径本身正确。
-- **✅ 已修复**：`build.mjs` 顶部注释已由「三步走」改为「四步走」（第 6-20 行，含第 4 步产物自检 `verify`）。
-
-#### C16. `build.mjs` 中 `minifyCss(css)` 重复调用
-- 位置：原第 176、249 行（`buildInlineUI` / `buildPublic` 各调一次）
-- 现象：`buildInlineUI` 与 `buildPublic` 各调用一次，幂等无害冗余。
-- **✅ 已修复**：`build.mjs` 已将 `const minCss = minifyCss(css)` 提取到 `main()`（第 410-412 行）只压缩一次，再作为 `minCss` 参数传入 `buildInlineUI` / `buildPublic`，两函数内部不再各自调用 `minifyCss(css)`。
+- 位置：`build.mjs:111-132`（`buildFrontendJs`，esbuild 压缩 `api.js+app.js`）；产物 `src/ui.gen.js`（`UI_JS`）、`dist/public/assets/app.js`；源 `web/app.js`。
+- **二次全面审查复核（2026-08-11 22:25，确认问题真实存在，并纠正原"未重新 build"误判）**：
+  1. 符号统计：改动前 `src/ui.gen.js` / `dist/public/assets/app.js` 的 `renderRuleStage`/`seqStage`/`openCacheGenDrawer`/`wireRuleDrag`/`confined`/`openRulesDrawer` 全部为 0，连"流量序列""站点管理"文案也为 0；而 `web/app.js` 含完整实现（renderRuleStage×8、seqStage×28 等）。→ **问题确实存在**。
+  2. 实际运行 `npm run build`：产物**仍然**不含这些符号（UI_JS 仅 242 字符，内容只是 `api.js` 的 `ApiError` 类 + `et()`，app.js 逻辑全无）。→ **推翻"根因是没跑 build"**：跑 build 也照样坏，说明是 build 脚本本身的缺陷。
+  3. 复现 esbuild：`api.js+'\n'+app.js`(153KB) 经 esbuild（`bundle:false, minify:true, format:'iife'`）压缩后输出 139KB，**`renderRuleStage` 为 false**；**单独压缩 `web/app.js`** 输出 135KB，`renderRuleStage` 仍为 false；`treeShaking:false` 也仍 false；但 `minify:false` 时 `renderRuleStage` 为 **true**。→ **根因锁定在 esbuild 的 minify 死代码消除**。
+  4. 最小复现：顶层定义 `function foo(){};function bar(){return foo()}` 仅通过 `document.addEventListener` 间接引用，esbuild `minify:true` 时 `foo/bar` 被移除，`minify:false` 时保留。→ 确认 esbuild minifier 会丢弃"未被入口可达链直接引用"的函数。
+- **真实根因**：`web/app.js` 大量 UI 函数（含流量序列 `renderTrafficSequence`/`renderRuleStage`/`seqStage` 及 `renderSites`/`renderPools` 等）并非被底部启动函数直接文本调用，而是通过**对象属性/事件间接注册**（如 `web/app.js:229` 的 `sites: renderSites` 挂到 view 映射对象）。esbuild 在 `minify:true` 下把"间接引用"判定为不可达死代码并移除；`login`/`addEventListener`/`je()` 等因被文件底部启动函数直接调用而保留。原 REVIEW.mdlist 把"产物无流量序列"归因为"没重新 build"是**错误**的——**build 脚本配置缺陷会导致任何一次构建都产出残缺管理面**。
+- 后果（视部署形态）：走 `dist/public` 静态托管（CF Pages/Workers ASSETS/EO Pages）或 `src/ui.gen.js` 兜底（CF Workers 粘贴）的线上管理面，**均无流量序列、无站点管理渲染逻辑**，登录后主界面/流量序列页为空或残缺。
+- 类型：构建层 bug（esbuild minify 死代码消除误杀间接引用函数）
+- 方向：—
+- 是否需确认：**是（P0）**，根因已确凿，修复方案已实测对比：
+  - **方案 X（实测 ❌ 不可靠）**：在 `web/app.js` 末尾把核心 UI 函数挂到 `window.__ui` / `void [...]` 显式引用，意图使 esbuild minify 视为被引用而保留。**实测失败**：即便加了 `window.__ui = {...}` 与 `void __uiFns` 数组引用，压缩产物 `app.js` 仍仅 **139 KB**，`renderTrafficSequence`/`renderSites`/`openRulesDrawer` 虽留"引用壳"（`renderTrafficSequence:Xe`），但**函数体 `Xe` 定义与所有中文文案（"流量序列"×0、"站点管理"×0）被消除**，UI 仍残缺。根因：esbuild minify 做跨过程副作用分析，`window.__ui` 赋值与 `void` 数组均无"读取侧"，整条引用链被判无副作用删除。**结论：在 `bundle:false + minify:true` 下纯挂 window 无法保活动态键访问的间接函数，方案 X 不可靠，不推荐。**
+  - **方案 Y（实测 ✅ 彻底可用）**：`buildFrontendJs` 对 web 资源改用 `minify:false`（仅管理面兜底），避免死代码消除；Worker 仍走全局 `MINIFY` 压缩。实测（2026-08-11 22:40）：
+    - 默认压缩构建下 `dist/public/assets/app.js` = **187 KB**（含完整 UI：renderRuleStage×8 / seqStage×28 / renderTrafficSequence×2 / renderSites×2 / openRulesDrawer×3 / confined×7；文案"流量序列"×15、"站点管理"×4）；`src/ui.gen.js` 文件 446 KB（内联 JSON 转义开销，UI 完整）；`_worker.js` = **558 KB**（仍压缩，远离 CF 1MB 限制）。
+    - 对照「全量 `--no-minify`」：`app.js` 同为 187 KB、`_worker.js` 690 KB、`ui.gen.js` 471 KB；对照「原压缩误杀」：`app.js` 仅 139 KB 且 UI 全缺；对照「方案 X 实测」：`app.js` 139 KB 但 UI 仍缺（X 无效）。
+    - **结论**：方案 Y 修复彻底、零源码改动、Worker 体积不受影响；代价仅是管理面静态 JS 由 139KB→187KB（+48KB），以及 `ui.gen.js` 兜底文件由残缺→446KB，**均在 CF 1MB 内，安全**。
+  - **方案 Z（改构建形态）**：用 esbuild `bundle:true` + 显式 entry 打包 `web/`，但 `app.js` 非标准 ESM 模块，需评估副作用。
+  - **下一步决策：推荐采用方案 Y**（零源码侵入、已验证恢复完整 UI 且代价极小）。方案 X 实测不可靠已排除；若坚持要保留压缩形态，需改用更激进的 X 变体（例如 `ROUTES`/`TITLES` 改为被启动链直接调用一次）或方案 Z，待讨论。
+- **方案 Y 修复后二次全面复核（2026-08-11 22:54，确认 A1 已全面解决）**：基于暂定状态1（默认 `npm run build`，前端 UI 不压缩、Worker 仍压缩）重新构建，对产物逐符号+文案统计 + 自检：
+  - 静态托管 `dist/public/assets/app.js`（149.9 KB）：全部 UI 符号在场 —— `renderRuleStage`×8、`seqStage`×28、`wireRuleDrag`×2、`renderSite`×5、`confined`×7、`seqRuleInPack`×3、`seqGroup`×18、`gStage`×8；路由/抽屉函数 `renderOverview/renderSites/renderTrafficSequence/renderPools/renderCache/renderSystem` 各 2-3、`openRulesDrawer`×3 等全部在场；文案「流量序列」×15、「站点管理」×4、「规则引擎」×12、「拖拽」×5、「源站池」×38 均在。**整条流量序列渲染链完整保留，无"引用壳但函数体缺失"**。
+  - 内联兜底 `src/ui.gen.js`（369.2 KB）：`UI_JS` 含 `renderTrafficSequence`×4、`renderRuleStage`×16、`seqStage`×56、`renderSites`×4、`openRulesDrawer`×6、`confined`×14；文案「流量序列」×31、「站点管理」×9 → **CF Workers 粘贴兜底形态 UI 也完整**。
+  - `_worker.js`（486.2 KB）：仍压缩形态（换行极少）、含 `onRequest` 导出，`build.mjs` 自检（`verify()` 真正 `import` 加载）通过 → **数据面/入口未受影响，远离 CF 1MB 限制**。
+  - 对照原误杀态（app.js 仅 139KB、UI 全缺）与方案 X 实测态（app.js 139KB、UI 仍缺）：方案 Y 产物 app.js 149.9KB 且符号/文案全在，确证 A1 **全面解决**（静态托管与兜底两条部署链路的管理面均恢复）。
+- 关联：D 类（U1-U5 源文件层已正确）的线上生效**已随 A1（方案 Y）修复而打通**——静态托管与 `ui.gen.js` 兜底两种部署形态现在都能加载完整流量序列/管理面 UI。A1 关闭后，D 类仅余"源文件层是否还有可优化项"的常规审查，不再阻塞线上。
 
 ---
 
-## 二、文档一致性问题（mdlist）
+## B、代码层问题（bug / 空挂 / 逻辑错乱 / 冗杂）
+
+> 说明：数据面核心（failover 的 originUrl、resolveHostHeader 三参、accel 分支）经审查员 A 独立核查，**已正确**，原 REVIEW.mdlist 的 C1/C2 修复在源文件层属实，此处不再重复列为 bug。
+
+### 🟡 B1. `pools.js` `collectRefs` 在 `getGlobalRules` 失败时未置 `truncated=true`，可能低估引用导致误删源站（中·逻辑空挂）
+
+- 位置：`src/api/handlers/pools.js:63-79`（`collectRefs` 内 `try { getGlobalRules } catch { ... }`）。
+- 现象：`getGlobalRules` 异常被吞，仅注释"引用信息不完整"，但 `truncated` 保持原值（来自 `listAllSites`）。前端据此认为引用完整，`remove` 时 `refs.length===0` 会**误删仍被全局规则引用的源站池** → 全站 502。
+- 推断根因：`catch` 分支未保守置 `truncated = true` 阻断删除。
+- 类型：逻辑空挂 / 潜在数据面故障
+- 方向：—
+- 是否需确认：是——建议 `catch` 内 `truncated = true`。
+
+### 🟡 B2. `signedUrl` 开启但 `secret` 为空 → 全站 403（中·可用性风险，已文档化）
+
+- 位置：`src/security/guard.js:285-323`（`signedUrlBlocked`）、`contracts.js`/`schema.js` 对 `signedUrl.secret` 的校验。
+- 现象：`guard.js:289` 规定"未配置密钥时无法校验；此时拦截而不是放行"。即 `signedUrl.enabled=true` 但 `secret` 为空 → 所有请求 403，站点自锁。
+- 核查：这是 fail-closed 的正确安全行为；文档（08/11/12/04/05）已统一标注"⚠️ 实验特性（签发工具待开发）"，前端 `web/app.js` 也有提示。但需确认 `schema.js` 对 `signedUrl.secret` 是否强制非空——若允许"开签名留空 secret"，属可用性 bug（非安全漏洞）。
+- 类型：可用性风险 / 输入校验缺口
+- 方向：—
+- 是否需确认：是——确认 schema 是否要求 secret 非空。
+
+### 🟢 B3. `ratelimit.js` `resetGlobalRateLimit`/`resetRateLimitMemory` 死代码（低·冗杂）
+
+- 位置：`src/security/ratelimit.js:234-237`、`:288-290`。
+- 现象：全项目零调用（`checkGlobalRateLimit` 仅被 pipeline 调用，且 `globalRateLimit` 默认 0、前端标"实验特性"）。
+- 类型：死代码 / 逻辑冗杂
+- 方向：—
+- 是否需确认：否，可安全删除或补测试。
+
+### 🟢 B4. `LOGIN_GUARD_LIMITS` / `COLLECTOR_LIMITS` 导出常量前端未接线（低·冗杂）
+
+- 位置：`src/security/loginGuard.js:282-286`、`src/stats/collector.js:431-434`。
+- 现象：`Object.freeze` 导出但无模块消费；前端 `web/app.js` 未引用，也未被 `system/info` 返回。属"后端常量就绪、前端未应用"。
+- 类型：未使用的公共 API
+- 方向：—
+- 是否需确认：否，可保留（删除会丢失可复用阈值常量）。
+
+### 🟢 B5. `hourKey(ts)` 在 kvDriver/d1Driver/index 三处重复实现（低·冗杂）
+
+- 位置：`src/stats/kvDriver.js:76-83`、`src/stats/d1Driver.js:122-130`、`src/stats/index.js:99-107`。
+- 现象：逻辑完全相同（UTC `yyyymmddhh`），重复三份。
+- 类型：逻辑冗杂
+- 方向：—
+- 是否需确认：否，建议抽公共工具。
+
+### 🟢 B6. `web/app.js` `openInitialOriginDrawer` 残留（低·轻微冗余，无回归）
+
+- 位置：`web/app.js:2052`（仍在，但仅作 ⑭ 无源站兜底入口，不再被 ③ 调用）。
+- 现象：U5 修复后 ③ 已收敛为只读 toast，该函数已不被错误路径调用，仅作兜底。属轻微冗余。
+- 类型：轻微冗余
+- 方向：—
+- 是否需确认：否，可保留或清理。
+
+### 🟢 B7. `guard.js` IPv6 CIDR 注释与实现不符（低·注释误导，无功能 bug）
+
+- 位置：`src/security/guard.js:97-100`、`106-109`。
+- 现象：注释写"IPv6 CIDR 不支持，退化为字符串前缀判断"，实际代码是 IPv6 CIDR 直接 `return false`（不命中），仅 `*` 通配支持 IPv6。行为正确（不会误放行），仅注释措辞偏差。
+- 类型：注释与实现不符
+- 方向：—
+- 是否需确认：否。
+
+---
+
+## C、文档一致性问题（mdlist）
 
 > 方向标注：**代码领先**（md 落后）/ **文档领先**（md 领先/代码落后）/ **都错**。
 
-### 代码领先（md 落后）
+### 🟡 C1. `docs/04-configuration.md` match `target` 枚举漏列 `origin`（中·代码领先）
 
-#### D1. `docs/10-api-reference.md` 漏列多个已实现端点（高·文档落后）
-- 代码已实现：`GET /sites/templates`(router.js L66)、`GET /rules/global`(router.js L83)、`PUT /sites/:host/basics`、分段端点 `/sites/:host/{rules|security}`、`system` handler。
-- 前端 `web/api.js` 已调用 `/sites/templates`、`/rules/global`，但 API 文档无对应说明。README 目录结构亦漏列 `src/api/handlers/system.js`。
-- **✅ 已修复**：`10-api-reference.md` 的 Sites 表补 `GET /sites/templates`、`PUT /sites/{host}/{basics,rules,security}` 分段端点；新增「全站通用规则（兜底）」小节列 `GET/PUT /rules/global`；`/system/*` 此前已在「系统 System」节列出。`system` handler 漏列 README 目录项，延后并入 D10 一并处理。
+- 文档位置：`docs/04-configuration.md:196`（列 15 个值，缺 `origin`）。
+- 代码真相：`src/config/defaults.js:189-193` 的 `MATCH_TARGETS` 含 `origin`；`web/app.js:954` 有 `{value:'origin', label:'回源目标（源站 ID…）'}`。
+- 差异：`origin` 是"③ 首要分流后按负载均衡选出的回源对象"维度，前端与 schema 都支持，文档枚举漏列。
+- 方向：代码领先（文档落后）
+- 是否需确认：否，补 `origin` 即可。
 
-#### D2. `docs/04-configuration.md` 规则匹配 `target`/`op` 命名停留在旧版（中·文档落后）
-- 文档 `target` 含 `asn`/`country`/`scheme`，`op` 含 `in`/`notIn`/`eq`/`neq`/`contains`；
-- 代码 `contracts.js` 的 `MatchTarget` 是 `host/path/fullUrl/query/extension/filename/directory/method/protocol/header/cookie/clientIp/clientCountry/userAgent/referer`，`MATCH_OPERATORS` 是 `equal/notEqual/contain/notContain/prefix/notPrefix/suffix/notSuffix/regex/notRegex/exists/notExists`。
-- 后果：文档里的 `in/notIn`、`eq/neq`、`asn/country/scheme` 会被 schema 枚举校验直接拒绝（视为无效条件跳过），文档与代码严重脱节。
-- **✅ 已修复**：`04` 的 2.2 match 节 `target` 枚举已更新为代码全集（含 `fullUrl/extension/filename/directory/clientCountry`，剔除 `asn/country/scheme`），`op` 表改为 `equal/notEqual/contain/notContain/prefix/notPrefix/suffix/notSuffix/regex/notRegex/exists/notExists`，并标注旧名 `eq/neq/in/notIn/contains` 已废弃会被拒绝，附快捷写法映射。
+### 🟡 C2. `docs/11-architecture.md` 目录树引用不存在的 `proxy/image.js`（中·文档领先）
 
-#### D3. `docs/09-local-development.md` 第 4 步示例把源站地址填成 `https://example.com`（带协议）（中·文档自相矛盾）
-- 与 docs/04、FAQ 反复强调「addr 不能带协议」直接冲突，会误导用户配置错误。
-- **✅ 已修复**：`09` 步骤 4 源站地址示例改为 `example.com`，并加注「addr 不能带协议，协议由 `scheme` 字段决定（默认 https）」，与 04/FAQ 一致。
+- 文档位置：`docs/11-architecture.md:49`（`proxy/image.js # 图片优化`）、第 104、151 行亦引用。
+- 代码真相：`src/proxy/` 下无 `image.js`（搜索 0 结果）；图片优化逻辑在 `src/proxy/headers.js` 等内，未独立成文件。
+- 方向：文档领先（代码无该文件）
+- 是否需确认：否，删除该文件名引用或补真实位置。
 
-#### D4. `docs/02-prerequisites.md` 构建步骤描述与 `build.mjs` 实际日志不符（低·文档落后）
-- 文档写「[1/4] 打包 Worker → [2/4] 输出静态 → [3/4] 生成入口薄壳 → [4/4] 自检」；
-- 实际代码是「[1/4] 内联兜底 → [2/4] 输出静态 → [3/4] 打包 Worker → [4/4] 自检」，且无「生成入口薄壳」步骤（旧架构残留描述）。
-- **✅ 已修复**：`02` 步骤 5 的预期输出已改为真实日志（`[1/4] 内联前端资源（兜底）` → `[2/4] 输出静态资源目录 dist/public` → `[3/4] 打包 Worker` → `[4/4] 产物自检`），并加注「四个步骤实际为…，没有生成入口薄壳这一步（旧架构残留）」。
+### 🟡 C3. `docs/04-configuration.md:71` 误称 `wrangler.toml` 已带 `sockets` 兼容标志（中·文档与 toml 矛盾）
 
-#### D5. `docs/04` IP 白名单「上限 64 条」描述与代码语义不符（低·文档内部一致但含义错）
-- 代码 `strArr(input.ipWhitelist, LIMITS.LIST_MAX, 64)` 中 `LIST_MAX=200` 是条数上限，64 是单项字符长度上限。文档把「字符长度」误写为「条数」。
-- **✅ 已修复**：`04` 的 3. 安全节 `ipBlacklist`/`ipWhitelist` 改为「**单条最多 64 字符**，总条数上限 200」的准确描述。
+- 文档位置：`docs/04-configuration.md:71`（"CF 端自定义回源 Host 必须用 Workers 形态部署（`wrangler.toml` 已带 `sockets` 兼容标志）"）。
+- 代码真相：`wrangler.toml:11-14` 注释明确"**不要在此加 sockets**"，`compatibility_flags = ["nodejs_compat"]`；`cloudflare:sockets` 由 `socketEngine.js` 运行时动态 `import`（build.mjs:273 显式列出虚拟模块）。文档表述与 toml 及 03/08/09 多篇"不需要 sockets flag"的描述直接矛盾。
+- 方向：文档领先（错误描述）
+- 是否需确认：否，改为"Workers 形态（`cloudflare:sockets` 运行时动态加载，无需 flag）"。
 
-### 文档领先（md 领先 / 代码落后）
+### 🟡 C4. `docs/08-faq.md:128` 规则匹配仍列旧名 `asn/country/scheme`（中·文档内部矛盾/都错）
 
-#### D6. README 第 17 行宣称「流量序列可点击跳转、可拖拽调优先级」（中·定位不符）
-- 后端 `src/` 无任何「流量序列」可视化端点/数据接口，该功能仅存在于前端 `web/app.js`（需向其确认是否真的渲染了可拖拽序列图）。README 把它描述为核心特性却未注明归属前端，存在虚假宣传风险。
-- **✅ 误报/已实现**：经核查前端 `web/app.js` 的 `wireRuleDrag`（dragstart/dragover/drop + `API.sites.save` 持久化）已完整实现拖拽排序，「可拖拽调优先级」真实可用。D6 原"虚假宣传"判断不成立，仅余"README 未注明归属前端"轻微项，可后续补注。
+- 文档位置：`docs/08-faq.md:128`（"可匹配 host/path/…/userAgent/asn/country/scheme 等"）。
+- 代码真相：`asn/country/scheme` 正是 `docs/04-configuration.md:202` 明确宣布**已废弃**的旧名；真实枚举见 `defaults.js:189-199`（`clientCountry`/`clientIp` 等）。
+- 方向：都错（08 用旧名，04 已废弃）
+- 是否需确认：否，08 删除 `asn/country/scheme`。
 
-#### D7. `accel` 回源 Host 模式文档语义与代码实现相反（已并入 C2，文档侧属「文档领先」）
-- docs/04、contracts 均声称支持 `accel`（回源 Host 用加速域名），但 `buildOriginUrl` 无该分支。
-- **✅ 已解决（随 C2 闭合）**：C2 已让 `accel` 真正生效（`buildOriginUrl` 增分支 + `dispatch` 设 Host + `pipeline` 三参修正），文档语义与代码现已一致，无需降级文档。
+### 🟡 C5. `fallbackStatusCodes` 旧字段名残留于多篇文档（中·代码领先）
 
-### 文档/注释描述不符（轻微）
+- 文档位置：`docs/11-architecture.md:53,104,235`、`docs/08-faq.md:134`（均写 `fallbackStatusCodes` 如 502/503）。
+- 代码真相：`src/` 全仓无 `fallbackStatusCodes` 字段；实际为 `contracts.js:429` 的 `DEFAULT_RETRY_ON` / schema 的 `retryOn`。
+- 方向：代码领先（旧名残留）
+- 是否需确认：否，全局替换 `fallbackStatusCodes` → `retryOn`。
 
-#### D8. `wrangler.toml` 第 20-24 行注释写静态资源物理路径为 `dist/public/{adminPath}/assets/*`
-- 实际 `build.mjs` 已解耦为固定 `dist/public/assets/`（无 adminPath 段）。运行正确，仅注释误导。同时见 `docs/11-architecture.md` 第 290-294 行、README 第 90 行。
-- **✅ 已修复**：`wrangler.toml` 第 24 行注释改为「`dist/public/assets/*`，固定物理路径，与 adminPath 解耦」。
+### 🟢 C6. `docs/04-configuration.md:39` `stickyTtl` 字段文档领先（低·文档领先）
 
-#### D9. `edgeone.json` `NODE_VERSION=20` 与 `docs/02`「要求 Node ≥22」轻微冲突（低）
-- **✅ 已修复**：`edgeone.json` 的 `NODE_VERSION` 已由 `20` 改为 `22`，与 `docs/02`「要求 Node ≥ 22」及 GitHub Actions（node-version: '22'）一致。
+- 文档位置：`docs/04-configuration.md:39`（"stickyTtl 仅 iphash 策略生效：会话保持时长（秒）"）。
+- 代码真相：`src/config/schema.js:1030` 的 `OriginPool` 校验仅含 `strategy` 枚举，无 `stickyTtl` 字段；contracts `OriginPool` typedef 也无。文档描述了代码未实现的字段。
+- 方向：文档领先（代码无此字段）
+- 是否需确认：否，删除或标注"规划中"。
 
-#### D10. README 目录结构漏列 `src/api/handlers/system.js` 与 `proxy/image.js`（低，属精简省略，但 `system` 是真实 handler）
-- **✅ 已修复（部分）**：README 目录结构已补上真实的 `src/api/handlers/system.js`（`handlers/` 注释行加入 `system`）。经核查全仓 `src/` 下**并无 `proxy/image.js`**（图片优化逻辑在 `src/proxy/rewrite.js` 等内，未独立成 `image.js`），原 D10「漏列 proxy/image.js」属误报，无需补。
+### 🟢 C7. `docs/02-prerequisites.md` 内部 Node 版本矛盾（低·文档内部不一致）
 
----
+- 文档位置：`docs/02-prerequisites.md:12` 要求 "Node.js ≥ 22"，但第 34 行 nvm 示例 `nvm install 20` / `nvm use 20`。
+- 代码真相：edgeone.json `NODE_VERSION=22`、README 要求 ≥22、GitHub Actions `node-version:'22'` 一致；02 的 20 示例自相矛盾。
+- 方向：都错（内部不一致）
+- 是否需确认：否，统一为 22。
 
-## 三、需拍板的关键决策点
+### 🟢 C8. "三步构建"措辞滞后（低·文档落后）
 
-1. ~~**C1（originUrl undefined）**：是否真为 bug？~~ **已决策并修复**：确认为 P0，已统一预构 originUrl。
-2. ~~**C2/D7（accel 模式）**：补 `buildOriginUrl` 的 `accel` 分支，还是修正 `resolveHostHeader` 调用参数 + 文档统一三参语义？~~ **已决策并修复**：采用「让 accel 真正生效」方向（代码补分支 + 三参修正），D7 随 C2 闭合。
-3. ~~**C3/C5（签名 URL 生成器、全局限流）**：补前端接线，还是降级为「实验特性」并在文档标注未启用？~~ **已决策**：降级为实验特性（前端+文档标注待开发），不删代码。
-4. ~~**D1-D2（API 文档、配置 target/op）**：补文档对齐代码，还是代码回退到文档命名？~~ **已决策并修复**：补文档对齐代码（D1 补端点、D2 改 target/op 枚举）。
-5. **C6（gen-deploy-config 拉取失败策略）**：~~是否失败即中断？~~ **已决策并修复**：选择 **A（严格模式）**——拉取失败（含凭据缺失 / 网络错误 / 权限不足 / **Worker 从未部署导致 /settings 返回 404**）一律 `process.exit(1)` 中断流水线（CNB + GitHub 均覆盖）。取舍：首次部署需先在 Dashboard 手动创建 Worker 并绑定 CDN_KV/CDN_R2/CDN_DB，再触发 CI，绝不用空绑定覆盖。
-6. **C13/C14（index.js、keepalive.py）**：删除游离文件，还是补文档说明其独立用途？—— **已决策**：C13 `index.js` 零引用、EO 下会误上传，**删除**；C14 `keepalive.py` 实际被 CNB `vscode` 远程开发事件 `launch: python keepalive.py` 保活预览使用，**保留**（属误报）。
+- 文档位置：`docs/11-architecture.md:290`、`README.md:92`、`docs/02-prerequisites.md:127` 称"三步构建"（内联兜底+dist/public+打包），实际 `build.mjs` 为四步（多"产物自检" `verify`）。
+- 代码真相：`build.mjs` 日志 `[1/4]~[4/4]`，02 的步骤 5 示例日志已正确，但"三步"计数措辞仍残留。
+- 方向：文档落后
+- 是否需确认：否，统一"四步构建"。
 
----
+### 🟢 C9. `docs/10-api-reference.md:16` 未说明 `/auth/me` 免登录（低·文档不严谨）
 
-## 三、流量序列 UI 层问题（人工审核发现）
-
-> 来源：用户人工审核管理面「流量序列」交互。以下为前端 `web/app.js`（产物 `src/ui.gen.js` / `dist/public/assets/app.js`）中阶段卡片与抽屉的归属/可编辑性逻辑缺陷。后端数据面本身正确，问题集中在「前端如何按阶段分配/限制规则与抽屉」。
-> 阶段体系依据：`docs/12-request-flow.md` 第 290-322 行 18 阶段映射表；`docs/11-architecture.md` 第 272-284 行；`docs/05-user-guide.md` 第 189-215 行。
-
-### 🔴 高严重
-
-#### U1. 阶段抽屉越界：URL 重写/重定向/强制 HTTPS 等阶段卡片能看到新建站点自动生成的 3 条规则
-- 位置：`web/app.js` 流量序列阶段卡片渲染与「受限规则抽屉」分配逻辑（对应 docs/12 第 308-311 行）
-- 现象：新建站点后会自动新建 3 条规则。点击「⑤ URL 重写」「⑥ 重定向」「⑦ 强制 HTTPS/直接响应」等**不同阶段的卡片**时，都能看到这 3 条规则，违背了「每个阶段各自限定自己的抽屉、互不越界」的设计（docs/11 第 281 行、docs/05 第 208 行均强调「每个阶段卡片本身是一个独立的规则引擎」）。
-- 推断：前端按阶段筛选规则的逻辑未正确按 `action` 类型隔离，导致同一批规则被错误平铺进多个阶段卡片。属数据归属/阶段隔离 bug。
-- 类型：UI 逻辑 bug（抽屉越界）
-- **✅ 已修复**：根因为 `renderRuleStage` 调用 `openRulesDrawer(site.host, opts)` 时 `opts` 缺少 `match` 字段，导致 `openRulesDrawer` 第 2469 行 `confined && opts.match` 为假、回退显示全部规则。已为 ⑤⑥⑦⑧⑨⑪⑯ 全部 `renderRuleStage` 调用补上 `match: matchFn`，使抽屉严格按阶段 action 类型过滤。构建已重新生成 `src/ui.gen.js` / `dist/public/assets/app.js`。
-
-### 🟡 中严重
-
-#### U2. Origin Rules（⑨）阶段平铺了 3 条规则，而非归入各自抽屉
-- 位置：`web/app.js` seqStage ⑨ 渲染（对应 docs/12 第 312 行）
-- 现象：⑨ Origin Rules 的作用是「更改回源目标：回源 Host、回源连接参数（引擎/协议/端口）或候选源站」。但流量序列里直接看到**3 条规则被平铺**在 ⑨ 阶段下（非抽屉形态），与该阶段应作为「受限规则抽屉 · Origin Rules」承载对应 action 的规则相悖。
-- 推断：新建站点自动生成的 3 条规则中包含了 origin 类 action，前端未把它们收敛进 ⑨ 的受限抽屉，而是平铺展示，造成阶段视图错乱。
-- 类型：UI 逻辑 bug（平铺越层）
-- **✅ 已修复**：与 U1 同根因——⑨ 的 `renderRuleStage` 调用同样缺少 `match` 字段，导致抽屉展示全部规则（平铺越层）。已补上 `match: (a) => a.poolId || (a.inlineOrigins||[]).length || ...`，⑨ 抽屉现在只显示 origin 类规则。
-
-#### U3. 阶段 ⑫ 缓存键点击后与「① 匹配站点」视图一致且联动 —— 可修改性无意义
-- 位置：`web/app.js` seqStage ⑫（对应 docs/12 第 315 行：⑫ 缓存键 → 站点基础抽屉 cacheGen → `PUT /sites/:host/basics`）
-- 现象：点击阶段 ⑫（缓存键）看到的编辑内容与阶段 ①（匹配站点）的站点基础抽屉**完全一致**，且二者**联动**（改一边另一边同步变）。既然 ⑫ 只是 ① 基础配置里的 `cacheGen` 字段的另一种入口，它作为独立「可修改阶段」的意义存疑——重复入口、易让用户误以为是两个不同配置。
-- 推断：前端把多个阶段（① 站点基础、⑫ 缓存键）都映射到同一个 `basics` 抽屉且未做字段聚焦，造成「看起来可改、实则与别处重复联动」。需决策：要么 ⑫ 改为只读展示 `cacheGen`，要么聚焦只显示 cacheGen 字段、断开与 ① 的视觉联动。
-- 类型：UI 逻辑 bug（重复可编辑入口 + 联动歧义）
-- **✅ 已修复**：⑫ 阶段卡片点击不再调用 `openSiteDrawer(site.host, 'sec-basic')`（与 ① 完全相同的入口导致重复联动），改为新增独立的 `openCacheGenDrawer(host, cacheRuleCount, hasCache)`——仅聚焦编辑 `cacheGen` 代次字段，明确提示「其它缓存设置属 ⑪ Cache Rules 阶段」。与 ① 完全解耦、无联动。
-
-#### U4. 回源循环（⑭）里的「本源站专用回源规则」属冗余第三层源站级规则，应移除但可借鉴其完善度
-- 位置：`web/app.js` seqStage ⑭ 子步骤；后端对应 `src/balancer/failover.js` 源站级 `origin.rewrite`/`origin.hostHeader` 等（对应 docs/12 第 317 行、docs/04 第 242 行「纯两层架构」）
-- 现象：⑭ 回源循环中存在「本源站专用回源规则」（第三层源站级规则），其字段（路径重写示例、预览等）很完善。但新版流量序列已统一为**纯两层架构（全站级 + 站点级）**，源站级的路径重写/Host 等完全可由各阶段以 `if 回源模板 = xxx` 条件来实现，**不应再独立存在**。
-- 决策：应移除该冗余的源站级专属规则层；但其「路径重写的示例、预览」等交互完善度较高，可借鉴来完善对应阶段（⑤ URL 重写等）卡片抽屉的功能。
-- 类型：架构冗余（前端/数据模型）+ 可借鉴点
-- **✅ 已修复**：① 移除 `openPoolDrawer` 的 `addOrigin` 内「本源站专用回源规则（可选）」section（含 rewriteEditor/cacheEditor/headerEditor/超时/跟随3xx 编辑器）、`row._extraReaders` 赋值、`extraReaders` 声明，以及提交时的 `readOriginExtra(row, legacy)` 调用与 `readOriginExtra` 函数定义。源站抽屉现在只承载「地址 + 负载均衡」，符合纯两层架构。② 可借鉴部分已天然满足：`rewriteEditor`（web/app.js 第 1278 行起）本身已具备示例路径、实时预览、小白友好一键套用示例，且 `buildRuleCard`（第 1599 行）对 ⑤ URL 重写已复用同一 `rewriteEditor`，无需重复建设。
-
-#### U5. ③ 首要分流不应可修改：它是抽象虚拟临时对象，仅作流程节点
-- 位置：`web/app.js` seqStage ③（对应 docs/12 第 306 行：③ 首要分流 → 初始回源对象抽屉 · 源站方式 → `PUT /sites/:host/basics` poolId）
-- 现象：③ 首要分流展示了「初始回源对象抽屉」并允许修改。但 ③ 是由「单站点直接选定单源站 / 单源站池多源站按负载均衡自动选定」推导出的**临时虚拟对象**，本身不应被直接干预修改。若要改回源对象，应在 ⑨ Origin Rules 位置更改，而非在 ③ 这个流程节点上改。
-- 推断：前端把 ③ 当成了可编辑抽屉（甚至可改 poolId），违背其「抽象虚拟临时对象」定位。应改为只读流程节点，编辑入口收敛到 ⑨ / basics 的源站方式配置。
-- 类型：UI 逻辑 bug（虚拟对象被暴露为可编辑）
-- **✅ 已修复**：③ 阶段卡片由「可点击打开 `openInitialOriginDrawer` 编辑 poolId」改为**只读推导节点**（`seqStage` 的 `onClick` 改为 toast 提示「③ 是推导出的临时虚拟回源对象，不可直接编辑，请到 ① / 源站页 / ⑨ 修改」，`owner` 置 `null`）。编辑入口已收敛至 ① 站点基础、源站池、⑨ Origin Rules。
+- 文档位置：`docs/10-api-reference.md:16`（"除 POST /auth/login 和 POST /auth/logout 外，所有接口都需要登录"）。
+- 代码真相：`src/api/router.js:57-60` 的 `GET /auth/me` 声明 `auth:false` 也免登录。
+- 方向：文档轻微落后
+- 是否需确认：否，补一句 `/auth/me` 免登录。
 
 ---
 
-## 附：分类汇总
+## D、流量序列 UI（源文件层 vs 产物层）
 
-| 编号 | 严重级 | 类型 | 方向 |
-|---|---|---|---|
-| C1 | 高 | bug/逻辑错乱 | — | **✅ 已修复** |
-| C2 | 高 | bug/描述不符 | — | **✅ 已修复** |
-| C3 | 中 | 空挂 | — | **🔻 已降级为实验特性（待开发）** |
-| C4 | 中 | 空挂/冗杂（原误判） | — | **✅ 已纠正：useCacheApi 非孤立，`cacheMatch/cachePut/cacheDelete` 内部依赖，CF/EO 双平台分支 API，保留** |
-| C5 | 中 | 空挂 | — | **🔻 已降级为实验特性（待开发）** |
-| C6 | 中 | 逻辑风险 | — | **✅ 已修复** |
-| C7 | 低 | 空挂/预留 API | — | **✅ 核查：isEncodedKey 在用、encodePrefix 为 CF/EO KV list 预留，保留** |
-| C8 | 低 | 测试辅助/平台 API | — | **✅ 核查：缓存/能力探测公共 API + 测试辅助，保留** |
-| C9 | 低 | 空挂/冗杂 | — | **🗑️ 已删 hasKV(env) 死代码；preloadKV 在用保留** |
-| C10 | 低 | 导出常量（前端未接线） | — | **✅ 核查：后端常量就绪、前端未应用，保留** |
-| C11 | 低 | 导出 API（前端未应用） | — | **✅ 核查：后端就绪、前端未接线，保留** |
-| C12 | 低 | 工具库/冗杂 | — | **✅ 核查：Web Crypto 工具库（CF/EO 兼容），保留** |
-| C13 | 低 | 游离文件 | — | **🗑️ 已删除** |
-| C14 | 低 | 游离/文档缺失 | — | **✅ 保留（CNB 流水线使用，属误报）** |
-| C15 | 低 | 描述不符 | — | **✅ 已修复（build.mjs 注释三步→四步）** |
-| C16 | 低 | 冗杂 | — | **✅ 已修复（minifyCss 提取到 main 只调一次）** |
-| D1 | 高 | 文档落后 | 代码领先 | **✅ 已修复** |
-| D2 | 中 | 文档落后 | 代码领先 | **✅ 已修复** |
-| D3 | 中 | 文档自相矛盾 | 代码领先 | **✅ 已修复** |
-| D4 | 低 | 文档落后 | 代码领先 | **✅ 已修复** |
-| D5 | 低 | 文档含义错 | 代码领先 | **✅ 已修复** |
-| D6 | 中 | 定位不符 | 文档领先 | **✅ 误报/已实现** |
-| D7 | 中 | 描述不符 | 文档领先 | **✅ 已解决（随 C2）** |
-| D8 | 低 | 注释误导 | — | **✅ 已修复（wrangler.toml 路径注释）** |
-| D9 | 低 | 冲突 | — | **✅ 已修复（edgeone.json NODE_VERSION 22）** |
-| D10 | 低 | 遗漏 | — | **✅ 已修复（system.js 已补；image.js 误报）** |
-| U1 | 高 | UI 逻辑 bug（抽屉越界） | — | **✅ 已修复** |
-| U2 | 中 | UI 逻辑 bug（平铺越层） | — | **✅ 已修复** |
-| U3 | 中 | UI 逻辑 bug（重复入口+联动） | — | **✅ 已修复** |
-| U4 | 中 | 架构冗余+可借鉴 | — | **✅ 已修复** |
-| U5 | 中 | UI 逻辑 bug（虚拟对象可改） | — | **✅ 已修复** |
+> 关键前提：D 类所有"源文件层已正确"的判断，都依赖 **A1 闭合（重新 build 产物）** 才对线上生效。在 A1 未解决前，线上跑的是旧产物，U 类现象仍可能出现。
+
+### 🟡 D1. 阶段编号/术语漂移：前端"④ 匹配规则""③ 源站"与 docs/12 体系冲突（中·一致性）
+
+- 位置：`web/app.js:1425`（`④.7 候选源站`）、`:1948`、`:1972`（`流量序列 → ④ 匹配规则`）、`:1847`（`openSiteDrawer` 提示"② 安全 / ③ 源站 / ④ 规则"）。
+- 现象：`docs/12-request-flow.md:290-322` 规定 ③=首要分流、④=URL 规范化、⑤~⑯=规则阶段、⑭=源站、②=安全。但前端把"规则"统称"④ 匹配规则"、把"源站"称为"③"，与文档阶段编号错位；且"④ 匹配规则"在 docs/12 中 ④ 实为"URL 规范化"，用户会在文档里找不到对应阶段（`docs/05-user-guide.md:213` 也写"③ 源站"，与 docs/12 的 ③=首要分流冲突）。
+- 类型：文档-代码一致性（阶段术语漂移）
+- 方向：都错（前端文案与 12 文档体系不一致）
+- 是否需确认：否，建议统一前端文案到 docs/12 的 18 阶段编号。
+
+### 🟢 D2. 源文件层 U1-U5 已正确（复核结论，非新问题）
+
+- 审查员独立核查 `web/app.js` 源文件：U1（抽屉越界，⑤⑥⑦⑧⑨⑪⑯ 均传 `match`）、U2（⑨ 平铺，match 覆盖 origin 类）、U3（⑫ 独立 `openCacheGenDrawer` 解耦 ①）、U4（⑭ 源站级规则引擎已移除，仅留物理 Host 字段）、U5（③ 只读 toast，owner=null）在源码层**均已正确**。
+- **但**：上述修复**仅存在于 `web/app.js` 源文件**，因 A1（未重新 build）而**未进入任何产物**，线上不生效。故 D2 不构成独立待改项，而是被 A1 吸收。
+- 方向：—
+- 是否需确认：随 A1。
+
+---
+
+## 三、汇总表
+
+| 编号 | 严重级 | 类型 | 方向 | 是否需确认 |
+|---|---|---|---|---|
+| A1 | 高 | 构建产物过期 / 未重新 build | — | **是（P0）** |
+| B1 | 中 | 逻辑空挂（误删源站风险） | — | 是 |
+| B2 | 中 | 可用性风险（signedUrl 空 secret） | — | 是 |
+| B3 | 低 | 死代码 | — | 否 |
+| B4 | 低 | 未用公共 API | — | 否 |
+| B5 | 低 | 逻辑冗杂（hourKey 三处） | — | 否 |
+| B6 | 低 | 轻微冗余 | — | 否 |
+| B7 | 低 | 注释误导 | — | 否 |
+| C1 | 中 | 文档落后（target 漏 origin） | 代码领先 | 否 |
+| C2 | 中 | 文档领先（proxy/image.js 不存在） | 文档领先 | 否 |
+| C3 | 中 | 文档与 toml 矛盾（sockets flag） | 文档领先 | 否 |
+| C4 | 中 | 文档内部矛盾（asn/country/scheme 旧名） | 都错 | 否 |
+| C5 | 中 | 文档落后（fallbackStatusCodes 旧名） | 代码领先 | 否 |
+| C6 | 低 | 文档领先（stickyTtl） | 文档领先 | 否 |
+| C7 | 低 | 文档内部不一致（Node 22/20） | 都错 | 否 |
+| C8 | 低 | 文档落后（三步构建） | 文档落后 | 否 |
+| C9 | 低 | 文档不严谨（/auth/me 免登录） | 文档落后 | 否 |
+| D1 | 中 | 阶段术语漂移（前端 vs docs/12） | 都错 | 否 |
+| D2 | — | 源文件 U1-U5 已正确（被 A1 吸收） | — | 随 A1 |
+
+---
+
+## 四、建议讨论顺序（待确认后决定怎么改）
+
+1. **A1（P0）**：先确认实际部署形态是否依赖 `src/ui.gen.js` / `dist/public/assets/app.js`，并重新 `npm run build` 生成产物、比对符号，确认流量序列 UI 进入线上。这是其它 UI 类问题（D1/D2）生效的前提。
+2. **B1**：`pools.collectRefs` catch 置 `truncated=true`，防止误删源站。
+3. **B2 / C 类文档**：多为文档对齐代码或低风险校验，可批量处理。
+4. **B3-B7、C6-C9**：清理/措辞类，优先级最低。

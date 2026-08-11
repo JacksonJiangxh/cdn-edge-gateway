@@ -112,7 +112,14 @@ async function buildFrontendJs() {
   const apiJs = await readSafe(join(WEB, 'api.js'));
   const appJs = await readSafe(join(WEB, 'app.js'));
   let frontendJs = apiJs + '\n' + appJs;
-  if (MINIFY) {
+  // 方案 Y（A1 修复，当前暂定状态1）：前端 UI 资源（api.js+app.js）**不压缩**，
+  // 避免 esbuild minify 的死代码消除把"间接引用注册"的 UI 函数（流量序列/站点管理
+  // 等，经由 ROUTES/TITLES 对象属性动态取值）误杀，导致线上管理面残缺。经实测，
+  // 仅挂 window（方案 X）在 bundle:false+minify:true 下仍会被 esbuild 副作用分析
+  // 整条删除，不可靠；故采用方案 Y：前端不压缩、Worker 仍走全局 MINIFY 压缩。
+  // 代价仅管理面静态 JS 139KB→187KB、兜底 ui.gen.js 文件 446KB，均在 CF 1MB 内。
+  const FRONTEND_MINIFY = false;
+  if (FRONTEND_MINIFY) {
     try {
       const r = await esbuild.build({
         stdin: { contents: frontendJs, resolveDir: WEB, loader: 'js' },
