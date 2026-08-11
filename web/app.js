@@ -393,7 +393,7 @@
         })(),
       ]),
     ]));
-    wrap.appendChild(el('p', { class: 'hint' }, '本图是请求从进入网关到返回客户端的真实处理顺序（顺序固定、不可更改）。每个环节卡片说明「流量走到这一步在干什么」；有可干预配置项的环节（① 站点 / ② 安全 / ③ 源站 / ④ 规则 / ⑥ cacheGen / ⑧ 源站池）点击可编辑，无配置项的环节（⑤⑦⑨⑩⑪⑫）为纯只读。规则引擎统一在 ④ 一个环节编辑——规则上的各类动作会分别作用到后续真实环节（回源改写→⑧、响应头→⑩、缓存策略→⑪），但前端不拆分规则。'));
+    wrap.appendChild(el('p', { class: 'hint' }, '本图是请求从进入网关到返回客户端的真实处理顺序（顺序固定、不可更改），采用 Cloudflare 流量序列风格：每个环节卡片即一个规则引擎（没有规则的环节为纯只读）。① 站点 / ② 安全 / ③ 源站 / ④ URL 重写~Cache Rules / ⑥ cacheGen / ⑧ 源站池 均可点击编辑；⑤⑦⑨⑩⑪⑫ 为运行时推导或固定行为。'));
 
     const hostSel = $('select', wrap);
     const flow = el('div', { class: 'seq-flow' });
@@ -477,7 +477,7 @@
         () => openSecurityDrawer(site.host, 'sec-ratelimit'), '安全防护抽屉 · 请求限速'));
 
       // ── ③ 首要分流：选定初始回源对象 ────────────────────────────
-      flow.appendChild(seqGroup('③', '首要分流：选定「初始回源对象」', '整条管线的首要规则条件；仅作为 ④ 规则引擎的 origin 匹配维度'));
+      flow.appendChild(seqGroup('③', '首要分流：选定「初始回源对象」', '整条管线的首要规则条件；作为 ④「Origin Rules」阶段可选的 origin 匹配维度'));
       const defPool = APP_DATA.pools.find((p) => p.id === site.poolId);
       const defKind = defPool ? poolKind(defPool) : '';
       flow.appendChild(seqStage('🎯', '③ 初始回源对象 initialOrigin',
@@ -491,23 +491,76 @@
         site.poolId ? '已配置' : '未配置', 'sec-origin',
         () => openInitialOriginDrawer(site.host, 'sec-origin'), '初始回源对象抽屉 · 源站方式'));
 
-      // ── ④ 匹配规则（规则引擎环节，唯一一个规则编辑入口）──────────
-      // ④ 就是「匹配规则」这一个真实环节：引擎按 priority 降序逐条匹配，命中即停。
-      // 一条规则上挂的各类 action（改请求头 / 改路径 / 改 Host / 改源站 / 改响应头 / 缓存策略）
-      // 都属于「这条规则」，编辑入口只有这一个 ④ 卡片里的规则编辑器——它们分别作用到后续
-      // 真实环节（回源请求、响应、写缓存），但前端不把它们拆成 ④.3~④.8 等子环节。
-      flow.appendChild(seqGroup('④', '匹配规则 matchRule（规则引擎）', '引擎按 priority 降序逐条匹配，命中即停。规则上的所有 action 在此统一编辑，并分别在后续真实环节生效：回源改写→⑧、响应头→⑩、缓存策略→⑪。'));
-      const hasGlobal = true; // 全站通用规则始终存在（兜底）
-      flow.appendChild(seqStage('📜', '④ 匹配规则（本站 + 全站兜底）',
-        rules.length
-          ? `${rules.length} 条本站规则按优先级从上到下匹配；另有全站通用规则兜底（站点未命中时回落）。点击编辑任意规则及其全部 action。`
-          : '本站尚未添加任何规则，整站直接回源到 ③ 选出的初始源站；全站通用规则仍作为兜底生效。',
-        rules.length ? `${rules.length} 条` : '仅兜底', 'sec-rules',
-        () => openRulesDrawer(site.host), '路由规则抽屉（编辑全部规则与 action）'));
-      // 命中规则列表（按优先级降序）挂在本环节卡片下，可拖拽调整优先级。
-      if (rules.length) {
-        flow.appendChild(el('div', { class: 'seq-rule-list' },
-          rules.map((r) => {
+      // ── ④ 规则驱动阶段（CF 风格：每个阶段卡片就是一个规则引擎入口）──
+      // 流量走到这里时，各阶段规则引擎依次判断；每个阶段可有自己的规则列表。
+      // 后端仍是统一 rules 数组，前端按 action 类型把规则分配到对应阶段展示/编辑。
+      flow.appendChild(seqGroup('④', '规则驱动阶段', '每个阶段卡片都是独立规则引擎：流量经过时，由该阶段的规则决定是否执行对应动作。阶段之间按流程顺序执行，阶段内部按 priority 降序匹配。'));
+
+      const ACTION_STAGES = [
+        {
+          key: 'rewrite', icon: '✂️', title: 'URL 重写',
+          summary: '按规则改写客户端请求路径（不含源站 pathPrefix）',
+          match: (a) => a.rewrite && a.rewrite.type && a.rewrite.type !== 'none',
+          opts: { title: 'URL 重写规则', owner: '路由规则抽屉 · URL 重写', allowedOps: ['rewrite'], hideTargetPool: true },
+        },
+        {
+          key: 'redirect', icon: '↪️', title: '重定向规则',
+          summary: '把请求重定向到其它 URL',
+          match: (a) => a.redirect && a.redirect.enabled,
+          opts: { title: '重定向规则', owner: '路由规则抽屉 · 重定向', allowedOps: ['redirect'], hideTargetPool: true },
+        },
+        {
+          key: 'directResponse', icon: '📄', title: '直接响应',
+          summary: '命中后直接用自定义 body/status 响应，不再回源',
+          match: (a) => a.directResponse && a.directResponse.enabled,
+          opts: { title: '直接响应规则', owner: '路由规则抽屉 · 直接响应', allowedOps: ['directResponse'], hideTargetPool: true },
+        },
+        {
+          key: 'forceHttps', icon: '🔒', title: '强制 HTTPS',
+          summary: '命中 http 请求时返回 301/307 跳转 https',
+          match: (a) => a.forceHttps,
+          opts: { title: '强制 HTTPS 规则', owner: '路由规则抽屉 · 强制 HTTPS', allowedOps: ['forceHttps'], hideTargetPool: true },
+        },
+        {
+          key: 'reqHeaders', icon: '📤', title: '修改请求头',
+          summary: '在回源请求发出去之前增/删/改 HTTP 头',
+          match: (a) => { const h = a.reqHeaders || {}; return (h.set && Object.keys(h.set).length) || (h.remove || []).length; },
+          opts: { title: '修改请求头规则', owner: '路由规则抽屉 · 修改请求头', allowedOps: ['reqHeaders'], hideTargetPool: true },
+        },
+        {
+          key: 'origin', icon: '🔀', title: 'Origin Rules',
+          summary: '更改回源目标：回源 Host、候选源站池或内联源站',
+          match: (a) => a.poolId || (a.inlineOrigins || []).length || (a.hostHeader && a.hostHeader.mode && a.hostHeader.mode !== 'accel'),
+          opts: { title: 'Origin Rules', owner: '路由规则抽屉 · Origin Rules', allowedOps: ['hostHeader', 'targetPool'], hideTargetPool: false },
+        },
+        {
+          key: 'cache', icon: '📥', title: 'Cache Rules',
+          summary: '缓存策略、节点响应头改写、回源超时、跟随 3xx 等',
+          match: (a) => {
+            const h = a.respHeaders || {};
+            return (a.cache && (a.cache.enabled || a.cache.mode === 'noCache'))
+              || (h.set && Object.keys(h.set).length) || (h.remove || []).length
+              || (a.clientIpHeader && a.clientIpHeader.enabled)
+              || a.originTimeoutMs || a.followRedirect;
+          },
+          opts: { title: 'Cache Rules', owner: '路由规则抽屉 · Cache Rules', allowedOps: ['respHeaders', 'cache', 'clientIp', 'originTimeout', 'followRedirect'], hideTargetPool: true },
+        },
+      ];
+
+      // 全站通用规则兜底（单独作为一个阶段卡片）
+      flow.appendChild(seqStage('🌐', '全站通用规则兜底',
+        '站点自身规则在上述各阶段均未命中时，回落到全站通用规则；仍未命中则直接回源。',
+        '全站', null, () => { location.hash = '#/sequence?host=__global__'; }, '全站通用规则（全站统一管理，点击前往）'));
+
+      ACTION_STAGES.forEach((st) => {
+        const matched = rules.filter((r) => { try { return st.match(r.action || {}); } catch { return false; } });
+        flow.appendChild(seqStage(st.icon, st.title,
+          matched.length ? `${matched.length} 条规则；${st.summary}` : `未配置；${st.summary}`,
+          matched.length ? `${matched.length} 条` : '未配置', 'sec-rules',
+          () => openRulesDrawer(site.host, st.opts), st.opts.owner));
+        // 该阶段下的规则节点（可拖拽，调整的是整条规则在全局 rules 中的优先级）
+        if (matched.length) {
+          flow.appendChild(el('div', { class: 'seq-rule-list' }, matched.map((r) => {
             const condCount = (r.match && r.match.conditions || []).reduce((n, g) => n + g.length, 0)
               + Object.keys(legacyMatchFields(r.match || {})).length;
             const idx = rules.indexOf(r);
@@ -515,11 +568,12 @@
             if (draggable && idx >= 0) ruleNodes.push({ node, index: idx });
             return node;
           })));
-      }
+        }
+      });
 
       // ── ⑤ 确定实际源站池（运行时推导，纯只读）──────────────────
       const ovrPool = rules.find((r) => r.action && r.action.poolId);
-      flow.appendChild(seqGroup('⑤', '确定实际源站', '沿用 ③ 首要分流结果，或被 ④ 中「改候选源站」类规则覆盖（运行时推导，无独立配置项）'));
+      flow.appendChild(seqGroup('⑤', '确定实际源站', '沿用 ③ 首要分流结果，或被 ④「Origin Rules」阶段命中的规则覆盖（运行时推导，无独立配置项）'));
       flow.appendChild(seqStage('🧭', '⑤ 实际源站',
         ovrPool ? `存在规则覆盖 → ${poolName(ovrPool.action.poolId)}（命中该规则时生效）` : `无规则覆盖 → 沿用 ③ 的 ${site.poolId ? poolName(site.poolId) : '未配置'}`,
         '推导', null, null, null));
@@ -540,7 +594,7 @@
       // ── ⑧ 回源循环（此时才真正发出回源请求；可干预：源站/池）────
       const pool = APP_DATA.pools.find((p) => p.id === ((ovrPool && ovrPool.action.poolId) || site.poolId));
       const fo = (pool && pool.failover) || {};
-      flow.appendChild(seqGroup('⑧', '回源循环 requestWithFailover（真正发出回源请求）', '逐个源站尝试；④ 中规则的回源改写（路径/Host/候选源站）在此对每个源站落地。可干预：源站地址、策略、故障转移。'));
+      flow.appendChild(seqGroup('⑧', '回源循环 requestWithFailover（真正发出回源请求）', '逐个源站尝试；④ 各阶段规则（URL 重写 / Origin Rules / 修改请求头）在此对每个源站落地。可干预：源站地址、策略、故障转移。'));
       flow.appendChild(seqStage('🗄️', '⑧ 源站与故障转移',
         pool
           ? (poolKind(pool) === 'single'
@@ -552,9 +606,9 @@
         pool ? '源站抽屉' : '初始回源对象抽屉 · 源站方式'));
 
       const subSteps = [
-        ['⑧.1 合并本源站配置', '源站级打底 + ④ 规则级覆盖，形成回源改写输入'],
-        ['⑧.2 构造回源 URL', '落实 ④ 中规则的路径 / Host 改写'],
-        ['⑧.3 构造回源请求头', '源站 extraHeaders + ④ 中规则的请求头改写 + 客户端IP'],
+        ['⑧.1 合并本源站配置', '源站级打底 + ④ 各阶段规则级覆盖，形成回源改写输入'],
+        ['⑧.2 构造回源 URL', '落实 ④「URL 重写」与「Origin Rules」的路径 / Host 改写'],
+        ['⑧.3 构造回源请求头', '源站 extraHeaders + ④「修改请求头」规则的改写 + 客户端IP'],
         ['⑧.4 选择引擎并发起', 'fetch / socket 引擎按源站配置分派（真正发请求）'],
         ['⑧.5 处理响应 / 异常', '命中 retryOn 状态码或异常 → 换下一源站'],
       ];
@@ -565,14 +619,14 @@
         ]))));
 
       // ── ⑨ / ⑩ / ⑪ / ⑫ 回源后加工（⑩/⑪ 受 ④ 规则 action 影响）──
-      flow.appendChild(seqGroup('⑨-⑫', '回源后：响应加工 & 回写', 'clone → 应用 ④ 规则的响应头 → 应用 ④ 规则的缓存策略写缓存 → 统计。'));
+      flow.appendChild(seqGroup('⑨-⑫', '回源后：响应加工 & 回写', 'clone → 应用 ④「Cache Rules」阶段的响应头 → 应用 ④「Cache Rules」阶段的缓存策略写缓存 → 统计。'));
       flow.appendChild(seqStage('🧬', '⑨ clone 原始响应',
         'cacheKey 已在 ⑥ 固定，不随 ⑧ 换源变化。运行时行为。', '运行时', null, null, null));
       flow.appendChild(seqStage('📥', '⑩ 改写响应头 buildClientHeaders',
-        hasCache || cacheRules.length ? '应用 ④ 中规则的响应头改写（回源响应返回用户前才改），并按实际成功源站重算 policy。' : '未配置规则响应头改写，仅注入品牌头。运行时行为。',
+        hasCache || cacheRules.length ? '应用 ④「Cache Rules」阶段的响应头改写（回源响应返回用户前才改），并按实际成功源站重算 policy。' : '未配置规则响应头改写，仅注入品牌头。运行时行为。',
         '运行时', null, null, null));
       flow.appendChild(seqStage('💾', '⑪ 写边缘缓存',
-        hasCache ? '应用 ④ 中规则的缓存策略，按 ⑥ 的 cacheKey 写入。' : '未启用缓存，跳过写入。',
+        hasCache ? '应用 ④「Cache Rules」阶段的缓存策略，按 ⑥ 的 cacheKey 写入。' : '未启用缓存，跳过写入。',
         '运行时', null, null, null));
       flow.appendChild(seqStage('👤', '⑫ 响应 & 最终用户',
         '统一注入品牌响应头 Server: EdgeGateway、Via: 1.1 EdgeGateway，并记录统计。固定行为。',
