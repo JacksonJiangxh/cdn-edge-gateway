@@ -97,7 +97,7 @@ def main():
     parser = argparse.ArgumentParser(description="清理 CNB 历史流水线构建日志")
     parser.add_argument("--repo", required=True, help="仓库路径，形如 组织名/仓库名（不带 .git）")
     parser.add_argument("--token", required=True, help="访问令牌（CI 用 CNB_TOKEN）")
-    parser.add_argument("--keep", type=int, default=50, help="保留最近 N 条，默认 50")
+    parser.add_argument("--keep", type=int, default=10, help="保留最近 N 条，默认 50")
     parser.add_argument("--dry-run", action="store_true", help="只列出待删除，不真正删除")
     args = parser.parse_args()
 
