@@ -135,7 +135,26 @@ export async function renderAdminPage(ctx, adminPath) {
 
   if (!html) html = FALLBACK_HTML;
 
+  // 具备 CF Workers Static Assets（env.ASSETS）时，把内联 CSS/JS 改为引用外部
+  // /{adminPath}/assets/*，让浏览器命中静态资产层（边缘缓存，重复访问零函数计费），
+  // 使 wrangler.toml 挂载的 dist/public/ 真正被用起来。
+  // 无 ASSETS（如纯 Dashboard 粘贴 worker）时保持完全内联兜底，功能不受影响。
+  const assets = ctx?.env?.ASSETS;
+  if (assets && typeof assets.fetch === 'function') {
+    const prefix = '/' + adminPath;
+    // 内联 <style>…</style> → 外部 /{adminPath}/assets/app.css
+    html = html.replace(/<style[\s\S]*?<\/style>/i, () =>
+      `<link rel="stylesheet" href="${prefix}/assets/app.css">`
+    );
+    // 内联 <script>…</script> → 外部 /{adminPath}/assets/app.js
+    // 注意：buildInlineUI 只注入一个含全部前端逻辑的 <script>，替换它即切换到外部资源。
+    html = html.replace(/<script[\s\S]*?<\/script>/i, () =>
+      `<script src="${prefix}/assets/app.js"></script>`
+    );
+  }
+
   // 注入基础路径，前端所有 API 请求以此为前缀
+  // 该脚本必须保持内联且置于 <head>：在外部 app.js 加载前设置好全局，供其推导 BASE。
   const injected = html.replace(
     '</head>',
     `<script>window.__BASE__=${JSON.stringify('/' + adminPath)};` +
