@@ -1,13 +1,13 @@
-# 12 · 管理面 API 参考
+# 10 · 管理面 API 参考
 
 > **管理面 API 参考**
 >
-> 上一篇：[11 请求处理流程](./11-request-flow.md) ｜ 下一篇：[13 EdgeOne 回源 Host 配置](./13-eo-origin-host.md)
+> 上一篇：[09 本地开发与验证](./09-local-development.md) ｜ 下一篇：[11 系统架构](./11-architecture.md)
 >
-> 返回 [文档中心](./README.md)
+> 返回 [项目首页](../README.md)
 
 > 管理面后端所有接口。路径均相对于 `/{ADMIN_PATH}/api`，例如默认 `http://127.0.0.1:8799/__panel/api`。
-> 路由声明见 `src/api/router.js`。想快速上手看 [03 本地开发](./03-local-development.md) 的 curl 流程。
+> 路由声明见 `src/api/router.js`。想快速上手看 [09 本地开发](./09-local-development.md) 的 curl 流程。
 
 ---
 

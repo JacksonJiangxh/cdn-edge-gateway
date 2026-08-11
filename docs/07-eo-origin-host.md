@@ -1,18 +1,20 @@
-# 13 · EdgeOne 回源 Host 配置
+# 07 · EdgeOne 回源 Host 配置
 
 > **EdgeOne 自定义回源 Host 平台侧配置指南**
 >
-> 上一篇：[12 API 参考](./12-api-reference.md) ｜ 下一篇：[14 CI/CD 自动化](./14-cicd.md)
+> 上一篇：[06 缓存策略](./06-cache-strategy.md) ｜ 下一篇：[08 FAQ](./08-faq.md)
 >
-> 返回 [文档中心](./README.md)
+> 返回 [项目首页](../README.md)
 
-> 适用场景：本项目运行在 EdgeOne Makers 时，自定义回源 Host（尤其「裸 IP + 自定义 Host」语义）无法靠边缘函数代码层的 `fetch` 完整实现（EO 边缘函数无 TCP socket，无法自定义 SNI）。此时应把「回源 Host 自定义」下沉到 **EdgeOne 平台层**，由 EO 在回源时自动注入正确 Host——网关代码（`_worker.js` / Makers 边缘函数）只需 `fetch` 到 EO 源站组即可。
+> 适用场景：本项目运行在 EdgeOne Makers 时，边缘 `fetch` **本身就能访问外部公网 URL 并携带自定义 Host 头**（与 Cloudflare 一致），常规「域名源站 + 自定义 Host」无需任何平台配置即可在代码层完成。但 EO 边缘函数**没有 `cloudflare:sockets` 那样的可编程 TCP**，无法直接自定义 SNI 连到「裸 IP + 自定义 Host」。这种「裸 IP + 自定义 Host + SNI」场景，应把「回源 Host 自定义」下沉到 **EdgeOne 平台层**，由 EO 在回源时自动注入正确 Host——网关代码只需 `fetch` 到 EO 源站组即可。
 >
 > 本文档对应 `docs/04-configuration.md` 跨平台能力矩阵中 EO 列的「平台级回源 Host 重写」兜底方案。
 >
 > **与 1+1 缓存架构的关系**：本项目在 EO 上采用「Makers 做高级定制 + EO 边缘做 CDN」的 1+1 架构。当请求走 **路径 A（同站 fetch 委托 EO 节点缓存）** 时，回源被整体委托给 EO 边缘——此时回源 Host 的自定义**无法再由边缘函数代码层表达**（同站 fetch 必须 HOST/host 头一致），只能靠本指南的「源站组 + 回源 Host 重写」在平台层完成。因此**配置本指南的源站组是路径 A 生效的必要前置**：未完成则 EO 回源会落到错误的 Host 或失败。有自定义回源 Host 的请求会改走路径 B（项目多源站逻辑回源 + 响应头委托缓存），不依赖本配置。
 
 ---
+
+> **前置**：本指南的「源站组 / 回源 Host」操作都挂在 **已存在的 EdgeOne Makers 项目** 之下。该项目须先在 [03 部署指南 §2.0](./03-deploy.md#20-先新建项目--服务cf-与-eo-都要且必须最先做) 建好（关联 Git、填 Project Name、输出目录 `.`），否则 `project name` 等变量无从而来，源站组也无处挂载。已建好可直接看下文。
 
 ## 一、两种平台机制对比
 
@@ -140,7 +142,7 @@
 |---|---|
 | **CF Workers**（`wrangler deploy`，有 sockets） | 代码层 `socketEngine` 全功能（含裸 IP + 自定义 Host + SNI），无需平台配置 |
 | **CF Pages** | 仅「域名源站自动 Host」，无自定义 Host（已知限制） |
-| **EO Makers**（本文档） | 代码层 `fetch` 实现「域名源站 + 自定义 Host」；「裸 IP + 自定义 Host + SNI」由本文档的 **EO 源站组 + 回源 HOST 头 / 规则引擎 Host Header 重写** 兜底 |
+| **EO Makers**（本文档） | 代码层 `fetch` 即可实现「域名源站 + 自定义 Host」（Host 头随请求带）；「裸 IP + 自定义 Host + SNI」无法用代码层 sockets 实现，由本文档的 **EO 源站组 + 回源 HOST 头 / 规则引擎 Host Header 重写** 兜底 |
 
 **对接要点**：
 1. 在 EO 上按本文档配好源站组与回源 HOST 头（或规则引擎）。

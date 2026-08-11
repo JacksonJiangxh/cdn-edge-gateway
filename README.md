@@ -40,39 +40,27 @@
 
 ## 文档导航
 
-> **新用户请按编号顺序阅读 01 → 06，读完即可完成从零到部署的全过程。**
-> 完整索引见 **[文档中心](./docs/README.md)**。
+> **建议按编号顺序阅读**：先把它跑起来（介绍 → 准备 → 部署），再学会用（配置 → 管理面 → 缓存），需要进阶再看高级与原理篇。每篇结尾都有「下一步」指向下一篇，不需要自己找路。
 
-**新手主线（按序阅读）**
-
+**一、使用者主线（部署 / 运维 / 使用者视角）**
 | # | 文档 | 读完你会 |
 |---|---|---|
 | 01 | [项目概述](./docs/01-overview.md) | 明白它是什么、三种部署形态怎么选 |
 | 02 | [环境准备](./docs/02-prerequisites.md) | 装好 Node、依赖，构建通过 |
-| 03 | [本地开发与验证](./docs/03-local-development.md) | 本机跑起来、进管理面、验证回源 |
+| 03 | [部署指南](./docs/03-deploy.md) | CF 三种方式（命令行静态挂载首选 / 粘贴 / Pages）+ EdgeOne + 流水线 |
 | 04 | [配置详解](./docs/04-configuration.md) | 看懂每个字段怎么填（**最常用**） |
-| 05 | [命令行部署](./docs/05-deploy-cli.md) | 用 wrangler 部署上线 |
-| 06 | [可视化部署](./docs/06-deploy-dashboard.md) | 不碰命令行，控制台点完部署 |
+| 05 | [管理面使用教程](./docs/05-user-guide.md) | 在网页里建池、建站点、配规则 |
+| 06 | [缓存策略](./docs/06-cache-strategy.md) | 想提高命中率、省函数额度 |
+| 07 | [EO 回源 Host 配置](./docs/07-eo-origin-host.md) | EdgeOne 平台侧「源站组 + 回源 Host 重写」操作 |
+| 08 | [常见问题 FAQ](./docs/08-faq.md) | 排坑合集 |
 
-> 05 与 06 是两条**并列**路线，任选其一，不要同时做。
-
-**上线之后**
-
-| # | 文档 | 何时看 |
+**二、开发者与开发支持（代码层 / 调试视角）**
+| # | 文档 | 读完你会 |
 |---|---|---|
-| 07 | [管理面使用教程](./docs/07-user-guide.md) | 在网页里建池、建站点、配规则 |
-| 08 | [缓存策略](./docs/08-cache-strategy.md) | 想提高命中率、省函数额度 |
-| 09 | [常见问题 FAQ](./docs/09-faq.md) | 排坑合集 |
-
-**进阶参考**
-
-| # | 文档 | 内容 |
-|---|---|---|
-| 10 | [系统架构](./docs/10-architecture.md) | 代码分层与模块职责 |
-| 11 | [请求处理流程](./docs/11-request-flow.md) | 一个请求的完整链路 |
-| 12 | [API 参考](./docs/12-api-reference.md) | 用 curl / 脚本批量管理 |
-| 13 | [EO 回源 Host 配置](./docs/13-eo-origin-host.md) | EdgeOne 平台侧操作步骤 |
-| 14 | [CI/CD 自动化](./docs/14-cicd.md) | 流水线发版 |
+| 09 | [本地开发与验证](./docs/09-local-development.md) | 本机跑代码、进管理面、验证回源、调试 |
+| 10 | [API 参考](./docs/10-api-reference.md) | 用 curl / 脚本批量管理配置 |
+| 11 | [系统架构](./docs/11-architecture.md) | 代码分层、模块职责、平台能力降级 |
+| 12 | [请求处理流程](./docs/12-request-flow.md) | 一个请求从进到出的完整链路 |
 
 ---
 
@@ -118,16 +106,16 @@ npm run dev                 # 启动后打开 http://localhost:8799/__panel
 # 方式 B：部署到生产
 npm install
 npm run build               # 生成 _worker.js + dist/public/ 静态资源
-npx wrangler deploy         # Cloudflare Workers（详见 docs/05-deploy-cli.md）
+npx wrangler deploy         # Cloudflare Workers（详见 docs/03-deploy.md）
 ```
 
-不想用命令行部署？三种平台的纯控制台操作步骤见
-**[06 可视化部署](./docs/06-deploy-dashboard.md)**。
+不想用命令行部署？CF 粘贴 / Pages、EdgeOne、以及流水线发版，全部操作步骤见
+**[部署指南 docs/03-deploy.md](./docs/03-deploy.md)**。
 
 > **输出目录务必填 `.`（仓库根），不要填 `dist/public`**：Pages 需要根目录的 `_worker.js`
 > 承载数据面代理与 `/__panel/api/*`。只部署 `dist/public` 会得到一个「管理面能打开、
 > 但代理和接口全部 404」的站点。静态资源省额度靠的是长缓存响应头 + Pages 的
-> Fetch handler 缓存开关，与输出目录无关，详见 [FAQ](./docs/09-faq.md)。
+> Fetch handler 缓存开关，与输出目录无关，详见 [FAQ](./docs/08-faq.md)。
 
 **本质说明**：本项目是运行在边缘平台（CF Workers/Pages、EO Pages）上的一段处理代码，自身**无持久硬盘、内存极小**，不具备真实的本地缓存/存储。它的缓存、配置、统计全部依托底层平台能力：
 - 配置/统计 → 绑定平台的 **KV**（CF）/ **EdgeOne KV** 托管存储；
@@ -136,4 +124,4 @@ npx wrangler deploy         # Cloudflare Workers（详见 docs/05-deploy-cli.md�
 
 **配置要点**：站点的「回源来源」二选一——**选已有源站组**（多站点复用）或**直接填写源站**（无需先建池），不再强制先建源站池。规则按 `priority` 从高到低匹配、命中即停。
 
-详细步骤见 [文档中心](./docs/README.md)，按 01 → 06 顺序阅读即可完成部署。
+详细步骤见上方「文档导航」，按 01 → 05 顺序阅读即可完成部署。

@@ -2,13 +2,13 @@
 
 > **配置详解**
 >
-> 上一篇：[03 本地开发与验证](./03-local-development.md) ｜ 下一篇：[05 命令行部署](./05-deploy-cli.md) / [06 可视化部署](./06-deploy-dashboard.md)
+> 上一篇：[03 部署指南](./03-deploy.md) ｜ 下一篇：[05 管理面使用教程](./05-user-guide.md)
 >
-> 返回 [文档中心](./README.md)
+> 返回 [项目首页](../README.md)
 
 > 管理面里每个字段什么意思、怎么填、填错会怎样。按「先池后站」的顺序读。
-> 想用 API 批量配见 [API 参考](./12-api-reference.md)；字段校验源码在 `src/config/schema.js`（**唯一数据真相源**）。
-> 网页上怎么点见 [管理面使用教程](./07-user-guide.md)。
+> 想用 API 批量配见 [API 参考](./10-api-reference.md)；字段校验源码在 `src/config/schema.js`（**唯一数据真相源**）。
+> 网页上怎么点见 [管理面使用教程](./05-user-guide.md)。
 
 ---
 
@@ -72,7 +72,7 @@
 > | 裸 IP + 自定义 Host + SNI | ✅ socket 全功能 | ❌ 无 socket | ⚠️ 代码层无 SNI；用 **EO 平台级「源站组回源 Host 重写」** 兜底 |
 >
 > - **CF 端**：自定义回源 Host（含裸 IP）必须用 **Workers 形态部署**（`wrangler deploy`，`wrangler.toml` 已带 `sockets` 兼容标志），才能拿到 `cloudflare:sockets`。CF Pages 形态无 socket，只能域名源站自动 Host。
-> - **EO 端**：边缘函数 `fetch` 允许向外部自定义 Host 设置 Host 头，故「域名源站 + 自定义 Host」代码层即可实现；「裸 IP + 自定义 Host + SNI」则配 **EO 源站组 + 回源 Host 重写**（控制台/规则引擎），Makers 函数只 `fetch` 到该源站组，Host 由 EO 平台注入。平台侧完整操作步骤见 [eo-origin-host.md](./13-eo-origin-host.md)。
+> - **EO 端**：边缘函数 `fetch` 允许向外部自定义 Host 设置 Host 头，故「域名源站 + 自定义 Host」代码层即可实现；「裸 IP + 自定义 Host + SNI」则配 **EO 源站组 + 回源 Host 重写**（控制台/规则引擎），Makers 函数只 `fetch` 到该源站组，Host 由 EO 平台注入。平台侧完整操作步骤见 [eo-origin-host.md](./07-eo-origin-host.md)。
 > - `engine=fetch` 时在 Cloudflare 上设 `hostHeader=client/custom` 会被静默丢弃（警告），但路由逻辑仍会注入；在 EdgeOne 上注入生效，无需改 `engine`。
 
 ### origins[] 的 `engine: 'r2'`（回源到 R2 桶，仅 Cloudflare）
@@ -266,7 +266,7 @@ conditions: [
 >   - **Cache Response Rules（响应侧，Modify cache response headers and tags）**：在响应离开边缘前改写 `Cache-Control`/`CDN-Cache-Control`、加 `Cache-Tag`、清掉 `Set-Cookie` 等。本项目代码下发的头只是跨平台兜底，CF 上以这两条面板规则为准。
 > - **EdgeOne（1+1 架构）**：没有 `caches.default` API，但边缘缓存能力真实存在，走两条路径：
 >   - **路径 B 响应头委托**：网关下发 `CDN-Cache-Control`，由 EO 边缘按头缓存（`edgeTtl` 决定 TTL）——所有 EO 请求都享受。
->   - **路径 A 同站 fetch 委托节点缓存**：对「无自定义回源 Host 的可缓存请求」，边缘函数内 `fetch(同站加速域名)`（HOST 与 host 头一致）走 EO 节点缓存，**命中零函数调用、未命中由 EO 按平台源站组回源**。需预先在 EO 控制台配好源站组 + 回源 Host 重写（见 `docs/13-eo-origin-host.md`）。
+>   - **路径 A 同站 fetch 委托节点缓存**：对「无自定义回源 Host 的可缓存请求」，边缘函数内 `fetch(同站加速域名)`（HOST 与 host 头一致）走 EO 节点缓存，**命中零函数调用、未命中由 EO 按平台源站组回源**。需预先在 EO 控制台配好源站组 + 回源 Host 重写（见 `docs/07-eo-origin-host.md`）。
 >
 > **本项目已自动遵循「最前端 CDN 为最终依据」的分层铁律**（`src/proxy/headers.js` 的 `buildClientHeaders`）：可缓存响应自动下发 `Cache-Control: public, max-age=1800, immutable`（浏览器 30 分钟）+ `CDN-Cache-Control: public, max-age=15552000`（边缘半年），并**主动剥离源站带回的 `set-cookie`/`pragma`/`no-store`/`private`/`expires=0`**；开启 `cache.enabled` 但未给 TTL 时回落到半年/30 分钟默认（常量 `TIER_CDN_DEFAULT_EDGE_TTL`/`TIER_CDN_DEFAULT_BROWSER_TTL`）。即模板开箱即符合铁律，CF/EO 面板规则是把最前端权威再钉死一层。详见部署文档「分层缓存架构部署方案」。
 >
@@ -335,7 +335,7 @@ conditions: [
 > - `ADMIN_PASSWORD` + `JWT_SECRET` 是管理面能不能登录的门槛，明文 Variable 等于把后台密码公开。
 > - `ADMIN_PATH` 是**隐藏后台入口前缀**（浏览器访问用），第一层防护（见下方说明）。
 > - `CLOUD_PLATFORM` 决定运行时降级逻辑，**填错或漏填会让 EO/Pages 功能残缺**（如 EO 无 `nodejs_compat` 行为差异、caches 不可用被静默降级）。
-> - 平台令牌只用于 CI 自动部署，手动部署（05/06）不需要。
+> - 平台令牌只用于 CI 自动部署，手动部署（05 各方式）不需要。
 
 ### `ADMIN_PATH` 只是「运行时入口前缀」，构建期完全不读它
 
@@ -349,15 +349,16 @@ conditions: [
 - **`ADMIN_PATH` 是纯运行时变量**：运行时优先级 **KV 显式配置 > `ADMIN_PATH` 环境变量 > 默认 `__panel`**。
 - **改 `ADMIN_PATH` 不需要重新构建**，重启/重新部署即生效。彻底消除了「构建期与运行时取值不一致导致管理面 404」的坑。
 - 各部署方式只需在**运行时**设这一个值（统一在 Dashboard 环境变量 / CI Secret / `.dev.vars`），不再区分"构建期注入点"：
-  | 部署方式 | `ADMIN_PATH` 设置位置 |
+  | 部署方式 | `ADMIN_PATH` 设置位置（保密，勿提交进仓库） |
   |---|---|
-  | 05 命令行（Workers） | `wrangler.toml [vars] ADMIN_PATH` 或 `wrangler secret` |
-  | 06 路线 A（CF Pages） | Dashboard 环境变量 `ADMIN_PATH` |
-  | 06 路线 B（Workers 粘贴） | Dashboard 环境变量 `ADMIN_PATH` |
-  | 06 路线 C（EO Pages） | 控制台环境变量 `ADMIN_PATH` |
+  | 05 部署指南 方式 ①（Workers 命令行静态挂载） | `npx wrangler secret put ADMIN_PATH`（推荐）或 Dashboard 环境变量 |
+  | 05 部署指南 方式 ③（CF Pages） | Dashboard 环境变量 `ADMIN_PATH` |
+  | 05 部署指南 方式 ②（Workers 粘贴） | Dashboard 环境变量 `ADMIN_PATH` |
+  | 兜底 | 仓库 `wrangler.toml [vars] ADMIN_PATH = "__panel"`（仅公开默认值，仅本地/兜底用，切勿填随机串提交） |
+  | 05 部署指南 方式 ④（EO Pages） | 控制台环境变量 `ADMIN_PATH` |
   | CNB / GitHub 流水线 | 密钥仓库 / Secrets 的 `ADMIN_PATH`（仅运行时读取，build 不依赖） |
 
-> **Workers 形态（05 / 06B / CNB deploy_cf_workers / GitHub deploy-cf-workers）曾经的大坑已消除**：
+> **Workers 形态（05 方式 ①② / CNB deploy_cf_workers / GitHub deploy-cf-workers）曾经的大坑已消除**：
 > 旧设计 build 期读 `ADMIN_PATH` 决定产物路径，若 toml 改了而 build 前没 `export` 同名变量，上线后管理面 404。新架构 build **完全忽略** `ADMIN_PATH`，此坑不再存在。
 
 ### ⚠️ `ADMIN_PATH` 的暴露面（已修复）

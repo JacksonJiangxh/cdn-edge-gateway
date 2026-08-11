@@ -1,12 +1,12 @@
-# 09 · 常见问题 FAQ
+# 08 · 常见问题 FAQ
 
 > **常见问题 FAQ**
 >
-> 上一篇：[08 缓存策略](./08-cache-strategy.md) ｜ 下一篇：[10 系统架构](./10-architecture.md)
+> 上一篇：[07 EdgeOne 回源 Host 配置](./07-eo-origin-host.md) ｜ 下一篇：[09 本地开发与验证](./09-local-development.md)
 >
-> 返回 [文档中心](./README.md)
+> 返回 [项目首页](../README.md)
 
-> 遇到坑先查这里。本地开发专属问题见 [03 本地开发](./03-local-development.md)。
+> 遇到坑先查这里。本地开发专属问题见 [09 本地开发](./09-local-development.md)。
 
 ---
 
@@ -94,7 +94,7 @@ npm run dev -- --port 8080
 **Q：EdgeOne 上缓存是怎么工作的 / 统计没数据？**
 EO 没有 `caches.default` API，但**边缘缓存能力真实存在且已启用**（`hasEdgeCache=true`）——只是走两条 EO 专属路径而非 CF 的 Cache API：
 - **路径 B（响应头委托）**：网关在响应上下发 `CDN-Cache-Control`，**由 EO 边缘按响应头缓存**（TTL 由策略 `edgeTtl` 决定）。这是所有 EO 请求都享受的缓存。
-- **路径 A（同站 fetch 委托节点缓存）**：对「无自定义回源 Host 的可缓存请求」，边缘函数内 `fetch(同站加速域名)`（HOST 与 host 头一致）会走 EO 节点缓存——**命中后零函数调用**，真正省额度；未命中则由 EO 按平台「源站组 + 回源 Host 重写」回源（详见 `docs/13-eo-origin-host.md`，需预先在 EO 控制台配好源站组）。有自定义回源 Host 的请求因无法用同站 fetch 表达，仍走项目多源站逻辑回源 + 路径 B 响应头缓存。
+- **路径 A（同站 fetch 委托节点缓存）**：对「无自定义回源 Host 的可缓存请求」，边缘函数内 `fetch(同站加速域名)`（HOST 与 host 头一致）会走 EO 节点缓存——**命中后零函数调用**，真正省额度；未命中则由 EO 按平台「源站组 + 回源 Host 重写」回源（详见 `docs/07-eo-origin-host.md`，需预先在 EO 控制台配好源站组）。有自定义回源 Host 的请求因无法用同站 fetch 表达，仍走项目多源站逻辑回源 + 路径 B 响应头缓存。
 
 区别：EO 下无法像 CF 那样「主动按键清除」（`cacheGen` 整站清除只作用于 `caches.default`），EO 缓存只能等 TTL 自然过期或用 `Cache-Tag` + 平台 purge。统计方面：EO 无 D1，统计回退 KV。确认 `CLOUD_PLATFORM=edgeone` 已设，管理面「系统信息」页 `hasEdgeCache` 应为 true、`hasCacheApi`（caches API）应为 false、`eoEdgeCache` 应为 true、`hasD1` 应为 false。
 
@@ -137,7 +137,7 @@ EO 没有 `caches.default` API，但**边缘缓存能力真实存在且已启用
 ## 本地开发相关
 
 **Q：本地 `npm run dev` 起不来 / 一直要 CF 账号？**
-默认 `wrangler dev` 是本地模式，不连 Cloudflare、不需要 token。若报错要 `CLOUDFLARE_API_TOKEN`，通常是误带了 `-r/--remote`。清掉即可。详见 [03 本地开发](./03-local-development.md)。
+默认 `wrangler dev` 是本地模式，不连 Cloudflare、不需要 token。若报错要 `CLOUDFLARE_API_TOKEN`，通常是误带了 `-r/--remote`。清掉即可。详见 [09 本地开发](./09-local-development.md)。
 
 **Q：本地忘了 `.dev.vars` 里的管理密码怎么办？**
 默认是 `local-dev-pass`。若改过又忘了：编辑 `.dev.vars` 把 `ADMIN_PASSWORD` 改回已知值，再 `npm run dev:clean` 清空本地 KV 后重启，首次登录会用新密码重置。

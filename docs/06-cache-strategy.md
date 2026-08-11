@@ -1,10 +1,10 @@
-# 08 · 缓存策略
+# 06 · 缓存策略
 
 > **全链路缓存策略矩阵（四厂商 + 本项目）**
 >
-> 上一篇：[07 管理面使用教程](./07-user-guide.md) ｜ 下一篇：[09 常见问题 FAQ](./09-faq.md)
+> 上一篇：[05 管理面使用教程](./05-user-guide.md) ｜ 下一篇：[07 EdgeOne 回源 Host 配置](./07-eo-origin-host.md)
 >
-> 返回 [文档中心](./README.md)
+> 返回 [项目首页](../README.md)
 
 本项目的完整请求链路：
 
@@ -84,7 +84,7 @@
 
 **② `edge.example.com` Makers 规则**：
 - 触发路由 `/*` 绑本项目 `_worker.js`；函数内 `requestWithFailover` 选源站，返回头由 `src/proxy/cache.js` 下发（路径 B 响应头委托，见第二节）。
-- 源站组 + 回源 Host 重写需预配（见 `docs/13-eo-origin-host.md`）。
+- 源站组 + 回源 Host 重写需预配（见 `docs/07-eo-origin-host.md`）。
 
 ---
 
@@ -168,7 +168,7 @@ ESA 控制台可"配置缓存节点 HTTP 响应头"改写出站头，遵循 `Cac
    ├─ AWS CloudFront     → 源站（直接，不经本项目）
    └─ 阿里云 ESA         → 源站（直接，不经本项目）
 ```
-> 完整四厂商 + 本项目的缓存头语义差异、逐厂商规则清单、联动总表见 **`docs/08-cache-strategy.md`**（本专章只展开 CF / EO；CloudFront / ESA 直接走源站，缓存靠源站头 + 控制台规则）。
+> 完整四厂商 + 本项目的缓存头语义差异、逐厂商规则清单、联动总表见 **`docs/06-cache-strategy.md`**（本专章只展开 CF / EO；CloudFront / ESA 直接走源站，缓存靠源站头 + 控制台规则）。
 **四层责任矩阵（每一层该设什么）**：
 
 | 层 | 责任 | 关键规则 |
@@ -228,7 +228,7 @@ EO 的 Makers 只能「挂在某个加速域名上」、不能当独立源，故
 
 **部署步骤**
 1. 部署 `_worker.js` / `edge-functions/[[default]].js` 到 Makers（流水线或控制台），**绑定到 `edge.example.com`**（Makers 触发路由 `/*`）。
-2. **`edge.example.com` 控制台配源站组 + 回源 Host 重写**（见 `docs/13-eo-origin-host.md`），指向 `origin-1/2.net`——这是路径 A 生效前提，也是函数回源前提。
+2. **`edge.example.com` 控制台配源站组 + 回源 Host 重写**（见 `docs/07-eo-origin-host.md`），指向 `origin-1/2.net`——这是路径 A 生效前提，也是函数回源前提。
 3. **`cdn.example.com` 控制台**：加速域名开启，**源站指向 `edge.example.com`**（即把函数域名当源站），开启 EO 节点缓存。
 4. **`cdn.example.com` 站点规则（EO 控制台，最前端缓存决策）**：
    - 可缓存路径（`/img/*`、`/static/*`）：开启「节点缓存」，**边缘缓存 TTL = 15552000s（半年）**，浏览器缓存 TTL = 1800s（30 分钟）；并在「响应头改写」里下发 `Cache-Control: public, max-age=1800, immutable`、`CDN-Cache-Control: public, max-age=15552000`，**剥离源站 `Set-Cookie`/`Pragma`/`no-store`/`private`**（EO 站点规则的响应头改写即等价于 CF 的 Cache Response Rules）。

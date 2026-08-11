@@ -1,6 +1,6 @@
 # 02 · 环境准备
 
-> 上一篇：[01 项目概述](./01-overview.md) ｜ 下一篇：[03 本地开发与验证](./03-local-development.md)
+> 上一篇：[01 项目概述](./01-overview.md) ｜ 下一篇：[03 部署指南](./03-deploy.md)
 
 本篇结束后，你会有一个**依赖装好、构建通过**的本地仓库。
 预计耗时 10 分钟。
@@ -150,8 +150,8 @@ npm run build
 
 ## 步骤 6（可选）：安装 Wrangler
 
-**只有走 [05 命令行部署](./05-deploy-cli.md) 才需要。**
-如果你打算走 [06 可视化部署](./06-deploy-dashboard.md)，**跳过这步**，直接进入下一篇。
+**只有走 [03 部署指南](./03-deploy.md) 方式 ①（命令行静态挂载）才需要。**
+如果你打算走方式 ②/③/④（纯网页 / Pages / EdgeOne），**跳过这步**，直接进入下一篇。
 
 Wrangler 已在 `devDependencies` 中，`npm install` 时已装好，用 `npx` 调用即可：
 
@@ -179,4 +179,4 @@ npx wrangler --version
 
 ## 下一步
 
-→ **[03 本地开发与验证](./03-local-development.md)**：把服务在本机跑起来，进管理面点一遍。
+→ **[09 本地开发与验证](./09-local-development.md)**：把服务在本机跑起来，进管理面点一遍。

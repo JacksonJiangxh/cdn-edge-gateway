@@ -1,6 +1,6 @@
 # 01 · 项目概述
 
-> 阅读顺序：**01 概述** → [02 环境准备](./02-prerequisites.md) → [03 本地开发](./03-local-development.md) → [04 配置](./04-configuration.md) → [05 命令行部署](./05-deploy-cli.md) / [06 可视化部署](./06-deploy-dashboard.md)
+> 阅读顺序（使用者主线）：**01 概述** → [02 环境准备](./02-prerequisites.md) → [03 部署指南](./03-deploy.md) → [04 配置详解](./04-configuration.md) → [05 管理面使用教程](./05-user-guide.md) → [06 缓存策略](./06-cache-strategy.md) → [07 EO 回源 Host](./07-eo-origin-host.md) → [08 FAQ](./08-faq.md)；想深入代码再读 [09 本地开发](./09-local-development.md) → [10 API 参考](./10-api-reference.md) → [11 系统架构](./11-architecture.md) → [12 请求处理流程](./12-request-flow.md)
 
 ---
 

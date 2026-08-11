@@ -1,13 +1,13 @@
-# 10 · 系统架构
+# 11 · 系统架构
 
 > **架构与设计**
 >
-> 上一篇：[09 常见问题 FAQ](./09-faq.md) ｜ 下一篇：[11 请求处理流程](./11-request-flow.md)
+> 上一篇：[10 API 参考](./10-api-reference.md) ｜ 下一篇：[12 请求处理流程](./12-request-flow.md)
 >
-> 返回 [文档中心](./README.md)
+> 返回 [项目首页](../README.md)
 
 > 想理解「一个请求进来后发生了什么」？本文讲清楚模块划分、回源决策流、平台能力降级。
-> 字段怎么填见 [配置详解](./04-configuration.md)；部署见 [部署指南](./05-deploy-cli.md)；网页上怎么点见 [管理面使用教程](./07-user-guide.md)。
+> 字段怎么填见 [配置详解](./04-configuration.md)；部署见 [部署指南](./03-deploy.md)；网页上怎么点见 [管理面使用教程](./05-user-guide.md)。
 
 ---
 
@@ -146,10 +146,10 @@ KV 是 CF 与 EO **共用**的存储层，但计费口径不同，优化必须�
 | 查询窗口 `MAX_QUERY_HOURS` 跟随 TTL 推导 | 避免无效 KV 读占用 subrequest 预算 ✓ | 同 ✓ |
 
 > 配置内存缓存（`configCacheTtl`）是数据面压低 KV 访问的核心杠杆：绝大多数请求命中 isolate 内 L1 缓存后 KV 冷读次数归零。EO 上进一步抬高低限，是因为 EO KV 跨节点最终一致约 60s，缓存窗口过短既拉高延迟又读不到新值。
-| TCP Socket 裸 IP 回源 | ✅（仅 Workers） | ❌ | EO/Pages 下只能走域名/HTTPS（fetch 引擎） |
+| TCP Socket 裸 IP 回源 | ✅（仅 Workers） | ❌（无 socket） | ❌（无 socket，但 fetch 可带自定义 Host 头访问公网；裸 IP+SNI 走平台源站组兜底） |
 | 图片优化(webp/avif) | ✅ | ❌ | EO 下降级为原图 |
 
-> 本地开发用 `CLOUD_PLATFORM=edgeone` 可强制按 EO 降级，确保「本地 = 线上」。详见 [03 本地开发](./03-local-development.md)。
+> 本地开发用 `CLOUD_PLATFORM=edgeone` 可强制按 EO 降级，确保「本地 = 线上」。详见 [09 本地开发](./09-local-development.md)。
 
 ---
 
@@ -165,7 +165,7 @@ KV 是 CF 与 EO **共用**的存储层，但计费口径不同，优化必须�
   - **Cache Response Rules（响应侧，Modify cache response headers and tags）**：响应离开边缘前改写 `Cache-Control`/`CDN-Cache-Control`、加 `Cache-Tag`、清掉 `Set-Cookie` 等。本项目代码下发的头仅作跨平台兜底，CF 上以这两条面板规则为准（详见部署文档 CF 段）。
 - **EdgeOne（1+1 架构）**：**没有 `caches.default` API**，但边缘缓存能力真实存在（`hasEdgeCache=true`）：
   - **路径 B 响应头委托**：响应下发 `CDN-Cache-Control: s-maxage=...`，由 EO 边缘按头缓存（`edgeTtl` 决定 TTL）——所有 EO 请求都享受。
-  - **路径 A 同站 fetch 节点缓存**（`proxy/engines/eoEdgeEngine.js`）：对「无自定义回源 Host 的可缓存请求」，边缘函数内 `fetch(同站加速域名)`（HOST 与 host 头一致）走 EO 节点缓存，命中零函数调用、未命中由 EO 按平台源站组回源（需预配 `docs/13-eo-origin-host.md`）。
+  - **路径 A 同站 fetch 节点缓存**（`proxy/engines/eoEdgeEngine.js`）：对「无自定义回源 Host 的可缓存请求」，边缘函数内 `fetch(同站加速域名)`（HOST 与 host 头一致）走 EO 节点缓存，命中零函数调用、未命中由 EO 按平台源站组回源（需预配 `docs/07-eo-origin-host.md`）。
 
 ```
 本项目能「控制」的，只是：
@@ -277,7 +277,7 @@ const originResp = await requestWithFailover(ctx, [pick], rule, effectiveHostHea
 - 单站点：每个规则节点可**拖拽**重排，松手即按新顺序重算 `priority` 并保存（后端按 priority 降序固化）。
 - 点击任一阶段（接入 / 安全 / 规则 / 回源 / 缓存 / 响应）跳转到对应设置抽屉。
 
-详见 [管理面使用教程](./07-user-guide.md#7-流量序列)。
+详见 [管理面使用教程](./05-user-guide.md#7-流量序列)。
 
 ---
 
