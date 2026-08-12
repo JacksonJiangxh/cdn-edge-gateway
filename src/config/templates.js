@@ -97,10 +97,30 @@ const EXT_ASSET = Object.freeze([
   'rar', 'svg', 'svgz', 'swf', 'tar', 'tif', 'tiff', 'ttf', 'webm', 'webp',
   'woff', 'woff2', 'xls', 'xlsx', 'zip', 'zst',
 ]);
-const EXT_MEDIA = Object.freeze(['mp4', 'm4s', 'ts', 'm3u8', 'mpd', 'flv', 'mp3', 'aac', 'webm', 'avi', 'mkv', 'mid', 'midi', 'ogg', 'wma', 'wmv', 'mov']);
-const EXT_DOWNLOAD = Object.freeze(['zip', 'rar', '7z', 'gz', 'tar', 'apk', 'ipa', 'exe', 'dmg', 'pkg', 'iso', 'bin', 'bz2', 'zst', 'jar', 'deb', 'rpm']);
 /** 动态语言/脚本扩展名——永远不该被缓存（EO「网站加速 / WordPress」均显式 NoCache）。 */
 const EXT_DYNAMIC = Object.freeze(['php', 'jsp', 'asp', 'aspx', 'do', 'dwr', 'cgi', 'fcgi', 'action', 'ashx', 'axd']);
+
+/**
+ * 用户给出的「全部常见静态后缀」全集——前端规则编辑器的「文件后缀 / 后缀为」
+ * 候选值、以及所有场景模板「静态资源长缓存」规则的默认值都来自这里。
+ *
+ * 设计意图（回应用户诉求）：模板默认就铺「所有常见静态后缀」，而不是只取某个
+ * 子类（如仅媒体、仅下载）。媒体清单（m3u8/mpd 等）与下载清单是其中的子集，
+ * 模板需要「短缓存特例」时（如 m3u8/mpd）再做排除，而不是反过来把全集裁剪掉。
+ *
+ * 此全集即 EXT_ASSET，集中在此导出，避免前端与后端各持一份、改一处漏一处。
+ */
+export const EXTENSION_PRESETS = EXT_ASSET;
+
+/**
+ * 生产环境最常用的错误状态码子集——前端「错误页缓存（码:秒）」的候选码值来源。
+ * 这些码代表「客户端非法 / 鉴权失败 / 资源缺失 / 服务端故障」，可短时缓存以挡住
+ * 对源站的重复穿透。导出供前端作为候选，与模板 statusTtlOf 枚举保持一致。
+ */
+export const ERROR_CODE_PRESETS = Object.freeze([
+  400, 401, 403, 404, 405, 406, 408, 409, 410, 412, 413, 415, 422, 429,
+  500, 502, 503, 504,
+]);
 
 /**
  * 站点场景模板。
@@ -211,7 +231,7 @@ export const SITE_TEMPLATES = Object.freeze([
       {
         name: '媒体分片长缓存',
         note: 'ts / m4s / mp4 等分片一旦生成就不再变化，适合长缓存，这是流媒体省带宽的关键。',
-        match: { conditions: [[extCond(EXT_MEDIA.filter((e) => e !== 'm3u8' && e !== 'mpd'))]] },
+        match: { conditions: [[extCond(EXTENSION_PRESETS.filter((e) => e !== 'm3u8' && e !== 'mpd'))]] },
         cache: {
           enabled: true,
           mode: 'ttl',
@@ -261,7 +281,7 @@ export const SITE_TEMPLATES = Object.freeze([
       {
         name: '下载文件长缓存',
         note: '安装包这类文件发布后通常不再修改（改了一般也是换新版本号），适合最长缓存。',
-        match: { conditions: [[extCond(EXT_DOWNLOAD)]] },
+        match: { conditions: [[extCond(EXTENSION_PRESETS)]] },
         cache: {
           enabled: true,
           mode: 'ttl',

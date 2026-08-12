@@ -504,8 +504,11 @@
           : (hasGlobal
             ? `本站无设置 → 实际生效为「全站通用规则」${globalMatched.length} 条（点击前往编辑）`
             : `本站无设置，且无全站兜底；${stageSummary}`);
+        // 修复：只要该阶段属于「规则引擎型」阶段（有 opts），无论本站是否已配置，
+        // 都允许点开抽屉——未配置时打开即是一条空白规则待新建，而不是点了没反应。
+        // 仅当非规则型阶段（无 opts）且本站无全站兜底时，才无可点入口。
         const onClick = opts
-          ? () => openRulesDrawer(site.host, { ...opts, stage: no })
+          ? () => openRulesDrawer(site.host, { ...opts, stage: no, isEmpty: !hasSite })
           : (hasGlobal ? () => { location.hash = '#/sequence?host=__global__'; } : null);
         const owner = opts ? opts.owner : (hasGlobal ? '全站通用规则（兜底，点击前往）' : null);
         flow.appendChild(seqStage(icon, `${no} ${title}`, summary, badge, 'sec-rules', onClick, owner));
@@ -1007,6 +1010,22 @@
   const TARGETS_WITH_KEY = ['header', 'cookie', 'query'];
   const OPS_NO_VALUE = ['exists', 'notExists'];
 
+  // 后缀候选值（与 src/config/templates.js 的 EXTENSION_PRESETS 同构；前端无打包无法 import，
+  // 由 build.mjs 做一致性断言。规则编辑器的「文件后缀 / 后缀为」值以此作为下拉候选）。
+  const EXTENSION_PRESETS = [
+    '7z', 'avi', 'avif', 'apk', 'bin', 'bmp', 'bz2', 'class', 'css', 'csv',
+    'doc', 'docx', 'dmg', 'ejs', 'eot', 'eps', 'exe', 'flac', 'gif', 'gz',
+    'ico', 'iso', 'jar', 'jpg', 'jpeg', 'js', 'mid', 'midi', 'mkv', 'mp3',
+    'mp4', 'ogg', 'otf', 'pdf', 'pict', 'pls', 'png', 'ppt', 'pptx', 'ps',
+    'rar', 'svg', 'svgz', 'swf', 'tar', 'tif', 'tiff', 'ttf', 'webm', 'webp',
+    'woff', 'woff2', 'xls', 'xlsx', 'zip', 'zst',
+  ];
+  // 错误状态码候选值（与 src/config/templates.js 的 ERROR_CODE_PRESETS 同构）。
+  const ERROR_CODE_PRESETS = [
+    400, 401, 403, 404, 405, 406, 408, 409, 410, 412, 413, 415, 422, 429,
+    500, 502, 503, 504,
+  ];
+
   // 单个条件行：[匹配对象] [键名] [操作符] [值] [忽略大小写] [删除]
   function conditionRow(cond, onRemove) {
     cond = cond || { target: 'path', op: 'prefix', values: [], key: '', ignoreCase: true };
@@ -1015,6 +1034,10 @@
     const keyInput = el('input', { class: 'input', value: cond.key || '', placeholder: '键名' });
     const opSel = select('', MATCH_OP_OPTS, cond.op || 'prefix');
     opSel.className = 'input';
+    // 后缀候选 datalist（仅文件后缀 / 后缀为 时启用）：下拉多选 + 可手填新值。
+    const extDlId = 'ext-presets-dl-' + Math.random().toString(36).slice(2);
+    const extDl = el('datalist', { id: extDlId }, EXTENSION_PRESETS.map((e) =>
+      el('option', { value: e })));
     const valInput = el('input', {
       class: 'input',
       value: (cond.values || []).join(', '),
@@ -1022,9 +1045,25 @@
     });
     const icCb = el('input', { type: 'checkbox', checked: cond.ignoreCase !== false });
     const valHint = el('span', { class: 'field-hint muted' });
+    // 后缀候选 chips：点击即把该后缀追加进值框（多选），同时仍可手填。
+    const extChips = el('div', { class: 'ext-chips' }, EXTENSION_PRESETS.map((e) => {
+      const chip = el('button', {
+        type: 'button',
+        class: 'ext-chip',
+        text: '.' + e,
+        onclick: () => {
+          const cur = valInput.value.split(',').map((s) => s.trim()).filter(Boolean);
+          const norm = e.toLowerCase();
+          if (!cur.map((x) => x.replace(/^\./, '').toLowerCase()).includes(norm)) cur.push(norm);
+          valInput.value = cur.join(', ');
+          valInput.focus();
+        },
+      });
+      return chip;
+    }));
 
     const keyWrap = el('div', { class: 'cond-cell' }, [keyInput]);
-    const valWrap = el('div', { class: 'cond-cell' }, [valInput, valHint]);
+    const valWrap = el('div', { class: 'cond-cell' }, [valInput, extDl, extChips, valHint]);
 
     // 运算符对应的填写示例，帮小白看懂“值”该写什么
     const OP_EXAMPLES = {
@@ -1054,6 +1093,15 @@
       keyWrap.style.display = needKey ? '' : 'none';
       keyInput.placeholder = needKey ? (KEY_HINTS[tSel.value] || '键名') : '键名';
       valWrap.style.display = OPS_NO_VALUE.includes(opSel.value) ? 'none' : '';
+      const isExt = tSel.value === 'extension' || opSel.value === 'suffix' || opSel.value === 'notSuffix';
+      // 后缀模式：值输入框启用候选 datalist + 显示多选 chips；否则隐藏。
+      if (isExt) {
+        valInput.setAttribute('list', extDlId);
+        extChips.style.display = '';
+      } else {
+        valInput.removeAttribute('list');
+        extChips.style.display = 'none';
+      }
       valHint.textContent = OPS_NO_VALUE.includes(opSel.value)
         ? ''
         : (tSel.value === 'origin' || tSel.value === 'originAddr')
@@ -1183,10 +1231,31 @@
     const ckCookies = el('input', { class: 'input', value: (key.cookies || []).join(', '), placeholder: '如 tier' });
 
     // 高级
+    const errDlId = 'err-presets-dl-' + Math.random().toString(36).slice(2);
+    const errDl = el('datalist', { id: errDlId }, ERROR_CODE_PRESETS.map((e) =>
+      el('option', { value: e })));
     const statusTtl = el('input', {
       class: 'input',
       value: Object.entries(c.statusTtl || {}).map(([k, v]) => k + ':' + v).join(', '),
       placeholder: '如 404:10, 500:5',
+      list: errDlId,
+    });
+    // 错误码候选 chips：点击即追加「码:」前缀（再手填秒数），同样可手填新码。
+    const errChips = el('div', { class: 'ext-chips' }, ERROR_CODE_PRESETS.map((code) => {
+      const chip = el('button', {
+        type: 'button',
+        class: 'ext-chip',
+        text: String(code),
+        title: '点击追加 ' + code + ':<秒数>',
+        onclick: () => {
+          const cur = statusTtl.value.split(',').map((s) => s.trim()).filter(Boolean);
+          const prefix = String(code) + ':';
+          if (!cur.some((p) => p === prefix || p.startsWith(prefix))) cur.push(prefix);
+          statusTtl.value = cur.join(', ');
+          statusTtl.focus();
+        },
+      });
+      return chip;
     });
     const preRefresh = el('input', { type: 'checkbox', checked: !!c.preRefresh });
     const preP = el('input', { class: 'input', type: 'number', value: c.preRefreshPercent || 80, placeholder: '%' });
@@ -1234,7 +1303,7 @@
         field('额外按 Cookie 来区分（逗号分隔）', ckCookies, '例如 tier（会员等级）。一般不用填。'),
       ]),
       section('高级缓存', '状态码缓存 / 预刷新 / 离线兜底——一般用不到，保持默认即可', [
-        field('给错误页也加缓存（格式 码:秒，逗号分隔）', statusTtl, '例如 404:10 表示 404 页面也缓存 10 秒，减轻源站压力。'),
+        field('给错误页也加缓存（格式 码:秒，逗号分隔）', statusTtl, '例如 404:10 表示 404 页面也缓存 10 秒，减轻源站压力。', [errDl, errChips]),
         el('div', { class: 'grid2' }, [
           el('label', { class: 'check' }, [preRefresh, el('span', { text: '缓存即将过期时提前回源刷新' })]),
           el('label', { class: 'check' }, [offline, el('span', { text: '源站挂了就用旧缓存顶着' })]),
@@ -3133,11 +3202,12 @@
 
   // 表单助手 --------------------------------------------------------------
   // 表单字段：label + 控件 + 可选的人话说明 hint（小白友好）
-  function field(label, control, hint) {
+  function field(label, control, hint, extra) {
     return el('div', { class: 'form-field' }, [
       el('label', { class: 'label' }, label),
       control,
       hint ? el('div', { class: 'field-hint muted' }, hint) : null,
+      ...(Array.isArray(extra) ? extra : []),
     ]);
   }
 

@@ -1186,6 +1186,22 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
 .cond-cell { min-width: 0; }
 .cond-row .check { padding: 4px 8px; }
 
+/* 文件后缀 / 后缀为 候选：下拉多选 + 可手填。chips 点击即追加进值框 */
+.ext-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.ext-chip {
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 7px;
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 999px;
+  background: var(--bg-soft, #f3f4f6);
+  color: var(--text, #333);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ext-chip:hover { border-color: var(--accent, #3b82f6); color: var(--accent, #3b82f6); }
+.ext-chip:active { transform: scale(.94); }
+
 @media (max-width: 720px) {
   .cond-row { grid-template-columns: 1fr 1fr; }
 }
