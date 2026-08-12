@@ -135,10 +135,6 @@
  *
  * @typedef {Object} RuleMatch
  * @property {Condition[][]} [conditions] 二维条件数组：外层 OR，内层 AND。空 = 匹配一切
- * @property {string}   [pathPrefix]      [兼容] 路径前缀
- * @property {string}   [pathRegex]       [兼容] 路径正则（字符串形式）
- * @property {string[]} [extIn]           [兼容] 扩展名白名单，如 ["jpg","png"]
- * @property {string[]} [methodIn]        [兼容] 方法白名单，如 ["GET","HEAD"]
  */
 
 /**

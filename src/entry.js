@@ -17,7 +17,6 @@ import { preloadKV } from './platform/kv.js';
 import { handleRequest } from './core/app.js';
 import { resolveRequestId, REQUEST_ID_HEADER } from './utils/reqid.js';
 import { normalizeError, sanitizeMessage } from './utils/errors.js';
-import { normalizeAllAtStartup } from './migration/index.js';
 
 /**
  * Cloudflare Pages / EdgeOne Pages 入口
@@ -79,14 +78,6 @@ async function dispatch(request, env, waitUntilFn) {
     await preloadKV(env, caps);
   } catch (e) {
     console.error('[entry] preloadKV 失败，配置存储降级为无持久化:', e?.message);
-  }
-
-  // 部署后一次性数据规范化：后台扫描全库，按最新 schema 对齐 KV 数据格式。
-  // waitUntil 确保不阻塞请求响应；同 isolate 内 _startupDone 标志保证只跑一次。
-  try {
-    waitUntil(normalizeAllAtStartup(env));
-  } catch {
-    // normalizeAllAtStartup 内部已有兜底，此处静默吞掉最外层异常
   }
 
   /** @type {import('./contracts.js').Ctx} */

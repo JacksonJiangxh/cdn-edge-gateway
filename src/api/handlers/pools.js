@@ -35,8 +35,6 @@ async function collectRefs(ctx) {
   };
 
   let { sites, truncated } = await listAllSites(ctx);
-  /** 尚未迁移的历史站点（仍带内联 origins），用于前端提示 */
-  const legacySites = [];
   for (const s of sites) {
     if (s.poolId) {
       add(s.poolId, {
@@ -45,8 +43,6 @@ async function collectRefs(ctx) {
         label: s.host,
         detail: '站点默认源站',
       });
-    } else if (Array.isArray(s.origins) && s.origins.length > 0) {
-      legacySites.push(s.host);
     }
     for (const r of s.rules || []) {
       const pid = r?.action?.poolId;
@@ -81,7 +77,7 @@ async function collectRefs(ctx) {
     truncated = true;
   }
 
-  return { map, truncated, legacySites };
+  return { map, truncated };
 }
 
 /**
@@ -91,7 +87,7 @@ async function collectRefs(ctx) {
  */
 export async function list(ctx) {
   const pools = await listPools(ctx);
-  const { map, truncated, legacySites } = await collectRefs(ctx);
+  const { map, truncated } = await collectRefs(ctx);
 
   const enriched = pools.map((p) => {
     const refs = map.get(p.id) || [];
@@ -105,7 +101,7 @@ export async function list(ctx) {
     };
   });
 
-  return ok({ pools: enriched, refsTruncated: truncated, legacySites });
+  return ok({ pools: enriched, refsTruncated: truncated });
 }
 
 /** GET /pools/:id/refs —— 单个源站的引用明细 */

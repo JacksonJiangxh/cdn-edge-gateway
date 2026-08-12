@@ -423,12 +423,93 @@ async function verify() {
 }
 
 // ---------------------------------------------------------------------------
+// 步骤 0（前置自检）：阶段字典一致性断言
+// ---------------------------------------------------------------------------
+
+/**
+ * 字典字段驱动全链路的核心约束：前端 web/app.js 的 STAGE_OPS 与后端权威源
+ * src/config/stages.js 的 STAGE_OPS 必须逐阶段一致，否则会出现「改一处漏一处」
+ * 的 action→stage 越界复发。前端因浏览器端无打包无法 import，故保留同构副本，
+ * 此处构建期抽取两处每个阶段 match 函数的源码文本逐阶段断言相等，不一致即失败。
+ *
+ * 抽取策略：定位 `STAGE_OPS = {` 之后，按 `'<阶段号>':` 切分，取每个阶段 `match:`
+ * 后到下一个 `},` / `},?` 之间的箭头函数体。只要 match 口径一致即可（标题/注释
+ * 差异不影响分类，但当前两处结构完全一致，连标题也一致）。
+ */
+function extractStageMatchMap(src, label) {
+  const map = {};
+  const start = src.indexOf('STAGE_OPS');
+  if (start < 0) throw new Error(`未找到 STAGE_OPS（${label}）`);
+  // 找到首个 '{' 作为字典起点
+  const open = src.indexOf('{', start);
+  if (open < 0) throw new Error(`STAGE_OPS 缺少 '{'（${label}）`);
+  // 按阶段号（⑤⑥⑦⑧⑨⑪⑯）切分
+  const stageNos = ['⑤', '⑥', '⑦', '⑧', '⑨', '⑪', '⑯'];
+  for (const no of stageNos) {
+    const key = `'${no}':`;
+    const ki = src.indexOf(key, open);
+    if (ki < 0) throw new Error(`STAGE_OPS 缺少阶段 ${no}（${label}）`);
+    const mi = src.indexOf('match:', ki);
+    if (mi < 0) throw new Error(`阶段 ${no} 缺少 match（${label}）`);
+    // match 后是 `=> ...` 箭头函数；取 '=>' 之后到本阶段块结束
+    const arrow = src.indexOf('=>', mi);
+    if (arrow < 0) throw new Error(`阶段 ${no} 的 match 不是箭头函数（${label}）`);
+    // 从 arrow+2 起，找到匹配的右括号结尾：按行扫，直到出现 `},` 或 `}` 作为对象项结束
+    let i = arrow + 2;
+    // 跳过空白
+    while (i < src.length && /\s/.test(src[i])) i++;
+    // 收集到下一个顶级 `},` 之前（即该阶段对象项结束前的 match 函数体）
+    let depth = 0;
+    let end = -1;
+    for (; i < src.length; i++) {
+      const ch = src[i];
+      if (ch === '(' || ch === '{' || ch === '[') depth++;
+      else if (ch === ')' || ch === '}' || ch === ']') {
+        depth--;
+        if (depth === 0) { end = i + 1; break; }
+      }
+    }
+    if (end < 0) throw new Error(`阶段 ${no} 的 match 函数体无法闭合（${label}）`);
+    // 归一化空白：折叠所有空白（含换行/缩进）为单个空格，仅校验 match 口径语义，
+    // 不因排版（缩进、换行位置）分歧误报——两处副本的缩进差异不应阻断构建。
+    map[no] = src.slice(arrow + 2, end).replace(/\s+/g, ' ').trim();
+  }
+  return map;
+}
+
+async function assertStageDictSync() {
+  console.log('▸ [0/5] 阶段字典一致性断言（前端 ↔ 后端权威源）...');
+  const frontend = await readSafe(join(WEB, 'app.js'));
+  const backendSrc = await readSafe(join(SRC, 'config', 'stages.js'));
+  if (!frontend) throw new Error('web/app.js 缺失，无法校验阶段字典');
+  if (!backendSrc) throw new Error('src/config/stages.js 缺失，无法校验阶段字典');
+
+  const fMap = extractStageMatchMap(frontend, 'web/app.js');
+  const bMap = extractStageMatchMap(backendSrc, 'src/config/stages.js');
+
+  const nos = ['⑤', '⑥', '⑦', '⑧', '⑨', '⑪', '⑯'];
+  for (const no of nos) {
+    if (fMap[no] !== bMap[no]) {
+      throw new Error(
+        `阶段字典不一致：阶段 ${no} 的 match 口径在前端与后端权威源存在差异。\n` +
+        `  前端: ${fMap[no]}\n  后端: ${bMap[no]}\n` +
+        `  请同步修改 web/app.js 的 STAGE_OPS 与 src/config/stages.js，确保 action→stage 映射唯一一致。`
+      );
+    }
+  }
+  console.log('  ✓ 前端 STAGE_OPS 与后端 src/config/stages.js 逐阶段一致（7 个阶段）');
+}
+
+// ---------------------------------------------------------------------------
 // 主流程
 // ---------------------------------------------------------------------------
 
 async function main() {
   const t0 = Date.now();
   console.log('cdn-edge-gateway 构建开始' + (MINIFY ? '（压缩模式）' : ''));
+
+  // 前置：阶段字典前端/后端一致性断言（防「改一处漏一处」越界复发）
+  await assertStageDictSync();
 
   // 步骤 1+2：前端 JS 共用一份压缩结果，分别产出内联兜底与静态目录
   const css = await readSafe(join(WEB, 'style.css'));

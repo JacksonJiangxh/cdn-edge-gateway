@@ -210,7 +210,6 @@
     APP_DATA.info = info;
     APP_DATA.sites = sites.sites || [];
     APP_DATA.pools = pools.pools || [];
-    APP_DATA.poolsLegacySites = pools.legacySites || [];
     renderPlatBadge();
   }
 
@@ -604,8 +603,10 @@
       renderRuleStage('⑨', '🔀', 'Origin Rules', '更改回源目标：回源 Host、回源连接参数（引擎/协议/端口）或候选源站', null, STAGE_OPS['⑨']);
 
       // ── ⑩ 确定实际源站（运行时推导，纯只读）──────────────────
-      const ovrPool = rules.find((r) => r.action && r.action.poolId);
-      const globalOv = !ovrPool && GLOBAL_RULES.find((r) => r.action && r.action.poolId);
+      // 池覆盖本质属于 ⑨ Origin Rules 阶段（action.poolId），统一以 ruleStage 索引，
+      // 不再从 action 现场反推，与流量序列其它阶段一致。
+      const ovrPool = rules.find((r) => ruleStage(r) === '⑨' && r.action && r.action.poolId);
+      const globalOv = !ovrPool && GLOBAL_RULES.find((r) => ruleStage(r) === '⑨' && r.action && r.action.poolId);
       flow.appendChild(seqGroup('⑩', '确定实际源站', '沿用 ③ 首要分流结果，或被 ⑨「Origin Rules」阶段命中的规则覆盖（运行时推导，无独立配置项）'));
       flow.appendChild(seqStage('🧭', '⑩ 实际源站',
         ovrPool
@@ -619,7 +620,7 @@
 
       // ── ⑫ 缓存键（可干预：站点 cacheGen）──────────────────────
       flow.appendChild(seqGroup('⑫', '缓存键', '合并 policy = 默认 < 源站级 cache < ⑪ Cache Rules；本环节可干预项：站点 cacheGen（代次）。'));
-      const cacheRules = rules.filter((r) => r.action && r.action.cache && (r.action.cache.enabled || r.action.cache.mode === 'noCache'));
+      const cacheRules = rules.filter((r) => ruleStage(r) === '⑪');
       const hasCache = cacheRules.some((r) => r.action.cache.enabled);
       flow.appendChild(seqStage('🔖', '⑫ 合并缓存策略 & 构造缓存键',
         `⑪ 缓存动作 ${cacheRules.length} 条 · 站点 cacheGen=${site.cacheGen || 0}${hasCache ? '（已启用节点缓存）' : ''}`,
@@ -635,8 +636,10 @@
       const effPoolId = (ovrPool && ovrPool.action.poolId) || (globalOv && globalOv.action.poolId) || site.poolId;
       const pool = APP_DATA.pools.find((p) => p.id === effPoolId);
       const fo = (pool && pool.failover) || {};
-      const connRule = rules.find((r) => { const a = r.action || {}; return (a.clientIpHeader && a.clientIpHeader.enabled) || a.originTimeoutMs || a.followRedirect; });
-      const gConnRule = !connRule && GLOBAL_RULES.find((r) => { const a = r.action || {}; return (a.clientIpHeader && a.clientIpHeader.enabled) || a.originTimeoutMs || a.followRedirect; });
+      // 回源连接参数（clientIp/超时/跟随3xx、engine/scheme/port）均属 ⑨ Origin Rules 阶段，
+      // 统一以 ruleStage 索引，不再从 action 现场反推。
+      const connRule = rules.find((r) => ruleStage(r) === '⑨');
+      const gConnRule = !connRule && GLOBAL_RULES.find((r) => ruleStage(r) === '⑨');
       flow.appendChild(seqGroup('⑭', '回源循环 requestWithFailover（真正发出回源请求）', '逐个源站尝试；⑤⑨⑧ 各阶段规则在此对每个源站落地；回源连接参数受规则 clientIp / 超时 / 跟随3xx 影响。可干预：源站地址、策略、故障转移。'));
       flow.appendChild(seqStage('🗄️', '⑭ 源站与故障转移',
         pool
@@ -1398,8 +1401,9 @@
     return { root, read };
   }
 
-  // 旧版快捷条件字段：后端 matcher 仍支持，但编辑器/流量序列只认 conditions。
-  const LEGACY_MATCH_KEYS = ['extIn', 'pathPrefix', 'pathRegex', 'methodIn'];
+  // 旧版快捷条件（extIn / pathPrefix / pathRegex / methodIn）由 normalizeMatchForEditor
+  // 在打开规则时并入 conditions 用于展示；保存只写 conditions，后端 matcher 从 conditions
+  // 解析等价条件，不再回写旧字段，避免「脏旧字段与干净 conditions 并存」。
 
   // 把旧版快捷条件并入 conditions（用于编辑器展示）。已存在的 conditions 不动，
   // 旧字段转换为等价的 conditions 条目追加进第 0 个 AND 组。
@@ -1427,16 +1431,6 @@
     return { ...match, conditions: groups };
   }
 
-  // 提取并回写旧版快捷字段，与 conditions 并存，保证后端匹配语义不丢。
-  function legacyMatchFields(match) {
-    match = match || {};
-    const out = {};
-    for (const k of LEGACY_MATCH_KEYS) {
-      if (match[k] !== undefined && match[k] !== '' && !(Array.isArray(match[k]) && !match[k].length)) out[k] = match[k];
-    }
-    return out;
-  }
-
   // 构建单条规则卡片（可视化规则引擎）
   function buildRuleCard(rule, poolOptions, site, opts) {
     opts = opts || {};
@@ -1460,9 +1454,9 @@
     const poolListId = 'poollist-' + (rule.id || 'new') + '-' + Math.random().toString(36).slice(2, 7);
     const poolSel = el('input', { class: 'input', list: poolListId, value: rule.action.poolId || '', placeholder: '留空=用站点默认源站；或选择本规则专用的源站' });
     const poolDatalist = el('datalist', { id: poolListId }, poolOptions.map((o) => el('option', { value: o.value, label: o.label })));
-    // 旧版快捷条件（extIn / pathPrefix / pathRegex / methodIn）后端仍支持，
-    // 但编辑器与流量序列只认 conditions。打开规则时把旧格式并入 conditions 用于展示，
-    // 保存时原样回写这些旧字段（与 conditions 并存，后端两种都认），不丢匹配语义。
+    // 旧版快捷条件（extIn / pathPrefix / pathRegex / methodIn）仅在「打开规则」时由
+    // normalizeMatchForEditor 并入 conditions 用于展示；保存只写 conditions（后端从
+    // conditions 解析等价条件），不再保留旧字段。
     const matchForEditor = normalizeMatchForEditor(rule.match || {});
     rule = { ...rule, match: matchForEditor };
     // 可视化条件编辑器
@@ -1788,9 +1782,6 @@
         // 阶段索引字段：流量序列渲染 / 抽屉归属 / 规则集聚合 / 合并落库 全部以它为准
         stage,
         match: {
-          // 保留原始 match 里的旧版快捷字段（extIn / pathPrefix / pathRegex / methodIn），
-          // 与 conditions 并存——后端两种都认，避免任何边界下匹配语义丢失。
-          ...legacyMatchFields(rule.match || {}),
           conditions: conds.read(),
         },
         action,
@@ -2575,9 +2566,15 @@
 
   // ====== 源站（借鉴 nginx upstream：单一源站与源站池同为一等公民） ======
 
-  /** 归一化 kind：兼容后端未回填 kind 的历史数据。 */
+  /**
+   * 归一化 kind：与 stage 字典字段模式对齐——kind 是源站的「单一/池」唯一索引，
+   * 由 schema 规范化后必然存在（POOL_KINDS=['single','pool']），渲染层直接读它，
+   * 不再现场按 origins 长度反推（避免与后端判定口径漂移）。
+   * 仅对后端未回填 kind 的历史数据按 origins 长度兜底一次。
+   */
   function poolKind(p) {
-    return p.kind || ((p.origins || []).length === 1 ? 'single' : 'pool');
+    if (p && (p.kind === 'single' || p.kind === 'pool')) return p.kind;
+    return ((p && p.origins) || []).length === 1 ? 'single' : 'pool';
   }
 
   /** 源站地址摘要，供列表「地址」列展示。 */
@@ -2623,14 +2620,6 @@
     wrap.appendChild(el('div', { class: 'hint' },
       '这里纵览全部上游。「单一源站」= 一个地址，在新建/编辑站点时直接填写源站地址会自动创建并出现在这里；'
       + '「源站池」= 多个源站 + 负载均衡策略，只能用右上角按钮新建。两者引用方式一致，站点与规则都按同一个下拉选择。'));
-
-    // 升级前遗留的「站点内联源站」尚未迁移：提示用户保存一次即可自动转成独立源站
-    const legacy = APP_DATA.poolsLegacySites || [];
-    if (legacy.length) {
-      wrap.appendChild(el('div', { class: 'hint warn' },
-        `检测到 ${legacy.length} 个站点仍使用旧版「内联源站」（${legacy.join('、')}），暂未出现在下表中。`
-        + '打开对应站点的「初始回源对象」抽屉保存一次，即可自动迁移为独立源站并纳入统一管理。'));
-    }
 
     if (!APP_DATA.pools.length) {
       wrap.appendChild(el('p', { class: 'empty' }, '暂无源站。新建站点并填写源站地址会自动生成单一源站；需要多源站负载均衡请点「+ 新建源站池」。'));
@@ -3187,7 +3176,6 @@
     ]);
     APP_DATA.sites = sites.sites || [];
     APP_DATA.pools = pools.pools || [];
-    APP_DATA.poolsLegacySites = pools.legacySites || [];
   }
 
   // 主题切换（轻量） ------------------------------------------------------

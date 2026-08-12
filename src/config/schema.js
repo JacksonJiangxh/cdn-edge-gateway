@@ -578,21 +578,8 @@ function normRule(input, idx) {
   const a = isObj(input.action) ? input.action : {};
 
   // ---- match ----
-  let pathPrefix = str(m.pathPrefix, '');
-  if (pathPrefix && !pathPrefix.startsWith('/')) pathPrefix = '/' + pathPrefix;
-
-  const reRes = validateRegex(m.pathRegex);
-  if (!reRes.ok) errors.push(`${label} ${reRes.error}`);
-
-  const extIn = strArr(m.extIn, 100, 16).map((s) => s.toLowerCase().replace(/^\./, ''));
-  const methodIn = strArr(m.methodIn, 10, 16)
-    .map((s) => s.toUpperCase())
-    .filter((s) => {
-      const okM = ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'].includes(s);
-      if (!okM) errors.push(`${label} 存在不支持的方法: ${s}`);
-      return okM;
-    });
-
+  // 匹配条件仅以 conditions 二维数组（外 OR 内 AND）为准；旧版快捷字段
+  // （pathPrefix / pathRegex / extIn / methodIn）已废弃，开发阶段不保留兼容。
   const conds = normConditions(m.conditions, label);
   errors.push(...conds.errors);
 
@@ -632,10 +619,6 @@ function normRule(input, idx) {
       enabled: bool(input.enabled, true),
       match: {
         conditions: conds.value,
-        pathPrefix,
-        pathRegex: reRes.ok ? reRes.value : '',
-        extIn,
-        methodIn,
       },
       action: {
         poolId: str(a.poolId, '', 64),

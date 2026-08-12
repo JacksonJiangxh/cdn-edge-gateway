@@ -202,10 +202,8 @@ export function evalCondition(cond, subject) {
 /**
  * 判断规则是否命中。
  *
- * 同时兼容两种写法：
- *  - 新：match.conditions 二维数组（外 OR 内 AND）
- *  - 旧：pathPrefix / pathRegex / extIn / methodIn（彼此 AND）
- * 两者若同时存在，则必须都通过。
+ * 匹配条件以 match.conditions 二维数组（外 OR 内 AND）为准；无 conditions 视为匹配全部。
+ * 旧版扁平快捷字段（pathPrefix / pathRegex / extIn / methodIn）已废弃，开发阶段不保留兼容。
  *
  * @param {Object} rule 规则
  * @param {Object} subject 请求特征
@@ -214,44 +212,11 @@ export function evalCondition(cond, subject) {
 export function isRuleMatched(rule, subject) {
   const m = rule?.match || {};
 
-  if (!matchLegacy(m, subject)) return false;
-
   const groups = Array.isArray(m.conditions) ? m.conditions.filter((g) => Array.isArray(g) && g.length) : [];
   if (groups.length === 0) return true;
 
   // 外层 OR：任一组全通过即命中
   return groups.some((group) => group.every((c) => evalCondition(c, subject)));
-}
-
-/**
- * 旧版扁平条件求值（向下兼容已有配置）。
- *
- * @param {Object} m match 对象
- * @param {Object} subject 请求特征
- * @returns {boolean}
- */
-function matchLegacy(m, subject) {
-  if (m.pathPrefix && !subject.path.startsWith(m.pathPrefix)) return false;
-
-  if (m.pathRegex) {
-    try {
-      if (!new RegExp(m.pathRegex).test(subject.path)) return false;
-    } catch {
-      return false;
-    }
-  }
-
-  if (Array.isArray(m.extIn) && m.extIn.length > 0) {
-    const allow = m.extIn.map((e) => String(e).toLowerCase().replace(/^\./, ''));
-    if (!subject.extension || !allow.includes(subject.extension)) return false;
-  }
-
-  if (Array.isArray(m.methodIn) && m.methodIn.length > 0) {
-    const allow = m.methodIn.map((x) => String(x).toUpperCase());
-    if (!allow.includes(subject.method)) return false;
-  }
-
-  return true;
 }
 
 /**

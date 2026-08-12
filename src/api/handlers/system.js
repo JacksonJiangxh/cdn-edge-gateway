@@ -115,35 +115,6 @@ export async function importAll(ctx) {
   }
 
   for (const s of sites) {
-    // 兼容旧版备份：站点级内联 origins 已废弃，导入时就地转成一条独立源站并回填 poolId
-    if (s && !s.poolId && Array.isArray(s.origins) && s.origins.length > 0) {
-      const single = s.origins.length === 1;
-      const rp = validatePool({
-        name: single ? String(s.origins[0]?.addr || s.host) : `${s.host} 的源站池`,
-        kind: single ? 'single' : 'pool',
-        strategy: single ? 'chain' : (s.originStrategy || 'chain'),
-        origins: s.origins,
-        failover: s.originFailover,
-        createdBy: s.host || '',
-      }, ctx.caps);
-      if (!rp.ok) {
-        errors.push(`站点 ${s?.host || '(未命名)'} 的内联源站迁移失败: ${rp.errors.join('; ')}`);
-        continue;
-      }
-      try {
-        rp.value.updatedAt = Date.now();
-        await putPool(ctx, rp.value);
-        imported.pools++;
-        s.poolId = rp.value.id;
-        delete s.origins;
-        delete s.originStrategy;
-        delete s.originFailover;
-      } catch (e) {
-        errors.push(`站点 ${s.host} 的内联源站写入失败: ${e.message}`);
-        continue;
-      }
-    }
-
     const r = validateSite(s);
     if (!r.ok) {
       errors.push(`站点 ${s?.host || '(未命名)'}: ${r.errors.join('; ')}`);

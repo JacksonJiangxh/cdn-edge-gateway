@@ -162,11 +162,7 @@ export const DEFAULT_REWRITE = Object.freeze({
  * @type {Readonly<import('../contracts.js').RuleMatch>}
  */
 export const DEFAULT_RULE_MATCH = Object.freeze({
-  conditions: Object.freeze([]), // 二维：外层 OR，内层 AND
-  pathPrefix: '',
-  pathRegex: '',
-  extIn: Object.freeze([]),
-  methodIn: Object.freeze([]),
+  conditions: Object.freeze([]), // 二维：外层 OR，内层 AND，匹配条件以此为准
 });
 
 /** 默认单个匹配条件。 */

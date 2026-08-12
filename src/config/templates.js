@@ -21,6 +21,10 @@
  */
 
 import { DEFAULT_CACHE_POLICY } from './defaults.js';
+// 阶段字典权威源：action→stage 唯一映射，与前端 web/app.js 的 STAGE_OPS 同构
+// （前端因浏览器端无打包无法 import，由 build.mjs 做一致性断言）。模板侧直接复用，
+// 杜绝「改一处漏一处」的越界复发。
+import { stageForAction } from './stages.js';
 
 // ----------------------------------------------------------------------------
 // 可调参数的元信息
@@ -432,7 +436,7 @@ export function applyTemplate(id, overrides) {
     const action = {
       cache: { ...DEFAULT_CACHE_POLICY, ...(spec.cache || {}) },
     };
-    // 阶段索引字段（与前端 STAGE_OPS 字典同源的最底层 action→stage 映射）：
+    // 阶段索引字段（复用权威 stages.js 的 stageForAction，与前端同源）：
     // 模板生成的规则只含 cache 动作，归一归属 ⑪ Cache Rules。落库即带 stage，
     // 后续流量序列渲染 / 抽屉归属 / 合并落库 全链路以它为准，无需反推。
     const stage = stageForAction(action);
@@ -449,28 +453,6 @@ export function applyTemplate(id, overrides) {
       action,
     };
   });
-}
-
-/**
- * 最底层 action → 阶段 的映射（模板侧最小实现，约定与前端 STAGE_OPS 完全一致）。
- * 模板当前只会生成 cache 类规则，故只覆盖 ⑪；如未来模板支持其它动作，按同一
- * 字典在此扩展即可（每个 action 只属于一个阶段，不存在跨阶段叠加）。
- * 完整权威字典见前端 web/app.js 的 STAGE_OPS。
- * @param {Object} a
- * @returns {string|null}
- */
-function stageForAction(a) {
-  a = a || {};
-  if (a.cache && (a.cache.enabled || a.cache.mode === 'noCache')) return '⑪';
-  if (a.rewrite && a.rewrite.type && a.rewrite.type !== 'none') return '⑤';
-  if (a.redirect && a.redirect.enabled) return '⑥';
-  if (a.forceHttps || (a.directResponse && a.directResponse.enabled)) return '⑦';
-  if ((a.reqHeaders && ((a.reqHeaders.set && Object.keys(a.reqHeaders.set).length) || (a.reqHeaders.remove && a.reqHeaders.remove.length)))) return '⑧';
-  if (a.poolId || (a.inlineOrigins || []).length
-    || (a.hostHeader && a.hostHeader.mode && a.hostHeader.mode !== 'accel' && a.hostHeader.mode !== 'inherit')
-    || a.engine || a.scheme || Number(a.port) > 0) return '⑨';
-  if (a.respHeaders && ((a.respHeaders.set && Object.keys(a.respHeaders.set).length) || (a.respHeaders.remove && a.respHeaders.remove.length))) return '⑯';
-  return null;
 }
 
 /**

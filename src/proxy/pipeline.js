@@ -60,18 +60,6 @@ async function buildSitePool(ctx, site) {
     if (p && Array.isArray(p.origins) && p.origins.length > 0) return p;
     return null;
   }
-  // 向后兼容：升级前写入 KV 的旧站点仍带内联 origins，且尚未被重新保存过。
-  // 数据面不能因为模型演进而 502，这里按旧语义临时组装一个匿名上游；
-  // 用户下次在管理面保存该站点时会自动迁移成一条 kind='single' 源站。
-  if (Array.isArray(site.origins) && site.origins.length > 0) {
-    return {
-      id: `__legacy_${site.host}`,
-      kind: site.origins.length === 1 ? 'single' : 'pool',
-      strategy: site.originStrategy || 'chain',
-      origins: site.origins,
-      failover: site.originFailover || DEFAULT_FAILOVER,
-    };
-  }
   return null;
 }
 
@@ -419,19 +407,6 @@ function applyTerminalActions(ctx, rule) {
  */
 function buildRedirectTarget(ctx, rule, redirect) {
   let target = String(redirect.target || '');
-
-  // 用 pathRegex 的捕获组替换 $1..$9
-  const re = rule?.match?.pathRegex;
-  if (re && /\$[1-9]/.test(target)) {
-    try {
-      const m = new RegExp(re).exec(ctx.url.pathname);
-      if (m) {
-        target = target.replace(/\$([1-9])/g, (_, d) => m[Number(d)] ?? '');
-      }
-    } catch {
-      /* 正则异常时保持原样 */
-    }
-  }
 
   let url;
   try {

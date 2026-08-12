@@ -166,62 +166,6 @@ export async function put(ctx, host) {
   return ok({ ...res.value, createdOrigin: prov.created || null });
 }
 
-/**
- * 旧数据自愈：把仍带站点级内联 origins 的历史站点迁移成「引用一条 single 源站」。
- *
- * 升级前保存的站点在 KV 里仍是 `{origins:[...]}` 且没有 poolId，新的 validateSite
- * 会因缺少 poolId 直接拒绝，导致这些站点连「改个安全设置」都保存不了。
- * 因此任何片段保存前都先跑一次迁移：有内联就转成 single 源站并回填 poolId。
- *
- * @param {object} ctx
- * @param {object} site 从 KV 读出的站点对象（就地改写）
- * @returns {Promise<{ok:true, created?:object}|{ok:false, error:string}>}
- */
-async function migrateLegacySite(ctx, site) {
-  if (site.poolId || !Array.isArray(site.origins) || site.origins.length === 0) {
-    delete site.origins;
-    delete site.originStrategy;
-    delete site.originFailover;
-    return { ok: true };
-  }
-
-  // 多内联源站的历史站点：整体迁成一条 kind='pool' 源站，保留原策略与故障转移
-  if (site.origins.length > 1) {
-    const res = validatePool(
-      {
-        name: `${site.host} 的源站池`,
-        kind: 'pool',
-        strategy: site.originStrategy || 'chain',
-        origins: site.origins,
-        failover: site.originFailover,
-        createdBy: site.host || '',
-      },
-      ctx.caps
-    );
-    if (!res.ok) return { ok: false, error: '历史内联源站迁移失败: ' + res.errors.join('; ') };
-    res.value.updatedAt = Date.now();
-    await putPool(ctx, res.value);
-    site.poolId = res.value.id;
-    delete site.origins;
-    delete site.originStrategy;
-    delete site.originFailover;
-    return { ok: true, created: res.value };
-  }
-
-  const tmp = {
-    host: site.host,
-    origins: site.origins,
-    originFailover: site.originFailover,
-  };
-  const prov = await ensureSingleOrigin(ctx, tmp);
-  if (!prov.ok) return prov;
-  site.poolId = tmp.poolId;
-  delete site.origins;
-  delete site.originStrategy;
-  delete site.originFailover;
-  return prov;
-}
-
 /** DELETE /sites/:host */
 export async function remove(ctx, host) {
   const h = host.toLowerCase();
@@ -256,9 +200,6 @@ export async function saveBasics(ctx, host) {
     if (k in body) merged[k] = body[k];
   }
   merged.host = h;
-  // 本次未指定 poolId（例如只改了 ipv6）时，先把历史内联源站迁移掉，否则校验会失败
-  const mig = await migrateLegacySite(ctx, merged);
-  if (!mig.ok) return fail(ERROR_CODES.BAD_REQUEST, mig.error, 400);
   merged.host = h; // 主键不可改
   merged.cacheGen = existing.cacheGen || 0;
   merged.updatedAt = Date.now();
@@ -280,11 +221,8 @@ export async function saveRules(ctx, host) {
   const existing = await getSite(ctx, h, { exact: true });
   if (!existing) return fail(ERROR_CODES.NOT_FOUND, `站点不存在: ${host}`, 404);
   const merged = { ...existing, rules: body.rules, cacheGen: existing.cacheGen || 0, updatedAt: Date.now() };
-  // 顺带把历史内联源站迁成独立源站，避免旧字段随每次保存一直滞留
-  const mig = await migrateLegacySite(ctx, merged);
-  if (!mig.ok) return fail(ERROR_CODES.BAD_REQUEST, mig.error, 400);
   await putSite(ctx, merged);
-  return ok({ host: h, rules: 'ok', migratedOrigin: mig.created || null });
+  return ok({ host: h, rules: 'ok' });
 }
 
 // 安全防护段：仅 security
@@ -297,8 +235,6 @@ export async function saveSecurity(ctx, host) {
   const existing = await getSite(ctx, h, { exact: true });
   if (!existing) return fail(ERROR_CODES.NOT_FOUND, `站点不存在: ${host}`, 404);
   const merged = { ...existing, security: body.security, cacheGen: existing.cacheGen || 0, updatedAt: Date.now() };
-  const mig = await migrateLegacySite(ctx, merged);
-  if (!mig.ok) return fail(ERROR_CODES.BAD_REQUEST, mig.error, 400);
   await putSite(ctx, merged);
-  return ok({ host: h, security: 'ok', migratedOrigin: mig.created || null });
+  return ok({ host: h, security: 'ok' });
 }
