@@ -85,7 +85,7 @@ curl "http://127.0.0.1:8799/__panel/api/pools/pl_xxx/refs" -H "cookie: ecw_token
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/sites` | 列出所有站点 |
-| `GET` | `/sites/templates` | 获取可套用的站点模板（新建站点时的快捷预设） |
+| `GET` | `/sites/templates` | 获取可套用的站点模板（新建站点时的快捷预设）。模板参数为**固定预设、不可在新建时修改**；每个模板直接带 `rules`——即用预设参数生成的**标准规则（Rule[]）**，结构与「流量序列 → 规则」里手动添加完全一致。建站后由前端用 `PUT /sites/{host}/rules`（流量序列规则接口）写入 |
 | `GET` | `/sites/{host}` | 获取单个站点 |
 | `PUT` | `/sites/{host}` | 新建 / 覆盖保存站点。要么传 `poolId` 引用已有源站；要么传单个地址的 `origins`，后端会**自动创建一条 `kind:"single"` 源站**并回填 `poolId`（响应中的 `createdOrigin` 即为新建的源站；地址相同则复用已有条目） |
 | `PUT` | `/sites/{host}/basics` | 仅更新站点基础信息（host / enabled / ipv6Support / cacheGen 等），不动规则与安全 |

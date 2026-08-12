@@ -13,7 +13,7 @@ import {
   putPool,
 } from '../../config/store.js';
 import { validateSite, validatePool } from '../../config/schema.js';
-import { listTemplates, applyTemplate, TEMPLATE_PARAM_META } from '../../config/templates.js';
+import { listTemplates, TEMPLATE_PARAM_META } from '../../config/templates.js';
 
 /**
  * 「单一源站」联动创建。
@@ -147,25 +147,9 @@ export async function put(ctx, host) {
   // 以 URL 中的 host 为准，防止 body 与路径不一致造成写错 key
   body.host = host.toLowerCase();
 
-  // ---- 场景模板：仅在「新建站点」时套用一次 ----
-  // 三个前提缺一不可，目的是保证模板永远不会覆盖用户已有的规则：
-  //   1. 指定了 template 且不是 blank
-  //   2. 该 host 在库中尚不存在（确属新建）
-  //   3. body 未自带 rules（自带说明调用方已有明确意图，尊重之）
-  // 套用后模板即「功成身退」：生成的规则与手写规则完全等价，
-  // 后续任何编辑都不会被再次覆盖。
-  const tplId = typeof body.template === 'string' ? body.template : '';
-  delete body.template; // 非站点字段，别写进存储
-  const tplParams = body.templateParams;
-  delete body.templateParams;
-
-  if (tplId && tplId !== 'blank' && !Array.isArray(body.rules)) {
-    const existing = await getSite(ctx, body.host, { exact: true });
-    if (!existing) {
-      const generated = applyTemplate(tplId, tplParams);
-      if (generated.length) body.rules = generated;
-    }
-  }
+  // 注意：新建站点时「场景模板」不再在此处偷偷套用。模板只是「参数预设 + 规则生成器」，
+  // 其产物的标准 Rule[] 由调用方通过流量序列的规则接口（PUT /sites/:host/rules）提交，
+  // 与用户在「流量序列 → 规则」里手动添加完全等价。这里只负责落站点基础信息。
 
   // 「单一源站」联动：直接填写的源站地址 → 自动落成一条 kind='single' 源站并回填 poolId
   const prov = await ensureSingleOrigin(ctx, body);

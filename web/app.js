@@ -1930,72 +1930,46 @@
     }
 
     // ── 场景模板（仅新建时出现）────────────────────────────────────
-    // 选定场景后自动铺好该场景下「一定通用」的那几条规则，省去从零配起。
-    // 生成的规则落库后与手写规则完全等价，之后随便改，系统不会再覆盖。
-    const tplState = { id: 'blank', params: {}, meta: {}, list: [] };
+    // 模板参数是固定的预设值，新建时不开放给用户修改；选中后直接以流量序列的规则
+    // 接口把规则写进该站点的「流量序列」，等价于用户自己新建空白站点后再手动去
+    // 添加这些规则。落库后即为普通规则，用户要调整直接去「流量序列 → 规则」改即可。
+    const tplState = { id: 'blank', list: [] };
     if (!editing) {
       const tplSel = select('f-template', [], 'blank', [{ value: 'blank', label: '加载中…' }]);
       const tplDesc = el('div', { class: 'field-hint muted' }, '');
-      const tplParamBox = el('div', { class: 'tpl-params' });
       const tplPreview = el('div', { class: 'field-hint muted' }, '');
 
-      // 把模板参数渲染成可编辑输入框：默认值只是起点，重点是让用户看见并按需改。
-      const renderParams = () => {
-        tplParamBox.innerHTML = '';
+      // 仅更新选中态、描述与「将生成 N 条规则」提示；模板参数固定，不渲染可编辑输入框。
+      const syncTpl = () => {
         const tpl = tplState.list.find((t) => t.id === tplSel.value);
         tplState.id = tplSel.value;
-        tplState.params = {};
         tplDesc.textContent = tpl ? tpl.desc : '';
-        const keys = (tpl && tpl.tuning) || [];
-        if (!keys.length) {
-          tplPreview.textContent = tplSel.value === 'blank'
-            ? '不会生成任何规则，建站后请自行到「流量序列 → 规则（⑤~⑯）」添加。'
-            : '';
-          return;
+        const n = (tpl && tpl.rules) ? tpl.rules.length : 0;
+        if (tplSel.value === 'blank') {
+          tplPreview.textContent = '不会生成任何规则，建站后请自行到「流量序列 → 规则（⑤~⑯）」添加。';
+        } else {
+          tplPreview.textContent = '建站后将自动以流量序列规则接口写入 ' + n + ' 条规则（参数已固定），可随时在「流量序列 → 规则（⑤~⑯）」增删改。';
         }
-        tplParamBox.appendChild(el('div', { class: 'hint' },
-          '以下为该场景的建议值，仅是起点而非最优解。请按你的实际业务修改——尤其是缓存时间，设错会导致用户看到旧内容。'));
-        for (const k of keys) {
-          const m = tplState.meta[k] || {};
-          const inp = el('input', {
-            class: 'input', type: 'number',
-            value: String(tpl.params[k] != null ? tpl.params[k] : 0),
-          });
-          if (m.min != null) inp.min = String(m.min);
-          if (m.max != null) inp.max = String(m.max);
-          tplState.params[k] = inp;
-          tplParamBox.appendChild(field(
-            (m.label || k) + '（秒）', inp,
-            (m.hint || '') + humanSecs(Number(inp.value))
-          ));
-          inp.oninput = () => {
-            const hintEl = inp.parentNode.querySelector('.field-hint');
-            if (hintEl) hintEl.textContent = (m.hint || '') + humanSecs(Number(inp.value));
-          };
-        }
-        tplPreview.textContent = '建站后将自动生成 ' + (tpl.ruleCount != null ? tpl.ruleCount : '若干') + ' 条规则，可随时在「流量序列 → 规则（⑤~⑯）」增删改。';
       };
-      tplSel.onchange = renderParams;
+      tplSel.onchange = syncTpl;
 
       body.appendChild(el('div', { class: 'subhead' }, [el('span', {}, '站点场景模板')]));
       body.appendChild(el('div', { class: 'hint' },
-        '按站点类型一次铺好该场景下通用的基础规则，避免从零配起。只预置「这类站点几乎都要」的少量参数，其余留给你自己配。'));
+        '按站点类型一键铺好该场景下通用且固定的基础规则，省去从零配起。模板参数为固定预设、不可在此修改；如需调整，建站后直接到「流量序列 → 规则」改对应规则即可。'));
       body.appendChild(field('加速类型', tplSel, ''));
       body.appendChild(tplDesc);
-      body.appendChild(tplParamBox);
       body.appendChild(tplPreview);
 
-      // 异步拉取模板清单，失败则静默降级为「空白」，不阻塞建站
+      // 异步拉取模板清单（含固定的 rules），失败则静默降级为「空白」，不阻塞建站
       API.sites.templates().then((d) => {
         tplState.list = (d && d.templates) || [];
-        tplState.meta = (d && d.paramMeta) || {};
         tplSel.innerHTML = '';
         for (const t of tplState.list) {
           const o = el('option', { value: t.id }, t.name);
           if (t.id === 'website') o.selected = true; // 最常见场景作默认
           tplSel.appendChild(o);
         }
-        renderParams();
+        syncTpl();
       }).catch(() => {
         tplSel.innerHTML = '';
         tplSel.appendChild(el('option', { value: 'blank' }, '空白（模板加载失败）'));
@@ -2036,18 +2010,22 @@
         await API.sites.saveBasics(site.host, basics);
         toast('站点基础片段已保存');
       } else {
-        // 模板只在新建这一刻起作用，后端还会再次确认「站点确实不存在」才套用
-        if (tplState.id && tplState.id !== 'blank') {
-          basics.template = tplState.id;
-          const p = {};
-          for (const [k, inp] of Object.entries(tplState.params)) {
-            const n = Number(inp.value);
-            if (Number.isFinite(n)) p[k] = n;
-          }
-          basics.templateParams = p;
-        }
+        // 先建站点（不含任何模板专属字段）。模板参数是固定的预设，
+        // 选中后直接以流量序列的规则接口（saveRules）把规则写进该站点的
+        // 「流量序列」，等价于用户自己新建空白站点后再手动添加这些规则。
         await API.sites.save(h, basics);
-        toast(basics.template ? '站点已创建，并已按模板生成基础规则' : '站点已创建');
+        if (tplState.id && tplState.id !== 'blank') {
+          // 用清单里固定的 rules（模板预设参数生成，不可在新建时修改）；
+          // 落库一律走流量序列规则接口，与手动添加完全一致。
+          const tpl = tplState.list.find((t) => t.id === tplState.id);
+          const rules = (tpl && tpl.rules) || [];
+          if (rules.length) {
+            await API.sites.saveRules(h, rules);
+          }
+          toast('站点已创建，并已按模板写入 ' + rules.length + ' 条基础规则');
+        } else {
+          toast('站点已创建');
+        }
       }
       await refreshData();
     });

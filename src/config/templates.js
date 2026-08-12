@@ -450,15 +450,21 @@ export function applyTemplate(id, overrides) {
 export function listTemplates() {
   return SITE_TEMPLATES.map((t) => {
     const params = templateParams(t.id);
+    // 用建议参数跑一遍 build，产出该模板「开箱即用」的标准规则（Rule[]），
+    // 结构与用户在「流量序列 → 规则」里手动添加的完全一致。前端拿到后可直接
+    // 通过流量序列的规则接口（saveRules）提交，无需任何模板专属落库逻辑。
+    const rules = applyTemplate(t.id, params);
     return {
       id: t.id,
       name: t.name,
       desc: t.desc,
       tuning: [...(t.tuning || [])],
       params,
-      // 先用建议参数跑一遍 build，得到该模板会生成几条规则，
       // 前端据此提示「将生成 N 条规则」，让用户选之前就心里有数。
-      ruleCount: (t.build(params) || []).length,
+      ruleCount: rules.length,
+      // 现成的标准规则：用户不改参数时直接走 saveRules；改了参数则调
+      // generateTemplateRules 重新生成后再提交。二者落库都走流量序列规则接口。
+      rules,
     };
   });
 }
