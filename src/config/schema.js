@@ -565,7 +565,7 @@ function normSecurity(input) {
 // 规则
 // ----------------------------------------------------------------------------
 
-function normRule(input, idx) {
+export function normRule(input, idx) {
   const errors = [];
   const label = `规则[${idx}]`;
   if (!isObj(input)) {
