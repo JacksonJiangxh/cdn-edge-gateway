@@ -124,11 +124,15 @@ export async function fetchOrigin(ctx, origin, originUrl, headers, timeoutMs) {
   }
 
   const respHeaders = new Headers();
-  const contentType =
-    obj.httpMetadata?.contentType || origin.r2ContentType || 'application/octet-stream';
-  respHeaders.set('content-type', contentType);
-  if (obj.httpEtag) respHeaders.set('etag', obj.httpEtag);
-  if (obj.uploaded) respHeaders.set('last-modified', new Date(obj.uploaded).toUTCString());
+  // 官方推荐：用 writeHttpMetadata 一次性填好 content-type / etag / last-modified 等
+  // HTTP 元数据，避免手动拼导致图片被当作 application/octet-stream 下载。
+  // 若上传时未带 contentType，再用 origin.r2ContentType / octet-stream 兜底。
+  obj.writeHttpMetadata(respHeaders);
+  if (!respHeaders.has('content-type')) {
+    const contentType =
+      origin.r2ContentType || 'application/octet-stream';
+    respHeaders.set('content-type', contentType);
+  }
   if (obj.size != null) respHeaders.set('content-length', String(obj.size));
   // 透传自定义元数据（用于携带 CORS / 业务头）
   const meta = obj.customMetadata || {};

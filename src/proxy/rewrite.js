@@ -131,6 +131,11 @@ export function buildOriginUrl(ctx, origin, rule, hostHeader) {
   // 回源 Host（authority）解析
   let authorityAddr = addr;
   let authorityPort = origin.port;
+  // R2 等「无公网地址」引擎（addr 为空）不表示没有 authority：
+  // 缓存键 / 回源 URL 的 host 应回退到「客户端访问的站点域名」(ctx.url.hostname)，
+  // 与 fetch 源站构造出的缓存键完全一致。否则 addr='' 会拼出新 URL('https://')
+  // （无 host）而抛 TypeError → 缓存键构造阶段 500。
+  if (!authorityAddr) authorityAddr = ctx.url.hostname;
   if (hostHeader && hostHeader.mode === 'custom' && hostHeader.custom) {
     // 支持 "host" 或 "host:port"
     const [h, p] = String(hostHeader.custom).split(':');
