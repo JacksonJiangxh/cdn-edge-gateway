@@ -219,14 +219,44 @@ rm -rf .wrangler
 
 ---
 
+## 步骤 8：构建后自动测试（强烈推荐）
+
+> 这是拦截「构建成功但登录进不去后台」这类**运行时**问题的最重要护栏。
+
+`npm run build` 在产物自检之外，**自动追加一轮端到端（E2E）+ 前端可执行性测试**（`scripts/e2e-test.mjs`）：
+
+1. **HTTP 全流程**：直接加载产物 `_worker.js`，用内存 KV mock 跑通
+   `健康检查 → 打开管理面（内联/静态两种形态）→ 登录 → /auth/me 鉴权 → 进后台 /sites`
+   ，并断言错误密码返回 401。
+2. **前端可执行性**：在 Node 沙箱里实际执行产物前端 JS（内联与 `assets/app.js` 两份），
+   断言 `window.API` 正确挂载（`auth.login` / `sites.list` / `system.info` 等均为函数）、
+   无运行时语法错误——这正是「build 产物有内联/语法问题导致登录后进不去后台」的根因所在。
+
+**手动单独运行**（不重新构建）：
+
+```bash
+npm run test:e2e
+# 也可跑 cf + eo 两套平台能力集：
+node scripts/e2e-test.mjs --all
+```
+
+**遇到调试期产物有问题、想跳过这轮验证**，用逃生舱：
+
+```bash
+npm run build -- --skip-verify   # 同时跳过产物自检 + e2e
+```
+
+---
+
 ## 检查清单
 
 - [ ] `npm run dev` 成功启动
 - [ ] `/__health` 返回 `ok: true`
 - [ ] 管理面能打开并登录
 - [ ] `curl -I` 两次，`x-cache-status` 从 `MISS` 变 `HIT`
+- [ ] `npm run build` 内置的端到端 + 前端可执行性测试通过（`window.API` 挂载正常）
 
-四项全过，说明本地环境完全正常，可以准备上线了。
+前四项说明本地环境正常；最后一项说明「构建产物可用、登录进后台不会踩坑」，可以准备上线了。
 
 ---
 

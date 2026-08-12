@@ -7,6 +7,8 @@
   "scripts": {
     "build": "node build.mjs",
     "check": "node scripts/check.mjs",
+    "gen": "node scripts/gen-entries.mjs",
+    "test:e2e": "node scripts/e2e-test.mjs",
     "dev": "node scripts/dev.mjs",
     "dev:clean": "node scripts/dev.mjs --clean",
     "dev:cf": "node scripts/dev.mjs --cf",

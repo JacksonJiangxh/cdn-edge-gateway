@@ -51,6 +51,29 @@ npm run dev -- --port 8080
 `local-dev-pass`。由 `npm run dev` 首次运行时自动写入 `.dev.vars`
 （该文件已被 `.gitignore` 忽略，不会提交）。忘了可以直接打开这个文件看。
 
+**Q：build 成功，但登录后进不去管理后台 / 控制台报语法定位错误？**
+这是「构建产物有内联/语法/资源丢失问题」的典型症状。**第一步先用内置 E2E 测试定位**：
+
+```bash
+npm run build          # 内置端到端 + 前端可执行性测试，任何失败会直接报红
+# 或只跑测试（不重新构建）：
+npm run test:e2e
+```
+
+`scripts/e2e-test.mjs` 会：
+1. 加载产物 `_worker.js`，跑通「健康检查 → 打开管理面 → 登录 → `/auth/me` → 进后台 `/sites`」完整链路；
+2. 在 Node 沙箱实际执行产物前端 JS，断言 `window.API` 挂载正常、无运行时语法错误。
+
+**判定方法**：
+- 若 E2E 报「内联产物 API.auth.login 非函数」或「语法解析失败」→ 说明 `web/app.js` / `web/api.js` 有语法或作用域问题，改源码后重新 `npm run build`。
+- 若 E2E 通过但线上仍进不去 → 多半是**部署形态**问题：管理面静态资源没被静态托管（见下文「管理面访问会不会吃掉额度」），或 `dist/public` 未随部署上传。
+
+**常见修复**：
+```bash
+rm -rf dist && npm run build   # 清掉可能的损坏产物
+```
+改逻辑一律改 `src/` 与 `web/`，不要手改 `_worker.js` / `dist/public`（构建产物，下次覆盖）。
+
 **Q：改了 `ADMIN_PATH`，旧路径还能访问到管理面？**
 `ADMIN_PATH`（运行时生效值 = **KV 中管理面保存的值 > 内置默认 `__panel`**，见 [04 §6](./04-configuration.md)）是**纯运行时**参数（构建期不读它），
 所以这和「构建产物残留」无关——`dist/public/` 下压根不会出现以 admin 路径命名的目录，

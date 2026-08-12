@@ -272,6 +272,10 @@ export function resetCacheStats() {
  * 规则（任一不满足即 false）：
  *  1. policy.enabled 必须为 true
  *  2. 请求方法只能是 GET / HEAD
+ *     - GET：标准缓存主体。
+ *     - HEAD：此处允许走「是否可缓存」判断，但实际写缓存仍受管线 shouldBypassCache
+ *       控制（仅 GET 进缓存写路径，cacheKey 为 null 时 HEAD 不会把空 body 写入缓存，
+ *       避免缓存投毒——详见 pipeline.js ⑥⑦）。
  *  3. 请求不能带 Range 头（分片响应缓存语义复杂，直接跳过）
  *  4. 响应状态码不能落在 NO_CACHE_STATUS（4xx/5xx/52x）里
  *  5. 响应不能带 Set-Cookie（个性化内容，缓存会造成串号）

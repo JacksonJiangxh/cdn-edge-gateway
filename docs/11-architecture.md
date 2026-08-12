@@ -78,7 +78,9 @@ cdn-edge-gateway/
 │   └── [[default]].js       # Catch-all 薄壳（加载 _worker.js，承载全部动态请求）
 ├── dist/public/            # 构建产出的管理面静态资源（HTML + assets），供 Pages 静态托管
 ├── scripts/dev.mjs         # 本地一键开发脚本
-├── build.mjs               # 用 esbuild 打包 src/ → _worker.js，并产出 dist/public/ + 内联兜底
+├── scripts/check.mjs       # 静态一致性检查（CLOUD_PLATFORM 口径 + 前端入口可解析）
+├── scripts/e2e-test.mjs    # 构建后端到端测试：内存 KV mock + HTTP 全流程（health→panel→login→me→sites）+ Node 沙箱执行前端 JS 验证 window.API
+├── build.mjs               # 用 esbuild 打包 src/ → _worker.js，并产出 dist/public/ + 内联兜底；末尾内置 e2e 测试
 └── docs/                   # 本文档
 ```
 
@@ -182,6 +184,11 @@ KV 是 CF 与 EO **共用**的存储层，但计费口径不同，优化必须�
 **因此带来的平台差异（非 bug）**：
 - `cacheGen`「整站清除」：CF / EO 通过 `caches.default.delete` 真实删除（EO 仅清当前节点）；ESA 通过 `cache.delete` 真实删除（仅当前节点）。cacheGen 代次机制使旧键整体失效，三平台均适用。
 - 想立即失效，可调用 purge 单 URL、或缩短 `edgeTtl`、或改 `CDN-Cache-Control` 让新响应覆盖旧缓存键维度。
+
+**缓存键设计（提升命中率）**：`proxy/cachekey.js` 构造缓存键时——
+- 基于**回源 URL** 而非客户端 URL，多加速域名指向同一源站可共享缓存；
+- `ignoreQuery=true` 与「`ignoreQuery=false` 但请求本就无 query」收敛到**同一个无 query 键**（host/代次等内部维度照常叠加），同一资源的两种请求形态共享缓存、避免重复回源；
+- **HEAD 请求被 `shouldBypassCache` 彻底挡在缓存读写之外**（`method!=='GET'` → `cacheKey=null`），读（`cacheMatch`）、写（`cachePut`）、EO 路径 A 三层全部短路，杜绝「HEAD 读到 GET 缓存并返回 body」的投毒风险；`isCacheable` 虽对 HEAD 返回 true（方法白名单），但最终拦截由管线 `cacheKey` 控制，语义安全。
 
 ### 4.2 EO 多域名源站负载均衡（跨域名 fetch = 路径 B）
 
@@ -292,11 +299,13 @@ const originResp = await requestWithFailover(ctx, [pick], rule, effectiveHostHea
 
 ## 9. 构建与运行
 
-- `build.mjs` 四步构建：
-  1. 把 `web/` 打包进 `src/ui.gen.js`（内联兜底，供无静态托管环境）；
-  2. 产出 `dist/public/`（HTML 引用外部 `app.css`/`app.js`，供 Pages 静态托管，最省函数额度）；
-  3. 用 esbuild 把 `src/` 打包成单文件 `_worker.js`；
-  4. 产物自检（文件完整性 + `_worker.js` 可加载 + 导出面 `onRequest`）。
+- `build.mjs` 五步构建：
+  1. 生成前端入口（`web/_stage.entry.js` + `web/_app.entry.js`）与 `web/_stage.gen.js`；
+  2. 把 `web/` 打包进 `src/ui.gen.js`（内联兜底，供无静态托管环境）；
+  3. 产出 `dist/public/`（HTML 引用外部 `app.css`/`app.js`，供 Pages 静态托管，最省函数额度）；
+  4. 用 esbuild 把 `src/` 打包成单文件 `_worker.js`；
+  5. 产物自检（文件完整性 + `_worker.js` 可加载 + 导出面）+ 专项语法校验 + **端到端测试**。
+- **端到端测试（`scripts/e2e-test.mjs`）**：build 默认内置执行，用内存 KV mock 跑通「健康检查 → 打开管理面（内联/静态两形态）→ 登录 → `/auth/me` → `/sites`」完整链路，并在 Node 沙箱执行产物前端 JS 断言 `window.API` 挂载；`--skip-verify` 可一并跳过。也可单独 `npm run test:e2e` 或 `node scripts/e2e-test.mjs --all`（cf+eo 两能力集）。这拦截「构建成功但登录后进不去后台」这类运行时问题。
 - **EdgeOne 单目录收口**：`edge-functions/`（Edge Function 目录，`[[default]].js` Catch-all 薄壳加载 `_worker.js`，承载数据面 + 管理面 HTML/静态 + `/__panel/api/*` 全部动态请求）、`dist/public/`（静态托管）。全部共用同一份 `_worker.js` 与 KV 命名空间。新版 Makers 下 `edgeone.json` 不写 `routes`，静态与函数冲突时静态优先。
 - **Cloudflare 单 runtime**：`_worker.js` 一体运行（数据面 + 管理面），`dist/public` 由 CF Pages 静态托管时管理 UI 走边缘缓存零函数次；直接粘贴 Worker 时自动回退内联 HTML。
 - **改任何源码后必须重跑 `npm run build`**，否则线上/本地跑的还是旧产物。

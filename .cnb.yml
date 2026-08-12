@@ -27,9 +27,18 @@
 .ci-stages: &ci-stages
   - name: install
     script: npm ci
+  - name: check
+    # 静态一致性检查（scripts/check.mjs）：CLOUD_PLATFORM 恒为 cf|eo|esa
+    # + 自动生成前端入口可解析/可重建，与 GitHub Actions 的 ci.yml 对齐。
+    script: npm run check
   - name: build
     # build.mjs 内置产物自检（文件完整性 + _worker.js 可加载 + 导出面）
     script: npm run build
+  - name: e2e
+    # scripts/e2e-test.mjs：用产物 _worker.js 跑通「健康检查→管理面→登录→鉴权→
+    # 后台」完整链路 + Node 沙箱执行前端 JS 验证 window.API，拦截「构建成功但登录
+    # 后进不去后台」这类运行时问题（与 GitHub Actions 的 ci.yml 对齐）。
+    script: npm run test:e2e
   - name: test
     script: |
       set -e
@@ -123,6 +132,9 @@ $:
             echo "干跑模式: ${dry_run:-false}"
         - name: install
           script: npm ci
+        - name: check
+          # 与 GitHub deploy-cf-workers.yml 对齐：build 前先做静态一致性检查
+          script: npm run check
         - name: build
           # ADMIN_PATH 是【纯运行时】变量，build 阶段不读取它（见 build.mjs）。
           # 管理面静态资源使用固定物理路径 /assets，与 ADMIN_PATH 解耦，
@@ -179,6 +191,9 @@ $:
             echo "目标: Cloudflare Pages"
         - name: install
           script: npm ci
+        - name: check
+          # 与 GitHub deploy-cf-pages.yml 对齐：build 前先做静态一致性检查
+          script: npm run check
         - name: build
           # ADMIN_PATH 是【纯运行时】变量，build 阶段不读取它（见 build.mjs）。
           # 管理面静态资源使用固定物理路径 /assets，与 ADMIN_PATH 解耦，
@@ -222,6 +237,9 @@ $:
             echo "目标: EdgeOne Pages / 环境: ${eo_env:-preview}"
         - name: install
           script: npm ci
+        - name: check
+          # 与 GitHub deploy-eo-pages.yml 对齐：build 前先做静态一致性检查
+          script: npm run check
         - name: build
           # ADMIN_PATH 是【纯运行时】变量，build 阶段不读取它（见 build.mjs）。
           # 管理面静态资源使用固定物理路径 /assets，与 ADMIN_PATH 解耦，

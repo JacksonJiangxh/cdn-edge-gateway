@@ -18,7 +18,9 @@
  *      供 EdgeOne Makers / Cloudflare Pages 静态托管，命中边缘缓存最省额度。
  *   4. 用 esbuild 打包 src/entry.js → 根目录 _worker.js。
  *   5. 产物自检（文件完整性 + _worker.js 可加载 + 导出面）+ 专项语法校验
- *      （内联脚本可 parse、HTML 标签闭合、括号配对），拦住「构建成功但产物不可用」。
+ *      （内联脚本可 parse、HTML 标签闭合、括号配对）+ 端到端测试
+ *      （用产物跑通登录/鉴权/后台 + Node 沙箱执行前端 JS 验证 window.API），
+ *      拦住「构建成功但产物不可用」及「登录后进不去后台」这类运行时问题。
  *
  * 用法：node build.mjs [--no-minify] [--skip-verify] [--watch]
  * ============================================================================
@@ -31,6 +33,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as esbuild from 'esbuild';
 import { generateEntries } from './scripts/gen-entries.mjs';
 import { runChecks } from './scripts/check.mjs';
+import { runE2E } from './scripts/e2e-test.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const WEB = join(ROOT, 'web');
@@ -622,10 +625,13 @@ async function main() {
   // 步骤 4：打包 worker
   await buildWorker();
 
-  // 步骤 5：专项语法校验 + 产物自检
+  // 步骤 5：专项语法校验 + 产物自检 + 端到端测试
   await syntaxChecks(inlineHtml, frontendJs);
   if (!SKIP_VERIFY) {
     await verify();
+    // 端到端：用真实产物 _worker.js 跑通「健康检查→管理面→登录→鉴权→后台」，
+    // 并在 Node 沙箱执行前端 JS 验证 window.API 挂载。--skip-verify 一并跳过。
+    await runE2E();
   }
 
   console.log(`\n构建完成，耗时 ${Date.now() - t0}ms`);

@@ -72,22 +72,30 @@ export function buildCacheKey(ctx, policy, originUrl, opts) {
     keyUrl.search = '';
   } else {
     const whitelist = Array.isArray(policy?.queryWhitelist) ? policy.queryWhitelist : [];
-    const src = keyUrl.searchParams;
-    const picked = [];
 
-    for (const [k, v] of src) {
-      // 白名单为空表示全保留
-      if (whitelist.length === 0 || whitelist.includes(k)) {
-        picked.push([k, v]);
+    // 无 query 且白名单为空（或全白名单场景下本无参数可保留）时，直接得到「无 query 键」。
+    // 这样 ignoreQuery=true 与「ignoreQuery=false + 请求本就无 query」最终收敛到同一个键，
+    // 保证同一资源的两种请求形态共享同一份边缘缓存，避免重复回源。
+    if (whitelist.length === 0 && keyUrl.search === '') {
+      keyUrl.search = '';
+    } else {
+      const src = keyUrl.searchParams;
+      const picked = [];
+
+      for (const [k, v] of src) {
+        // 白名单为空表示全保留
+        if (whitelist.length === 0 || whitelist.includes(k)) {
+          picked.push([k, v]);
+        }
       }
+
+      // 按 key 再按 value 排序，消除参数顺序带来的缓存碎片
+      picked.sort((a, b) => (a[0] === b[0] ? (a[1] < b[1] ? -1 : 1) : a[0] < b[0] ? -1 : 1));
+
+      const next = new URLSearchParams();
+      for (const [k, v] of picked) next.append(k, v);
+      keyUrl.search = next.toString();
     }
-
-    // 按 key 再按 value 排序，消除参数顺序带来的缓存碎片
-    picked.sort((a, b) => (a[0] === b[0] ? (a[1] < b[1] ? -1 : 1) : a[0] < b[0] ? -1 : 1));
-
-    const next = new URLSearchParams();
-    for (const [k, v] of picked) next.append(k, v);
-    keyUrl.search = next.toString();
   }
 
   // ---- 客户端 host 维度 ----

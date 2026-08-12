@@ -281,6 +281,9 @@ Published edge-cdn (x.xx sec)
 
 源码同时托管在 GitHub 与 CNB，各有一套**手动**流水线（零自动触发，必须人工点击发起，杜绝生产错乱）。流水线里 CF 相关有**两个独立按钮**，分别对应上面的 Workers 形态与 Pages 形态：
 
+> **两个 CI 系统的校验口径一致**：GitHub（`.github/workflows/ci.yml` 与各 `deploy-*.yml`）与 CNB（`.cnb.yml`）的「构建校验」按钮都会在**构建前跑 `npm run check`**（静态一致性 + 前端入口可解析），并在**构建后跑 `npm run test:e2e`**（端到端 + 前端可执行性，验证 `window.API` 挂载）。这样无论用哪个平台触发，都能在部署前拦住「构建成功但登录进不去后台」这类运行时问题。若某个 CI 报了 check/e2e 失败，先看 [08 FAQ「build 成功但登录进不去后台」](./08-faq.md) 定位修复，再重新触发。
+
+
 **先准备部署凭据**（运行时密钥 `ADMIN_PASSWORD`/`JWT_SECRET` **不进流水线**，它们已在第 4 步设好；`ADMIN_PATH` 不是变量、由管理面存 KV，无需在此准备）：
 
 | 字段 | 用途 | 怎么来 |

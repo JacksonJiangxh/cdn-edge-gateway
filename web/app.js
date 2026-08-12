@@ -3045,6 +3045,15 @@ import { STAGE_ORDER, STAGE_OPS, STAGE_ALIASES, normalizeStage } from './_stage.
       ['KV', caps.hasKV ? '可用' : '不可用（配置无法持久化！）'],
       ['统计驱动', (info && info.statsDriver) || 'none'],
     ];
+    // 缓存观测：展示当前 isolate 的边缘缓存命中情况，帮助用户直观评估「缓存收益 /
+    // 额度克制」。注意这是单实例内存统计，实例回收即归零，用于观察趋势而非精确计量。
+    const cacheStat = (info && info.cache) || null;
+    if (cacheStat && typeof cacheStat.hitRate === 'number') {
+      rows.push([
+        '缓存命中（本实例）',
+        `${fmtRate(cacheStat.hitRate)}（命中 ${cacheStat.hits || 0} / 未中 ${cacheStat.misses || 0} / 查询 ${cacheStat.lookups || 0}）`,
+      ]);
+    }
     if (info && Array.isArray(info.limitations) && info.limitations.length) {
       wrap.appendChild(el('div', { class: 'banner warn' },
         info.limitations.map((l) => el('div', {}, '⚠ ' + l.message))));
