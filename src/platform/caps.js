@@ -151,6 +151,44 @@ function detectEdgeOneRuntime(env, isCf) {
 }
 
 /**
+ * 判断是否运行在阿里云 ESA（边缘安全加速）的 Functions / Pages 运行时。
+ *
+ * ⚠️ 文档约束（来自 help.aliyun.com 官方 Pages 构建指南）：
+ *   - ESA 函数运行在 V8 Isolate（与 CF Workers / EO 同构），仅支持 JS ES6。
+ *   - 每个请求**子请求（fetch）数量上限 = 4 个**（比 CF/EO 严格得多）。
+ *   - 函数代码包 ≤ 4MB（本项目打包后远小于此，安全）。
+ *   - 无原生 KV 绑定（与 EO Cloud Function 不同），持久化只能走 REDIS_URL Webdis。
+ *
+ * 探测策略（显式声明优先 + 特征兜底）：
+ *   1. CLOUD_PLATFORM=aliyun-esa（最可靠，推荐用户在 ESA 环境变量里设置）
+ *   2. navigator.userAgent 含 'aliyun' / 'esa' 特征（待实测补充确切指纹）
+ *   3. 存在 ESA 注入的全局对象（如 ESA / EdgeSecurityAcceleration，待实测）
+ *
+ * 注意：必须在排除 CF / EO 之后再判 ESA，避免把其它 V8 边缘运行时误判。
+ *
+ * @param {Object} env 环境对象
+ * @param {boolean} isCf 是否已判定为 CF 运行时
+ * @param {boolean} isEo 是否已判定为 EdgeOne 运行时
+ * @returns {boolean} 是否 ESA 运行时
+ */
+function detectAliyunEsaRuntime(env, isCf, isEo) {
+  if (isCf || isEo) return false;
+
+  const explicit = (readEnvVar(env, 'CLOUD_PLATFORM') || '').toLowerCase();
+  if (explicit === 'aliyun-esa' || explicit === 'esa' || explicit === 'alibaba-esa') {
+    return true;
+  }
+
+  // 运行时指纹（待在 ESA 控制台实测后补充确切值；当前为保守候选）
+  const ua = readUserAgent();
+  if (ua.includes('aliyun') || ua.includes('esa')) return true;
+  if (safeGlobal('ESA') !== undefined) return true;
+  if (safeGlobal('EdgeSecurityAcceleration') !== undefined) return true;
+
+  return false;
+}
+
+/**
  * 在已确认是 CF 运行时的前提下，区分 Workers 与 Pages Functions。
  *
  * ⚠️ 关键陷阱：CF Workers 的【Static Assets】配置（本项目 wrangler.toml 的
@@ -285,20 +323,25 @@ export function detectCaps(env) {
 
   const isCf = detectCloudflareRuntime();
   const isEo = detectEdgeOneRuntime(e, isCf);
+  const isEsa = detectAliyunEsaRuntime(e, isCf, isEo);
 
   // 边缘缓存能力：
   // - CF（Workers / Pages）有标准 caches.default API（hasCacheApi=true）
   // - EO（Makers）虽无 caches.default，但「响应头委托 EO 边缘节点缓存」真实生效
   //   （函数返回的响应带 CDN-Cache-Control 时 EO 边缘会按头缓存），故 hasEdgeCache=true
+  // - ESA 同 EO 模式：无 caches.default，靠响应头委托 ESA 边缘节点缓存，
+  //   故 hasEdgeCache=true / hasCacheApi=false，复用 EO 分支（见 cache.js）
   // - 额外：EO 支持「边缘函数内 fetch(同站加速域名) 委托节点缓存」(eoEdgeCache)，
   //   命中后零函数调用，是更优省额度路径（见 pipeline.js 路径 A 分支）
   const hasCacheApi = detectEdgeCache();
-  const hasEdgeCache = hasCacheApi || isEo;
+  const hasEdgeCache = hasCacheApi || isEo || isEsa;
   const eoEdgeCache = isEo;
 
-  /** @type {'workers'|'pages'|'edgeone'|'unknown'} */
+  /** @type {'workers'|'pages'|'edgeone'|'aliyun-esa'|'unknown'} */
   let platform;
-  if (isEo) {
+  if (isEsa) {
+    platform = 'aliyun-esa';
+  } else if (isEo) {
     platform = 'edgeone';
   } else if (isCf) {
     platform = detectCfSubPlatform(e);
@@ -312,6 +355,11 @@ export function detectCaps(env) {
     hasEdgeCache,
     hasCacheApi,
     eoEdgeCache,
+    // 每请求子请求（fetch）预算上限：
+    //   - ESA 硬限制 = 4（官方文档「函数代码包/子请求数量」约束）
+    //   - CF / EO 宽松（远大于 4），给一个大数防误伤
+    //   用途：管理面 listSites 等批读据此控制合并（见 store.js / kv.js）
+    maxSubRequests: platform === 'aliyun-esa' ? 4 : 1000,
     hasSocket: detectSocket(isCf, platform),
     hasD1: looksLikeD1(e.CDN_DB) || looksLikeD1(e.DB) || looksLikeD1(e.D1),
     hasKV: hasNativeKV || hasRedisBackend(e),

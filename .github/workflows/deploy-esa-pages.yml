@@ -1,0 +1,160 @@
+# 部署到阿里云 ESA Pages —— 仅手动触发
+#
+# 【铁律】没有 push / pull_request 触发器，只有 workflow_dispatch。
+#
+# 需要的仓库 Secret（Settings → Secrets and variables → Actions）：
+#   ESA_AK_ID          —— 阿里云 AccessKey ID（RAM 控制台创建，建议最小权限
+#                          AliyunESAFullAccess 或自定义仅 ESA 读写）
+#   ESA_AK_SECRET      —— 阿里云 AccessKey Secret
+# 可选仓库 Variable：
+#   ESA_PROJECT        —— ESA Pages 项目名，留空则用默认 cdn-edge-gateway
+#
+# 部署方式（二选一，本 workflow 走 esa-cli）：
+#   A. esa-cli 命令行部署（本 workflow 默认）：CI 内用 AK/SK 非交互登录后
+#      commit + deploy。适合「把部署动作收口在 GitHub Actions」的团队。
+#   B. GitHub 连接自动部署（推荐新手）：在 ESA 控制台「函数和 Pages → 新建 Pages
+#      → 连接 GitHub 仓库（根目录）」后，每次 push 主分支 ESA 会自动读 esa.jsonc
+#      构建并部署。此时本 workflow 仍可保留做构建校验，但无需 Secret。
+#
+# 重要成本约束：阿里云 ESA 的 EdgeKV 按量收费且无免费额度，本项目在 ESA 上
+# 统一禁用厂商 KV，持久化强制走外置 REDIS_URL（自建 Webdis/Redis）。
+# 因此部署 ESA 前必须先在 ESA 控制台设置环境变量 REDIS_URL，否则运行时
+# 配置无法保存（store.js requireKV 会报错）。该变量属运行期配置，不需进仓库。
+#
+# 部署目录说明：本项目部署的是仓库根目录，不是 dist/public。
+#   ESA Pages 需要根目录的 esa.jsonc（指定 entry=./esa/index.js + assets.directory）
+#   并自动托管 dist/public/ 静态资源。只传 dist/public 会得到「静态页能开、
+#   API 全 404」的站点。
+
+name: 部署阿里云 ESA Pages（手动）
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '确认部署请输入 deploy（防误触）'
+        required: true
+        type: string
+        default: ''
+      env_target:
+        description: '目标环境'
+        required: true
+        type: choice
+        default: production
+        options:
+          - production
+          - preview
+      project_name:
+        description: 'ESA Pages 项目名（留空用仓库变量 ESA_PROJECT）'
+        required: false
+        type: string
+        default: ''
+
+# 禁止并发部署，避免两次发布互相覆盖
+concurrency:
+  group: deploy-esa-pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: 部署到阿里云 ESA Pages
+    runs-on: ubuntu-latest
+    steps:
+      - name: 校验确认串
+        run: |
+          if [ "${{ inputs.confirm }}" != "deploy" ]; then
+            echo "✗ 确认串不正确（需输入 deploy），已中止"
+            exit 1
+          fi
+          echo "✓ 已确认，触发人: ${{ github.actor }} / 环境: ${{ inputs.env_target }}"
+
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建（含产物自检）
+        # ADMIN_PATH 等是【纯运行时】变量，build 阶段不读取（见 build.mjs）。
+        # 管理面静态资源使用固定物理路径 /assets，与 ADMIN_PATH 解耦，
+        # 改管理面入口前缀无需重新构建。
+        run: npm run build
+
+      - name: 校验外置 Redis 已配置提示
+        # REDIS_URL 是 ESA 控制台运行期环境变量，CI 无法直接读取；此处仅作
+        # 部署前提醒，真正的缺失检查在运行时 store.js requireKV 进行。
+        run: |
+          echo "── 部署前自检清单 ──"
+          echo "• 已在 ESA 控制台设置环境变量 REDIS_URL（必填，ESA EdgeKV 收费禁用）"
+          echo "• 可选：REDIS_TOKEN / REDIS_PREFIX / ADMIN_PASSWORD / JWT_SECRET"
+          echo "• 可选：CLOUD_PLATFORM=aliyun-esa（薄壳会强制补，可不设）"
+
+      - name: 校验凭据
+        env:
+          ESA_AK_ID: ${{ secrets.ESA_AK_ID }}
+          ESA_AK_SECRET: ${{ secrets.ESA_AK_SECRET }}
+        run: |
+          set -e
+          if [ -z "$ESA_AK_ID" ] || [ -z "$ESA_AK_SECRET" ]; then
+            echo "✗ 未配置 Secret: ESA_AK_ID / ESA_AK_SECRET"
+            echo "  若改用「ESA 控制台连接 GitHub 自动部署」则无需本 Secret，"
+            echo "  直接在 ESA 控制台连接本仓库根目录即可（每次 push 自动构建部署）。"
+            exit 1
+          fi
+          echo "✓ 凭据就绪"
+
+      - name: 发布到 ESA Pages（esa-cli）
+        env:
+          ESA_AK_ID: ${{ secrets.ESA_AK_ID }}
+          ESA_AK_SECRET: ${{ secrets.ESA_AK_SECRET }}
+          INPUT_PROJECT: ${{ inputs.project_name }}
+          VAR_PROJECT: ${{ vars.ESA_PROJECT }}
+        run: |
+          set -e
+          # 优先级：手动输入 > 仓库变量 > 默认值
+          PROJECT="${INPUT_PROJECT:-${VAR_PROJECT:-cdn-edge-gateway}}"
+          echo "项目: $PROJECT / 环境: ${{ inputs.env_target }}"
+
+          npm install -g esa-cli
+
+          # 非交互登录：把 AK/SK 写入 esa-cli 预期的环境变量（若当前版本不支持，
+          # 请改用「ESA 控制台连接 GitHub 仓库」的自动部署路径，并删除本步骤）。
+          export ESA_ACCESS_KEY_ID="$ESA_AK_ID"
+          export ESA_ACCESS_KEY_SECRET="$ESA_AK_SECRET"
+          esa-cli login || {
+            echo "✗ esa-cli 非交互登录失败。请改用 ESA 控制台「连接 GitHub 仓库」自动部署："
+            echo "  边缘计算和 AI → 函数和 Pages → 新建 Pages → 连接 GitHub（根目录），"
+            echo "  此后每次 push 主分支 ESA 会自动读 esa.jsonc 构建部署。"
+            exit 1
+          }
+
+          echo "▸ 提交版本..."
+          esa-cli commit
+
+          echo "▸ 部署到边缘节点..."
+          esa-cli deploy
+
+          echo "✓ ESA Pages 部署完成（项目: $PROJECT）"
+          echo "  记得在 ESA 控制台「环境变量」中设置 REDIS_URL 后才能保存配置。"
+
+      - name: 部署摘要
+        if: always()
+        run: |
+          {
+            echo "### 阿里云 ESA Pages 部署"
+            echo ""
+            echo "- 触发人：\`${{ github.actor }}\`"
+            echo "- 提交：\`${{ github.sha }}\`"
+            echo "- 环境：\`${{ inputs.env_target }}\`"
+            echo "- 结果：\`${{ job.status }}\`"
+            echo "- 注意：持久化依赖 ESA 控制台设置的 REDIS_URL（EdgeKV 收费，已禁用）"
+          } >> "$GITHUB_STEP_SUMMARY"

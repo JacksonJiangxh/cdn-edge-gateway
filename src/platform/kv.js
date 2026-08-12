@@ -20,6 +20,13 @@
  * │ 不存在的 key │ 返回 null                  │ 返回 null（部分版本抛错）    │
  * └──────────────┴────────────────────────────┴──────────────────────────────┘
  *
+ * 另：阿里云 ESA 提供原生边缘存储 EdgeKV（运行时全局类 `new EdgeKV({namespace})`，
+ * 不经 env 注入），其 get/put 经独立的 createEdgeKVAdapter 包装、接口同构。
+ * ⚠️ 但 ESA 的 EdgeKV **按量收费且无免费额度**，因此本项目在 ESA 上**统一禁用厂商
+ * KV**（getKV 在 ESA 平台跳过 createEdgeKVAdapter），持久化一律走外置 REDIS_URL
+ * （用户自建 Webdis/Redis，见 redis-kv.js）。createEdgeKVAdapter 仅作为非 ESA 平台
+ * 误探测到 EdgeKV 时的兜底兼容。
+ *
  * 因此本层的策略是：
  * 1. get 一律先按「原始文本」取回，再由本层自己做 JSON.parse，
  *    避免依赖底层对 type 参数的支持程度。
@@ -70,6 +77,9 @@ import { hasRedisConfig, createRedisKV } from './redis-kv.js';
 /** 绑定名候选，按优先级排列 */
 const BINDING_NAMES = ['CDN_KV', 'KV'];
 
+/** ESA（阿里云边缘安全加速）EdgeKV 命名空间：控制台创建、函数内 new EdgeKV 引用 */
+const ESA_KV_NAMESPACE = (process && process.env && process.env.ESA_KV_NAMESPACE) || 'kv';
+
 /** isolate 级适配器缓存，key 为原始绑定对象，避免每次请求重复包装 */
 const _adapterCache = new WeakMap();
 
@@ -80,6 +90,19 @@ const _adapterCache = new WeakMap();
  */
 function looksLikeKV(b) {
   return !!(b && typeof b === 'object' && typeof b.get === 'function' && typeof b.put === 'function');
+}
+
+/**
+ * 探测 ESA 原生边缘存储（EdgeKV）是否可用。
+ * 官方文档示例：`new EdgeKV({ namespace: "kv" })`，EdgeKV 为运行时全局类。
+ * @returns {boolean} 是否存在 EdgeKV 全局类
+ */
+function detectEdgeKV() {
+  try {
+    return typeof globalThis.EdgeKV === 'function';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -369,10 +392,133 @@ function wrap(raw) {
 }
 
 /**
+ * 把阿里云 ESA 原生 EdgeKV 包装成统一的 KVLike 适配器。
+ *
+ * ESA 文档示例：`const kv = new EdgeKV({ namespace: "kv" }); await kv.get(key, {type:'text'})`。
+ * 与 CF/EO 的 env 绑定范式不同，EdgeKV 是运行时全局类，通过 namespace 名引用，
+ * 不经由 env 注入。
+ *
+ * ⚠️ 重要：阿里云 ESA 的 EdgeKV **按量收费且无免费额度**。本项目为控制成本，
+ * 在 ESA 上**统一不使用厂商 KV**（见 getKV 的 ESA 分支：ESA 平台直接跳过本函数，
+ * 强制走 REDIS_URL）。因此本适配器实际只在「非 ESA 平台误探测到 EdgeKV 全局类」等
+ * 极少数场景下被调用；ESA 部署请务必配置 REDIS_URL。
+ *
+ * @param {Object} env 环境对象（用于读取 ESA_KV_NAMESPACE 覆盖）
+ * @returns {KVLike|null} 适配器；不可用返回 null
+ */
+function createEdgeKVAdapter(env) {
+  if (!detectEdgeKV()) return null;
+  let store;
+  const ns = (env && env.ESA_KV_NAMESPACE) || ESA_KV_NAMESPACE;
+  try {
+    store = new globalThis.EdgeKV({ namespace: ns });
+  } catch {
+    return null;
+  }
+  if (!store || typeof store.get !== 'function') return null;
+
+  /** @type {KVLike} */
+  const adapter = {
+    backend: 'esa-edgekv',
+
+    async get(key, type = 'text') {
+      if (typeof key !== 'string' || key === '') return null;
+      let physKey;
+      try {
+        physKey = encodeKey(key);
+      } catch {
+        return null;
+      }
+      let rawVal;
+      try {
+        // EdgeKV.get(key, { type }) 返回对应类型（text/json）。
+        // 统一先取 text 再自行 JSON.parse，避免依赖底层 type 支持程度。
+        rawVal = await store.get(physKey, { type: 'text' });
+      } catch {
+        return null; // 读失败降级默认值
+      }
+      if (rawVal == null) return null;
+      let text;
+      if (typeof rawVal === 'string') {
+        text = rawVal;
+      } else if (typeof rawVal === 'object') {
+        return type === 'json' ? rawVal : JSON.stringify(rawVal);
+      } else {
+        text = String(rawVal);
+      }
+      if (type !== 'json') return text;
+      try {
+        return JSON.parse(text);
+      } catch {
+        return null;
+      }
+    },
+
+    async put(key, value, opts) {
+      if (typeof key !== 'string' || key === '') return;
+      const physKey = encodeKey(key);
+      const body = typeof value === 'string' ? value : JSON.stringify(value);
+      /** @type {any} */
+      const putOpts = {};
+      if (opts && typeof opts.expirationTtl === 'number' && opts.expirationTtl > 0) {
+        putOpts.expirationTtl = Math.max(60, Math.floor(opts.expirationTtl));
+      }
+      if (typeof store.put !== 'function') {
+        throw new Error(`EdgeKV 不支持 put（命名空间 ${ns}）`);
+      }
+      try {
+        await store.put(physKey, body, putOpts);
+      } catch (err) {
+        throw new Error(`EdgeKV put failed for "${key}": ${err && err.message ? err.message : err}`);
+      }
+    },
+
+    async delete(key) {
+      if (typeof key !== 'string' || key === '') return;
+      if (typeof store.delete !== 'function') return;
+      const physKey = encodeKey(key);
+      try {
+        await store.delete(physKey);
+      } catch (err) {
+        throw new Error(`EdgeKV delete failed for "${key}": ${err && err.message ? err.message : err}`);
+      }
+    },
+
+    // EdgeKV 的 list 能力文档未明示，保守返回空列表（上层依赖 _index 而非 list）。
+    async list() {
+      return { keys: [], list_complete: true };
+    },
+  };
+
+  return adapter;
+}
+
+/**
+ * 是否运行在阿里云 ESA（边缘安全加速）运行时。
+ * 用于决定持久化后端选型：ESA 的 EdgeKV **收费且无免费额度**，
+ * 故项目统一禁用厂商 KV、强制使用外置 REDIS_URL（见 getKV / createEdgeKVAdapter）。
+ * @param {Object} env 平台环境变量
+ * @returns {boolean} 是否 ESA 运行时
+ */
+function isEsaPlatform(env) {
+  const p = (env && (env.CLOUD_PLATFORM || '')) || '';
+  const lower = String(p).toLowerCase();
+  return lower === 'aliyun-esa' || lower === 'esa' || lower === 'alibaba-esa';
+}
+
+/**
  * 获取统一的 KV 适配器。
  *
- * 绑定名优先 `env.CDN_KV`，兼容 `env.KV`（Cloudflare 与 EdgeOne 同构）。
- * 无绑定时返回 null，上层应据此降级到 defaults（只读、不可持久化模式）。
+ * 优先级链（按平台能力自动选择，上层无感）：
+ *   1. env.CDN_KV / env.KV      —— Cloudflare / EdgeOne 原生 KV 绑定
+ *   2. globalThis.EdgeKV        —— 阿里云 ESA 原生边缘存储（**仅 CF/EO 之外的平台**；
+ *                                  ESA 因 EdgeKV 收费无免费额度，本项目统一禁用，见下方 ESA 分支）
+ *   3. REDIS_URL                 —— 无原生 KV 时降级（自建 Webdis/Redis，见 redis-kv.js）
+ *   4. null                      —— 完全无持久化，上层降级到 defaults
+ *
+ * ⚠️ ESA 特殊处理：阿里云 ESA 的 EdgeKV **按量收费、无免费额度**，因此本项目
+ * 在 ESA 上**不使用任何厂商 KV**（既不读 EdgeKV 也不依赖其免费额度），持久化
+ * 一律走外置 REDIS_URL（用户自建 Webdis/Redis）。故 ESA 分支直接跳过步骤 2。
  *
  * @param {Object} env 平台环境变量与绑定
  * @returns {KVLike|null} KV 适配器，无持久化时返回 null
@@ -385,8 +531,14 @@ function wrap(raw) {
 export function getKV(env) {
   const raw = pickRawBinding(env);
   if (raw) return wrap(raw);
+
+  // 阿里云 ESA：EdgeKV 收费无免费额度，统一禁用，直接走 REDIS_URL（步骤 3）。
+  // 不在此创建 EdgeKV 适配器，避免误用收费资源。
+  const esa = isEsaPlatform(env) ? null : createEdgeKVAdapter(env);
+  if (esa) return esa;
+
   // 平台未提供原生 KV 绑定时，降级到自部署的 Webdis/Redis 后端
-  // （EO Pages / ESA 等不具备 KV 的平台，可通过 REDIS_URL 指向自建 Redis）。
+  // （EO Pages / ESA 等不具备免费 KV 的平台，通过 REDIS_URL 指向自建 Redis）。
   // 该后端与 KVLike 完全同构，store.js 无需任何改动即可获得持久化能力。
   if (hasRedisConfig(env)) {
     return createRedisKV(env);

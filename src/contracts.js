@@ -16,10 +16,11 @@
 
 /**
  * @typedef {Object} Caps                 平台能力描述
- * @property {'workers'|'pages'|'edgeone'|'unknown'} platform  运行平台
- * @property {boolean} hasEdgeCache       是否支持「边缘缓存」（CF=caches.default API；EO=响应头委托 EO 边缘节点缓存，二者均真实生效）
- * @property {boolean} hasCacheApi        是否支持 caches.default API（仅 CF；EO 为 false，走响应头委托）
+ * @property {'workers'|'pages'|'edgeone'|'aliyun-esa'|'unknown'} platform  运行平台
+ * @property {boolean} hasEdgeCache       是否支持「边缘缓存」（CF=caches.default API；EO/ESA=响应头委托边缘节点缓存，二者均真实生效）
+ * @property {boolean} hasCacheApi        是否支持 caches.default API（仅 CF；EO/ESA 为 false，走响应头委托）
  * @property {boolean} eoEdgeCache        是否支持 EO 同站 fetch 委托节点缓存（运行在 EO 边缘函数且站点已接入加速域名；命中后零函数调用）
+ * @property {number}  maxSubRequests     每请求子请求（fetch）预算上限（ESA=4 硬限制；CF/EO=1000 宽松）
  * @property {boolean} hasSocket          是否支持 cloudflare:sockets
  * @property {boolean} hasD1              是否绑定了 D1
  * @property {boolean} hasKV              是否绑定了 KV

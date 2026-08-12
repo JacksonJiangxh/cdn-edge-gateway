@@ -13,7 +13,8 @@
     "dev:pages": "npm run build && wrangler pages dev .",
     "deploy": "npm run build && wrangler deploy",
     "deploy:cf": "npm run build && node scripts/gen-deploy-config.mjs && wrangler deploy -c wrangler.deploy.toml && rm -f wrangler.deploy.toml",
-    "deploy:pages": "npm run build && wrangler pages deploy ."
+    "deploy:pages": "npm run build && wrangler pages deploy .",
+    "deploy:esa": "npm run build && echo '=== ESA 部署步骤 ===' && echo '1) ESA 控制台设置环境变量 REDIS_URL（必填，自建 Webdis/Redis；EdgeKV 收费无免费额度，统一禁用）' && echo '2) npm install esa-cli -g' && echo '3) esa-cli login   (RAM 控制台 AK/SK)' && echo '4) esa-cli commit  (基于已构建的 _worker.js + dist/public)' && echo '5) esa-cli deploy  (选版本/环境)' && echo '详见 docs/14-deploy-esa.md'"
   },
   "keywords": [
     "cloudflare-workers",

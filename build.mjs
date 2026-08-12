@@ -532,13 +532,17 @@ async function main() {
   console.log('部署产物：');
   console.log('  _worker.js          → 边缘函数入口（CF Workers / EO edge-functions 共用）');
   console.log('  edge-functions/     → EO Makers 边缘函数目录，[[default]].js 薄壳转发');
-  console.log('  dist/public/        → 管理面静态资源（CF Pages / EO Makers 静态托管，最省额度）');
+  console.log('  esa/index.js        → 阿里云 ESA 边缘函数入口薄壳（转发 _worker.js）');
+  console.log('  esa.jsonc           → ESA Pages IaC 配置（entry / assets / build）');
+  console.log('  dist/public/        → 管理面静态资源（CF Pages / EO Makers / ESA Pages 静态托管，最省额度）');
   console.log('部署命令：');
   console.log('  Cloudflare Workers → npx wrangler deploy');
   // 必须部署仓库根：Pages 要靠根目录的 _worker.js 承载数据面与 /__panel/api/*，
   // 只传 dist/public 会得到「静态页能开、API 全 404」的站点。
   console.log('  Cloudflare Pages   → npx wrangler pages deploy .');
   console.log('  EdgeOne Makers     → npx edgeone makers deploy . -n <project> -t <token>');
+  console.log('  阿里云 ESA Pages    → npm install esa-cli -g && esa-cli login && npm run build && esa-cli commit && esa-cli deploy');
+  console.log('                        （ESA 的 EdgeKV 收费无免费额度，持久化需先在 ESA 控制台设 REDIS_URL 指向自建 Webdis/Redis）');
 }
 
 if (WATCH) {

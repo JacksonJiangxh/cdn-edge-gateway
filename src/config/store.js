@@ -151,10 +151,15 @@ export function invalidateMemCache() {
 function requireKV(ctx) {
   const kv = getKV(ctx.env);
   if (!kv) {
-    const isEo = ctx?.caps?.platform === 'edgeone';
-    const hint = isEo
-      ? '未检测到 KV 绑定，配置无法保存。EdgeOne 请在「项目设置 → 存储绑定」中创建 KV 命名空间，并以 CDN_KV 为变量名绑定到本项目（KV 仅在 Edge Functions 中可用）'
-      : '未检测到 KV 绑定，配置无法保存。请先创建 KV Namespace 并以 CDN_KV 为变量名绑定到本项目';
+    const platform = ctx?.caps?.platform;
+    let hint;
+    if (platform === 'edgeone') {
+      hint = '未检测到 KV 绑定，配置无法保存。EdgeOne 请在「项目设置 → 存储绑定」中创建 KV 命名空间，并以 CDN_KV 为变量名绑定到本项目（KV 仅在 Edge Functions 中可用）';
+    } else if (platform === 'aliyun-esa') {
+      hint = '未检测到 KV 绑定，配置无法保存。阿里云 ESA 的 EdgeKV 按量收费且无免费额度，本项目在 ESA 上统一禁用厂商 KV，持久化必须使用外置 Redis：请在 ESA 控制台设置环境变量 REDIS_URL（指向自建 Webdis/Redis，形如 https://your-webdis.example.com），可选 REDIS_TOKEN / REDIS_PREFIX。详见 docs/14-deploy-esa.md';
+    } else {
+      hint = '未检测到 KV 绑定，配置无法保存。请先创建 KV Namespace 并以 CDN_KV 为变量名绑定到本项目';
+    }
     throw new Error(hint);
   }
   return kv;
