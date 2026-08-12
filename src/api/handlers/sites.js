@@ -14,7 +14,7 @@ import {
 } from '../../config/store.js';
 import { validateSite, validatePool, normRule } from '../../config/schema.js';
 import { listTemplates, TEMPLATE_PARAM_META } from '../../config/templates.js';
-import { stageForAction } from '../../config/stages.js';
+import { normalizeStage } from '../../config/stages.js';
 
 /**
  * 「单一源站」联动创建。
@@ -221,14 +221,17 @@ export async function saveRules(ctx, host) {
   if (!('rules' in body) || !Array.isArray(body.rules)) return fail(ERROR_CODES.BAD_REQUEST, 'rules 必须是数组', 400);
   const existing = await getSite(ctx, h, { exact: true });
   if (!existing) return fail(ERROR_CODES.NOT_FOUND, `站点不存在: ${host}`, 404);
-  // 校正每条规则的归属阶段（rule.stage）：以权威字典 stageForAction 为准，
-  // 不信赖前端传值，也不依赖渲染时的兜底反推。这样即便历史脏数据缺 stage、
-  // 或某条规则 action 同时跨多个阶段（如既配缓存又改响应头），落库即带唯一
-  // 正确的 stage，流量序列渲染 / 抽屉归属 / 合并落库全链路以它为准，不再越界。
+  // 阶段索引（rule.stage）只来自「前端受限抽屉入口」，绝不反推。
+  // 下拉框选项受 allowedOps 约束，用户在「选择新建什么操作」那一刻阶段即唯一确定，
+  // 落库必带 r.stage。反推（stageForAction 按 STAGE_ORDER 顺序猜）不可控（曾致 origin 抢 respHeaders
+  // 越界），已彻底移除。
+  // 兼容层：r.stage 经 normalizeStage 归一——老数据里的旧带圈数字（'⑪' 等）自动转成英文名（'cache'），
+  // 不会因 key 改名而丢失阶段；缺 r.stage 的脏数据落库为 null —— 流量序列不渲染，但进任意
+  // 抽屉保存一次即自愈（落库必带 stage），比「猜一个错误阶段」更可控。
   const normedRules = (body.rules || []).map((r, i) => {
     const v = normRule(r, i);
     if (!v.value) return r;
-    const stage = stageForAction(v.value.action) || v.value.stage || null;
+    const stage = normalizeStage(r.stage) || null;
     return { ...v.value, stage };
   });
   const merged = { ...existing, rules: normedRules, cacheGen: existing.cacheGen || 0, updatedAt: Date.now() };

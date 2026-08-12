@@ -443,11 +443,15 @@ function extractStageMatchMap(src, label) {
   // 找到首个 '{' 作为字典起点
   const open = src.indexOf('{', start);
   if (open < 0) throw new Error(`STAGE_OPS 缺少 '{'（${label}）`);
-  // 按阶段号（⑤⑥⑦⑧⑨⑪⑯）切分
-  const stageNos = ['⑤', '⑥', '⑦', '⑧', '⑨', '⑪', '⑯'];
+  // 按阶段英文名 key 切分（与 src/config/stages.js / web/app.js 的 STAGE_OPS key 对齐）
+  const stageNos = ['rewrite', 'redirect', 'terminate', 'reqHeaders', 'origin', 'cache', 'respHeaders'];
   for (const no of stageNos) {
-    const key = `'${no}':`;
-    const ki = src.indexOf(key, open);
+    // key 可能带引号（'rewrite':）或不带引号（rewrite:），两种都匹配
+    const key = `${no}:`;
+    const keyQuoted = `'${no}':`;
+    const kiRaw = src.indexOf(key, open);
+    const kiQuoted = src.indexOf(keyQuoted, open);
+    const ki = kiRaw < 0 ? kiQuoted : kiRaw;
     if (ki < 0) throw new Error(`STAGE_OPS 缺少阶段 ${no}（${label}）`);
     const mi = src.indexOf('match:', ki);
     if (mi < 0) throw new Error(`阶段 ${no} 缺少 match（${label}）`);
@@ -487,7 +491,7 @@ async function assertStageDictSync() {
   const fMap = extractStageMatchMap(frontend, 'web/app.js');
   const bMap = extractStageMatchMap(backendSrc, 'src/config/stages.js');
 
-  const nos = ['⑤', '⑥', '⑦', '⑧', '⑨', '⑪', '⑯'];
+  const nos = ['rewrite', 'redirect', 'terminate', 'reqHeaders', 'origin', 'cache', 'respHeaders'];
   for (const no of nos) {
     if (fMap[no] !== bMap[no]) {
       throw new Error(

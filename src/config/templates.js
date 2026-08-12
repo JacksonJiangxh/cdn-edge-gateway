@@ -24,7 +24,6 @@ import { DEFAULT_CACHE_POLICY } from './defaults.js';
 // 阶段字典权威源：action→stage 唯一映射，与前端 web/app.js 的 STAGE_OPS 同构
 // （前端因浏览器端无打包无法 import，由 build.mjs 做一致性断言）。模板侧直接复用，
 // 杜绝「改一处漏一处」的越界复发。
-import { stageForAction } from './stages.js';
 
 // ----------------------------------------------------------------------------
 // 可调参数的元信息
@@ -456,13 +455,12 @@ export function applyTemplate(id, overrides) {
     const action = {
       cache: { ...DEFAULT_CACHE_POLICY, ...(spec.cache || {}) },
     };
-    // 阶段索引字段（复用权威 stages.js 的 stageForAction，与前端同源）：
-    // 模板生成的规则只含 cache 动作，归一归属 ⑪ Cache Rules。落库即带 stage，
-    // 后续流量序列渲染 / 抽屉归属 / 合并落库 全链路以它为准，无需反推。
-    const stage = stageForAction(action);
+    // 阶段索引字段：模板规则只含 cache 动作，硬归属 cache 阶段（写死，不反推）。
+    // 落库即带 stage，后续流量序列渲染 / 抽屉归属 / 合并落库 全链路以它为准。
+    const stage = 'cache';
     return {
-      // priority 从 10 起步、步长 10：给用户留出往中间插自己规则的空间，
-      // 不至于一加规则就得把整串重排。
+      // priority 从 10 起步、步长 10（顺序 1 最先、数字越大越靠后）：
+      // 给用户留出往中间插自己规则的空间，不至于一加规则就得把整串重排。
       id: `tpl-${id}-${i + 1}`,
       priority: (i + 1) * 10,
       enabled: true,

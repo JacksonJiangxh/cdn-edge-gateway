@@ -845,6 +845,17 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
   flex-wrap: wrap;
 }
 .rule-head .field { margin-bottom: 0; min-width: 130px; flex: 0 0 auto; }
+/* 规则卡片折叠：默认折叠态只显示 header（规则名），点 header 展开详情 */
+.rule-card { cursor: default; }
+.rule-grip { flex: 0 0 auto; font-size: 15px; line-height: 1; color: var(--text-mute); cursor: grab; user-select: none; padding: 0 2px; border-radius: 5px; }
+.rule-grip:hover { color: var(--primary); background: var(--panel-2); }
+.rule-tw { font-size: 10px; color: var(--text-mute); transition: transform .15s; flex: 0 0 auto; }
+.rule-name-label { font-weight: 600; font-size: 14px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
+.rule-prio-hint { font-size: 11.5px; color: var(--text-mute); }
+.rule-card.collapsed .rule-tw { transform: rotate(0deg); }
+.rule-card:not(.collapsed) .rule-tw { transform: rotate(90deg); }
+.rule-card.collapsed .rule-detail { display: none; }
+.rule-card:not(.collapsed) .rule-detail { display: block; }
 
 /* 可折叠子模块卡片（对齐 EO 规则子模块） */
 .subcard {

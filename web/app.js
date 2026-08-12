@@ -361,6 +361,64 @@
     return (p && (p.name || p.id)) || id;
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // 阶段字典（最底层 action → 阶段 的唯一映射）—— 顶层定义，供流量序列、规则抽屉、
+  // 规则卡片等所有顶层函数共享（避免 openRulesDrawer / buildRuleCard 因作用域嵌套
+  // 而访问不到 ruleStage，导致「ruleStage is not defined」）。
+  //
+  // 设计原则（对标 nginx 的 http/server/location 模块化分片段聚合）：
+  //   1) 一个 action 必然只属于「某一个」阶段（一个规则集），不存在跨阶段。
+  //   2) 本字典是全链路唯一真相源：流量序列渲染、抽屉归属/受限、规则集聚合、
+  //      规则片段、合并落库，全部以 `rule.stage` 字段为索引，不再各自从 action
+  //      反推。任何阶段/动作的增删减，只改这里一处。
+  //   3) 单阶段是硬约束：可添加 action 的下拉列表由「当前阶段字段」决定，
+  //      回源规则里绝不会出现缓存等其它阶段的 action，因此一条规则的所有
+  //      action 必然只属于同一阶段字段，不存在跨阶段叠加。
+  //   4) 阶段索引只来自「抽屉入口」，绝不反推：下拉框选项受 allowedOps 约束，
+  //      只能是本阶段那一个动作类型；用户在「选择新建什么操作」那一刻，阶段
+  //      就唯一确定了。规则落库时必带 r.stage，渲染/筛选/合并均以 r.stage 为准。
+  //      反推（按 STAGE_ORDER 顺序猜）不可控（曾致 ⑪ 抢 ⑯ 越界），已彻底弃用。
+  // ─────────────────────────────────────────────────────────────────────────
+  const STAGE_ORDER = ['rewrite', 'redirect', 'terminate', 'reqHeaders', 'origin', 'cache', 'respHeaders'];
+  const STAGE_OPS = {
+    rewrite: { title: 'URL 重写', en: 'rewrite', owner: '路由规则抽屉 · URL 重写', icon: '✂️', order: 1, allowedOps: ['rewrite'], hideTargetPool: true,
+      match: (a) => !!(a.rewrite && a.rewrite.type && a.rewrite.type !== 'none') },
+    redirect: { title: '重定向规则', en: 'redirect', owner: '路由规则抽屉 · 重定向', icon: '↪️', order: 2, allowedOps: ['redirect'], hideTargetPool: true,
+      match: (a) => !!(a.redirect && a.redirect.enabled) },
+    terminate: { title: '强制 HTTPS / 直接响应（终止型）', en: 'terminate', owner: '路由规则抽屉 · 强制HTTPS / 直接响应', icon: '🔒', order: 3, allowedOps: ['forceHttps', 'directResponse'], hideTargetPool: true,
+      match: (a) => !!(a.forceHttps || (a.directResponse && a.directResponse.enabled)) },
+    reqHeaders: { title: '修改请求头', en: 'reqHeaders', owner: '路由规则抽屉 · 修改请求头', icon: '📤', order: 4, allowedOps: ['reqHeaders'], hideTargetPool: true,
+      match: (a) => { const h = a.reqHeaders || {}; return !!(h.set && Object.keys(h.set).length) || !!(h.remove && h.remove.length); } },
+    origin: { title: 'Origin Rules（回源规则）', en: 'origin', owner: '路由规则抽屉 · Origin Rules', icon: '🔀', order: 5, allowedOps: ['hostHeader', 'originConn', 'targetPool'], hideTargetPool: false,
+      // inherit 是「不改动回源 Host」的默认值，schema 给每条规则都补 inherit，
+      // 绝不能算 Origin Rules —— 否则每条规则都会被误判进 origin 越界。
+      match: (a) => !!(a.poolId || (a.inlineOrigins || []).length
+        || (a.hostHeader && a.hostHeader.mode && a.hostHeader.mode !== 'accel' && a.hostHeader.mode !== 'inherit')
+        || a.engine || a.scheme || Number(a.port) > 0) },
+    cache: { title: 'Cache Rules（缓存规则）', en: 'cache', owner: '路由规则抽屉 · Cache Rules（缓存策略）', icon: '📥', order: 6, allowedOps: ['cache'], hideTargetPool: true,
+      match: (a) => !!(a.cache && (a.cache.enabled || a.cache.mode === 'noCache')) },
+    respHeaders: { title: '改写响应头 / Response Cache Rule', en: 'respHeaders', owner: '路由规则抽屉 · 改写响应头 / Response Cache Rule', icon: '📝', order: 7, allowedOps: ['respHeaders'], hideTargetPool: true,
+      match: (a) => { const h = a.respHeaders || {}; return !!(h.set && Object.keys(h.set).length) || !!(h.remove && h.remove.length); } },
+  };
+  // 旧版「带圈数字」阶段标识 → 新版英文名 的兼容映射（老数据 rule.stage 可能是 '⑪' 等）
+  const STAGE_ALIASES = {
+    '⑤': 'rewrite', '⑥': 'redirect', '⑦': 'terminate', '⑧': 'reqHeaders',
+    '⑨': 'origin', '⑪': 'cache', '⑯': 'respHeaders',
+  };
+  function normalizeStage(s) {
+    if (!s) return null;
+    if (STAGE_OPS[s]) return s;
+    if (STAGE_ALIASES[s]) return STAGE_ALIASES[s];
+    return null;
+  }
+  // 规则阶段索引：只认落库的 r.stage 字段，绝不反推。
+  // 反推（stageForAction）曾因 STAGE_ORDER 顺序不可控（origin 抢 respHeaders）导致规则越界/不渲染，
+  // 现已彻底弃用。正常数据在建/改时必由受限抽屉写入 stage；读取时经 normalizeStage 兼容老数据的旧带圈数字，
+  // 缺 stage 的老脏数据在流量序列中不渲染，但进任意抽屉保存一次即自愈（落库必带 stage）。
+  function ruleStage(r) {
+    return normalizeStage(r && r.stage) || null;
+  }
+
   // 把一个站点（或所有站点）的请求处理流程，按「请求入口 → 最终用户」的真实顺序，
   // 渲染成一条可点击的竖向流水线。点击任一阶段，跳转到对应环节的设置；单站点下规则可拖拽排序。
   async function renderTrafficSequence() {
@@ -406,53 +464,6 @@
     } catch { GLOBAL_RULES = []; }
     GLOBAL_RULES = GLOBAL_RULES.slice().sort((a, b) => (b.priority || 0) - (a.priority || 0));
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // 阶段字典（最底层 action → 阶段 的唯一映射）
-    //
-    // 设计原则（对标 nginx 的 http/server/location 模块化分片段聚合）：
-    //   1) 一个 action 必然只属于「某一个」阶段（一个规则集），不存在跨阶段。
-    //   2) 本字典是全链路唯一真相源：流量序列渲染、抽屉归属/受限、规则集聚合、
-    //      规则片段、合并落库，全部以 `rule.stage` 字段为索引，不再各自从 action
-    //      反推。任何阶段/动作的增删减，只改这里一处。
-    //   3) 单阶段是硬约束：可添加 action 的下拉列表由「当前阶段字段」决定，
-    //      回源规则里绝不会出现缓存等其它阶段的 action，因此一条规则的所有
-    //      action 必然只属于同一阶段字段，不存在跨阶段叠加。
-    //      stageForAction 仅作落库/历史规则的反推兜底：因 action 已被字段约束
-    //      在同一阶段内，反推结果必然等于该阶段，不是「从多个里挑一个」。
-    // ─────────────────────────────────────────────────────────────────────────
-    const STAGE_ORDER = ['⑤', '⑥', '⑦', '⑧', '⑨', '⑪', '⑯'];
-    const STAGE_OPS = {
-      '⑤': { title: 'URL 重写', owner: '路由规则抽屉 · URL 重写', icon: '✂️', allowedOps: ['rewrite'], hideTargetPool: true,
-        match: (a) => !!(a.rewrite && a.rewrite.type && a.rewrite.type !== 'none') },
-      '⑥': { title: '重定向规则', owner: '路由规则抽屉 · 重定向', icon: '↪️', allowedOps: ['redirect'], hideTargetPool: true,
-        match: (a) => !!(a.redirect && a.redirect.enabled) },
-      '⑦': { title: '强制 HTTPS / 直接响应（终止型）', owner: '路由规则抽屉 · 强制HTTPS / 直接响应', icon: '🔒', allowedOps: ['forceHttps', 'directResponse'], hideTargetPool: true,
-        match: (a) => !!(a.forceHttps || (a.directResponse && a.directResponse.enabled)) },
-      '⑧': { title: '修改请求头', owner: '路由规则抽屉 · 修改请求头', icon: '📤', allowedOps: ['reqHeaders'], hideTargetPool: true,
-        match: (a) => { const h = a.reqHeaders || {}; return !!(h.set && Object.keys(h.set).length) || !!(h.remove && h.remove.length); } },
-      '⑨': { title: 'Origin Rules', owner: '路由规则抽屉 · Origin Rules', icon: '🔀', allowedOps: ['hostHeader', 'originConn', 'targetPool'], hideTargetPool: false,
-        // inherit 是「不改动回源 Host」的默认值，schema 给每条规则都补 inherit，
-        // 绝不能算 Origin Rules —— 否则每条规则都会被误判进 ⑨ 越界。
-        match: (a) => !!(a.poolId || (a.inlineOrigins || []).length
-          || (a.hostHeader && a.hostHeader.mode && a.hostHeader.mode !== 'accel' && a.hostHeader.mode !== 'inherit')
-          || a.engine || a.scheme || Number(a.port) > 0) },
-      '⑪': { title: 'Cache Rules（缓存请求设置）', owner: '路由规则抽屉 · Cache Rules（缓存策略）', icon: '📥', allowedOps: ['cache'], hideTargetPool: true,
-        match: (a) => !!(a.cache && (a.cache.enabled || a.cache.mode === 'noCache')) },
-      '⑯': { title: '改写响应头 / Response Cache Rule', owner: '路由规则抽屉 · 改写响应头 / Response Cache Rule', icon: '📝', allowedOps: ['respHeaders'], hideTargetPool: true,
-        match: (a) => { const h = a.respHeaders || {}; return !!(h.set && Object.keys(h.set).length) || !!(h.remove && h.remove.length); } },
-    };
-    // 由 action 反推所属阶段（兜底用）：返回 STAGE_ORDER 中第一个命中的阶段号，无则 null。
-    function stageForAction(a) {
-      a = a || {};
-      for (const no of STAGE_ORDER) if (STAGE_OPS[no].match(a)) return no;
-      return null;
-    }
-    // 读取一条规则的归属阶段：优先用落库的 stage 字段（全链路唯一索引），
-    // 未携带（历史数据）时用 action 兜底推导一次。
-    function ruleStage(r) {
-      return (r && r.stage) || stageForAction(r && r.action);
-    }
-
     // 汇总一条规则的动作子阶段（用于序列展示）
     function ruleSubs(r) {
       const a = r.action || {};
@@ -481,7 +492,7 @@
     }
 
     // 渲染单个站点的完整序列（draggable=true 时规则可拖拽）
-    // 严格按「①→⑱」18 个阶段顺序；阶段间相互独立（AND），阶段内规则集是 OR（按 priority 降序从上到下匹配，命中即跳出本阶段）。
+    // 严格按「①→⑱」18 个阶段顺序；阶段间相互独立（AND），阶段内规则集是 OR（按「顺序」从上到下匹配，顺序 1 最先，命中即跳出本阶段）。
     // 某阶段站点无规则时，回落全站通用规则（GLOBAL_RULES）作为实际生效，卡片显示「回落全站兜底」。
     function renderSite(site, draggable) {
       const rules = (site.rules || [])
@@ -516,7 +527,7 @@
           flow.appendChild(el('div', { class: 'seq-rule-list' }, matched.map((r) => {
             const condCount = (r.match && r.match.conditions || []).reduce((n, g) => n + g.length, 0);
             const idx = rules.indexOf(r);
-            const node = seqRuleInPack(r, ruleSubs(r), condCount, site.host, draggable);
+            const node = seqRuleInPack(r, ruleSubs(r), condCount, site.host, draggable, ruleStage(r), idx + 1);
             if (draggable && idx >= 0) ruleNodes.push({ node, index: idx });
             return node;
           })));
@@ -595,21 +606,21 @@
         '暂不支持', null, null, null));
 
       // ── ⑤~⑪ 规则驱动阶段：每个阶段卡片即一个独立规则引擎 ────────
-      flow.appendChild(seqGroup('⑤-⑪', '规则驱动阶段（每个阶段 = 一个独立规则引擎）', '流量依次经过这些阶段，每个阶段内部按 priority 降序（从上到下）匹配，命中即跳出本阶段进入下游；站点无设置则回落全站通用规则。多分支用「回源目标」条件表达：在规则匹配里加 target=origin/originAddr（③ 选出的具体源站），如「路径=/img/ 且 回源目标=oX → 动作」，⑦~⑱ 全部共用一条线，⑩⑭ 是真实只读的实际生效结果。'));
+      flow.appendChild(seqGroup('⑤-⑪', '规则驱动阶段（每个阶段 = 一个独立规则引擎）', '流量依次经过这些阶段，每个阶段内部按「顺序」从上到下匹配（顺序 1 最先匹配，数字越大越靠后），命中即跳出本阶段进入下游；站点无设置则回落全站通用规则。顺序靠拖拽调整。多分支用「回源目标」条件表达：在规则匹配里加 target=origin/originAddr（③ 选出的具体源站），如「路径=/img/ 且 回源目标=oX → 动作」，⑦~⑱ 全部共用一条线，⑩⑭ 是真实只读的实际生效结果。'));
 
       // 以下各阶段全部以 STAGE_OPS 字典为唯一真相源驱动渲染与抽屉归属
-      renderRuleStage('⑤', '✂️', 'URL 重写', '按规则改写客户端请求路径（不含源站 pathPrefix）', null, STAGE_OPS['⑤']);
-      renderRuleStage('⑥', '↪️', '重定向规则', '把请求重定向到其它 URL（命中即终止回源）', null, STAGE_OPS['⑥']);
-      renderRuleStage('⑦', '🔒', '强制 HTTPS / 直接响应（终止型）', '命中 http 返回 301/307 跳 https，或直接用自定义 body/status 响应，不再回源', null, STAGE_OPS['⑦']);
-      renderRuleStage('⑧', '📤', '修改请求头', '在回源请求发出去之前增 / 删 / 改 HTTP 头', null, STAGE_OPS['⑧']);
-      renderRuleStage('⑨', '🔀', 'Origin Rules', '更改回源目标：回源 Host、回源连接参数（引擎/协议/端口）或候选源站', null, STAGE_OPS['⑨']);
+      renderRuleStage('rewrite', '✂️', 'URL 重写', '按规则改写客户端请求路径（不含源站 pathPrefix）', null, STAGE_OPS['rewrite']);
+      renderRuleStage('redirect', '↪️', '重定向规则', '把请求重定向到其它 URL（命中即终止回源）', null, STAGE_OPS['redirect']);
+      renderRuleStage('terminate', '🔒', '强制 HTTPS / 直接响应（终止型）', '命中 http 返回 301/307 跳 https，或直接用自定义 body/status 响应，不再回源', null, STAGE_OPS['terminate']);
+      renderRuleStage('reqHeaders', '📤', '修改请求头', '在回源请求发出去之前增 / 删 / 改 HTTP 头', null, STAGE_OPS['reqHeaders']);
+      renderRuleStage('origin', '🔀', 'Origin Rules', '更改回源目标：回源 Host、回源连接参数（引擎/协议/端口）或候选源站', null, STAGE_OPS['origin']);
 
       // ── ⑩ 确定实际源站（运行时推导，纯只读）──────────────────
       // 池覆盖本质属于 ⑨ Origin Rules 阶段（action.poolId），统一以 ruleStage 索引，
       // 不再从 action 现场反推，与流量序列其它阶段一致。
-      const ovrPool = rules.find((r) => ruleStage(r) === '⑨' && r.action && r.action.poolId);
-      const globalOv = !ovrPool && GLOBAL_RULES.find((r) => ruleStage(r) === '⑨' && r.action && r.action.poolId);
-      flow.appendChild(seqGroup('⑩', '确定实际源站', '沿用 ③ 首要分流结果，或被 ⑨「Origin Rules」阶段命中的规则覆盖（运行时推导，无独立配置项）'));
+      const ovrPool = rules.find((r) => ruleStage(r) === 'origin' && r.action && r.action.poolId);
+      const globalOv = !ovrPool && GLOBAL_RULES.find((r) => ruleStage(r) === 'origin' && r.action && r.action.poolId);
+      flow.appendChild(seqGroup('⑩', '确定实际源站', '沿用 ③ 首要分流结果，或被 origin 阶段命中的规则覆盖（运行时推导，无独立配置项）'));
       flow.appendChild(seqStage('🧭', '⑩ 实际源站',
         ovrPool
           ? `存在站点规则覆盖 → ${poolName(ovrPool.action.poolId)}（命中该规则时生效）`
@@ -621,8 +632,8 @@
       renderRuleStage('⑪', '📥', 'Cache Rules（缓存请求设置）', '缓存策略（edgeTtl / SWR / browserTtl / 绕过缓存）等请求级缓存设置', null, STAGE_OPS['⑪']);
 
       // ── ⑫ 缓存键（可干预：站点 cacheGen）──────────────────────
-      flow.appendChild(seqGroup('⑫', '缓存键', '合并 policy = 默认 < 源站级 cache < ⑪ Cache Rules；本环节可干预项：站点 cacheGen（代次）。'));
-      const cacheRules = rules.filter((r) => ruleStage(r) === '⑪');
+      flow.appendChild(seqGroup('⑫', '缓存键', '合并 policy = 默认 < 源站级 cache < cache 阶段(Cache Rules)；本环节可干预项：站点 cacheGen（代次）。'));
+      const cacheRules = rules.filter((r) => ruleStage(r) === 'cache');
       const hasCache = cacheRules.some((r) => r.action.cache.enabled);
       flow.appendChild(seqStage('🔖', '⑫ 合并缓存策略 & 构造缓存键',
         `⑪ 缓存动作 ${cacheRules.length} 条 · 站点 cacheGen=${site.cacheGen || 0}${hasCache ? '（已启用节点缓存）' : ''}`,
@@ -640,9 +651,9 @@
       const fo = (pool && pool.failover) || {};
       // 回源连接参数（clientIp/超时/跟随3xx、engine/scheme/port）均属 ⑨ Origin Rules 阶段，
       // 统一以 ruleStage 索引，不再从 action 现场反推。
-      const connRule = rules.find((r) => ruleStage(r) === '⑨');
-      const gConnRule = !connRule && GLOBAL_RULES.find((r) => ruleStage(r) === '⑨');
-      flow.appendChild(seqGroup('⑭', '回源循环 requestWithFailover（真正发出回源请求）', '逐个源站尝试；⑤⑨⑧ 各阶段规则在此对每个源站落地；回源连接参数受规则 clientIp / 超时 / 跟随3xx 影响。可干预：源站地址、策略、故障转移。'));
+      const connRule = rules.find((r) => ruleStage(r) === 'origin');
+      const gConnRule = !connRule && GLOBAL_RULES.find((r) => ruleStage(r) === 'origin');
+      flow.appendChild(seqGroup('⑭', '回源循环 requestWithFailover（真正发出回源请求）', '逐个源站尝试；rewrite/origin/reqHeaders 各阶段规则在此对每个源站落地；回源连接参数受规则 clientIp / 超时 / 跟随3xx 影响。可干预：源站地址、策略、故障转移。'));
       flow.appendChild(seqStage('🗄️', '⑭ 源站与故障转移',
         pool
           ? (poolKind(pool) === 'single'
@@ -672,8 +683,8 @@
         'cacheKey 已在 ⑫ 固定，不随 ⑭ 换源变化。运行时行为。', '运行时', null, null, null));
 
       // ── ⑯ 改写响应头（含 response cache rule）──────────────────
-      flow.appendChild(seqGroup('⑯', '改写响应头（含 response cache rule）', '回源响应返回用户前的所有响应头改写，以及 CF 风格 response cache rule（响应级缓存控制）。'));
-      renderRuleStage('⑯', '📝', '改写响应头 / Response Cache Rule', '增 / 删 / 改响应头，以及响应级缓存控制（response cache rule）', null, STAGE_OPS['⑯']);
+      flow.appendChild(seqGroup('respHeaders', '改写响应头（含 response cache rule）', '回源响应返回用户前的所有响应头改写，以及 CF 风格 response cache rule（响应级缓存控制）。'));
+      renderRuleStage('respHeaders', '📝', '改写响应头 / Response Cache Rule', '增 / 删 / 改响应头，以及响应级缓存控制（response cache rule）', null, STAGE_OPS['respHeaders']);
 
       // ── ⑰ 写缓存 ───────────────────────────────────────────────
       flow.appendChild(seqGroup('⑰', '写边缘缓存', '按 ⑫ 的 cacheKey 写入 ⑪ 定义的缓存策略。'));
@@ -690,7 +701,7 @@
       return { ruleNodes, rules };
     }
 
-    // 拖拽排序：松手后重算 priority（降序）并保存
+    // 拖拽排序：松手后按新顺序重算每条规则的 priority（顺序 1 = 最前）并保存
     function wireRuleDrag(ruleNodes, rules, site) {
       let dragNode = null;
       const clearMarks = () => ruleNodes.forEach(({ node }) =>
@@ -722,6 +733,8 @@
           rules.splice(to, 0, moved);
           const updated = {
             ...site,
+            // 顺序号 = (总数 - 当前下标)，即拖到最顶的规则 priority 最大、最先匹配；
+            // 展示层统一呈现为「顺序 1 最前、数字越大越靠后」。
             rules: rules.map((r, i) => ({ ...r, priority: (rules.length - i) * 10 })),
           };
           // 同步内存，便于切换站点后保持一致
@@ -784,11 +797,11 @@
           ? `${matched.length} 条规则（按优先级从上到下匹配，命中即跳出本阶段）；${stageSummary}`
           : `未配置；${stageSummary}`;
         flow.appendChild(seqStage(icon, `${no} ${title}`, summary, matched.length ? `${matched.length} 条` : '未配置', 'sec-rules',
-          () => openGlobalRulesDrawer(), '全站通用规则编辑器'));
+          () => openGlobalRulesDrawer(no, { ...STAGE_OPS[no], stage: no }), '全站通用规则编辑器'));
         if (matched.length) {
           flow.appendChild(el('div', { class: 'seq-rule-list' }, matched.map((r) => {
             const condCount = (r.match && r.match.conditions || []).reduce((n, g) => n + g.length, 0);
-            const node = seqRuleInPack(r, ruleSubs(r), condCount, '__global__', false);
+            const node = seqRuleInPack(r, ruleSubs(r), condCount, '__global__', false, ruleStage(r), matched.indexOf(r) + 1);
             return node;
           })));
         }
@@ -804,13 +817,13 @@
       flow.appendChild(seqStage('🔧', '④ URL 规范化', '全站通用规则暂不支持 URL 规范化。', '暂不支持', null, null, null));
 
       flow.appendChild(seqGroup('⑤-⑪', '规则驱动阶段（全站兜底）', '各阶段全站兜底规则；站点序列某阶段无设置时，即实际生效这些规则。'));
-      gStage('⑤', '✂️', 'URL 重写', '按规则改写客户端请求路径', null);
-      gStage('⑥', '↪️', '重定向规则', '把请求重定向到其它 URL', null);
-      gStage('⑦', '🔒', '强制 HTTPS / 直接响应', '命中 http 跳 https，或直接响应', null);
-      gStage('⑧', '📤', '修改请求头', '回源前增删改 HTTP 头', null);
-      gStage('⑨', '🔀', 'Origin Rules', '改回源 Host / 回源连接参数 / 候选源站', null);
-      gStage('⑪', '📥', 'Cache Rules（缓存请求设置）', '缓存策略等请求级缓存设置', null);
-      gStage('⑯', '📝', '改写响应头 / Response Cache Rule', '响应头改写与响应级缓存控制', null);
+      gStage('rewrite', '✂️', 'URL 重写', '按规则改写客户端请求路径', null);
+      gStage('redirect', '↪️', '重定向规则', '把请求重定向到其它 URL', null);
+      gStage('terminate', '🔒', '强制 HTTPS / 直接响应', '命中 http 跳 https，或直接响应', null);
+      gStage('reqHeaders', '📤', '修改请求头', '回源前增删改 HTTP 头', null);
+      gStage('origin', '🔀', 'Origin Rules', '改回源 Host / 回源连接参数 / 候选源站', null);
+      gStage('cache', '📥', 'Cache Rules（缓存规则）', '缓存策略等请求级缓存设置', null);
+      gStage('respHeaders', '📝', '改写响应头 / Response Cache Rule', '响应头改写与响应级缓存控制', null);
 
       flow.appendChild(seqGroup('⑫-⑱', '缓存 / 回源 / 响应（运行时）', '全站兜底规则在此被应用；以下为运行时推导行为。'));
       flow.appendChild(seqStage('🔖', '⑫ 缓存键', '合并 policy 时，全站规则的缓存动作作为最低优先级兜底。', '推导', null, null, null));
@@ -820,8 +833,8 @@
       flow.appendChild(seqStage('💾', '⑰ 写缓存', '按 ⑪ 全站缓存策略写入。', '运行时', null, null, null));
       flow.appendChild(seqStage('👤', '⑱ 返回用户', '固定行为。', '固定', null, null, null));
 
-      const btn = el('button', { class: 'btn', text: '编辑全站通用规则' });
-      btn.onclick = () => openGlobalRulesDrawer();
+      const btn = el('button', { class: 'btn', text: '编辑全站通用规则（⑪ 缓存）' });
+      btn.onclick = () => openGlobalRulesDrawer('cache', { ...STAGE_OPS['cache'], stage: 'cache' });
       flow.appendChild(el('div', { class: 'seq-tools' }, [btn]));
     }
 
@@ -863,11 +876,11 @@
   // 流量序列：挂在 ⑤~⑯ 规则引擎环节下的具体规则节点。点击打开规则编辑器
   // （整条规则及其所有 action 都在此编辑，不按 action 类型拆子环节）。
   // draggable=true 时整体可拖拽（手柄 + draggable 属性），用于调整优先级。
-  function seqRuleInPack(rule, subs, condCount, host, draggable) {
+  function seqRuleInPack(rule, subs, condCount, host, draggable, stageNo, orderNo) {
     const a = rule.action || {};
     const head = el('div', { class: 'seq-rule-head' }, [
-      draggable ? el('span', { class: 'seq-grip', title: '拖拽调整优先级', text: '⠿' }) : null,
-      el('span', { class: 'seq-rule-prio', text: 'P' + (rule.priority || 0) }),
+      draggable ? el('span', { class: 'seq-grip', title: '拖拽调整顺序', text: '⠿' }) : null,
+      el('span', { class: 'seq-rule-prio', text: '顺序 ' + (orderNo != null ? orderNo : '?') }),
       el('span', { class: 'seq-rule-name', text: (rule.name || (rule.id ? '#' + rule.id : '规则')) + (a.poolId ? ' → ' + poolName(a.poolId) : '') }),
       el('span', { class: 'seq-badge ' + (rule.enabled === false ? 'off' : 'on'), text: rule.enabled === false ? '停用' : '启用' }),
     ]);
@@ -884,7 +897,11 @@
       el('div', { class: 'seq-go', text: '编辑规则 →' }),
     ]);
     if (draggable) node.draggable = true;
-    node.onclick = () => openRulesDrawer(host);
+    // 方案 B：彻底移除「完整编辑器」。单条规则的「编辑规则 →」直接进它所属阶段的
+    // 受限抽屉（按 rule.stage 定位），与阶段卡片入口完全一致，绝不越界到其它阶段。
+    const rStage = stageNo || ruleStage(rule);
+    const rOpts = rStage && STAGE_OPS[rStage] ? { ...STAGE_OPS[rStage], stage: rStage } : null;
+    node.onclick = () => rOpts ? openRulesDrawer(host, rOpts) : toast('该规则无有效阶段索引', 'err');
     return node;
   }
 
@@ -1514,7 +1531,9 @@
     // 手动加的规则也建议写上，否则几个月后没人记得这条规则是干嘛的。
     const rName = el('input', { class: 'input', value: rule.name || '', placeholder: '如：静态资源长缓存（选填）' });
     const rNote = el('input', { class: 'input', value: rule.note || '', placeholder: '这条规则为什么这么配（选填）' });
-    const priority = el('input', { class: 'input', type: 'number', value: rule.priority || 0, placeholder: '数字，越小越靠上（先匹配）' });
+    // 注意：不暴露「顺序/权重」输入框。规则顺序完全由流量序列里的拖拽决定
+    // （wireRuleDrag 重算 priority 并落库）；新建规则默认排在本阶段顺序最后
+    // （priority 取原值或 0 = 最靠后）。
     // 目标源站：下拉选择已有源站（单一源站或源站池），也可直接输入其 id；
     // 单一源站与源站池在同一个下拉里，引用方式完全一致（都是 poolId）。
     // （该字段仅属于 ⑨ Origin Rules 的「候选源站」动作，非该包的受限抽屉会隐藏它以避免越界。）
@@ -1787,6 +1806,7 @@
       };
       built.node.querySelector('.section-toggle').appendChild(removeBtn);
       opsList.appendChild(built.node);
+      ensureExpanded();
       built.node.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
 
@@ -1802,42 +1822,56 @@
     // 初始只挂载该规则实际启用的操作卡片（受限模式下只挂白名单内的）
     activeOpKeys(rule.action).forEach((k) => { if (!allowed || allowed.has(k)) mountOp(k); });
 
-    const card = el('div', { class: 'rule-card', id: 'rule-' + (rule.id || 'new') }, [
+    // 折叠：已有规则（带 id）默认折叠，只显示规则名；新建规则默认展开便于立即配置。
+    // 点 header 切换展开/折叠；「删除」与「启用」等交互元素 stopPropagation，避免误触折叠。
+    const isExisting = !!(rule && rule.id);
+    const card = el('div', { class: 'rule-card' + (isExisting ? ' collapsed' : ''), id: 'rule-' + (rule.id || 'new') }, [
       el('div', { class: 'rule-head' }, [
+        el('span', { class: 'rule-grip', text: '⠿', title: '拖拽调整顺序' }),
+        el('span', { class: 'rule-tw', text: '▸' }),
+        el('span', { class: 'rule-name-label', text: (rule && rule.name) || (isExisting ? '（未命名规则）' : '新建规则') }),
         el('label', { class: 'check' }, [en, el('span', { text: '启用' })]),
-        field('优先级', priority),
-        el('button', { class: 'btn btn-sm btn-danger', text: '删除规则', onclick: () => card.remove() }),
+        el('span', { class: 'rule-prio-hint', text: '顺序靠拖拽调整' }),
+        el('button', { class: 'btn btn-sm btn-danger', text: '删除', onclick: (e) => { e.stopPropagation(); card.remove(); } }),
       ]),
-      field('规则名称', rName, '给这条规则起个一眼能看懂的名字，会显示在流量序列里。'),
-      field('备注', rNote, '记下这么配的原因，方便日后自己或同事回看。'),
-      section('匹配条件（决定哪些请求命中此规则）', '每个条件组内的多条条件为「与」关系，多个条件组之间为「或」关系', [
-        conds.root,
-      ]),
-      // 目标源站 + 按需添加的「操作卡片」：未添加的操作不渲染
-      section('操作（命中后执行的操作）', allowed
-        ? '本抽屉仅允许配置「' + opts.title + '」所属的最小任务包，不可越界添加其它动作类型。'
-        : '先选「目标源站」，再点「添加操作」加入需要的动作；每个动作是独立卡片，未添加的不显示', [
-        // 目标源站属于 ⑨ Origin Rules 的「候选源站」动作，非该包的受限抽屉隐藏，避免越界
-        ...(hideTargetPool ? [] : [field('目标源站（这条规则命中后回到哪台后端）', el('div', {}, [poolSel, poolDatalist]),
-          '决定「命中条件的请求」回源到哪个源站：留空则回退到站点默认源站；也可从「源站」页已有的单一源站 / 源站池里选一个。简单站一般不用改，留空即可。')]),
-        ...(shownGroups.length ? [el('div', { class: 'op-add' }, [
-          el('span', { class: 'op-add-label', text: '添加操作：' }),
-          actionAddSel,
-        ])] : [el('div', { class: 'hint' }, '本任务包没有可添加的子操作（仅「目标源站」一项）。')]),
-        opsList,
+      // 详情区：折叠时整体隐藏
+      el('div', { class: 'rule-detail' }, [
+        field('规则名称', rName, '给这条规则起个一眼能看懂的名字，会显示在流量序列里。'),
+        field('备注', rNote, '记下这么配的原因，方便日后自己或同事回看。'),
+        section('匹配条件（决定哪些请求命中此规则）', '每个条件组内的多条条件为「与」关系，多个条件组之间为「或」关系', [
+          conds.root,
+        ]),
+        // 目标源站 + 按需添加的「操作卡片」：未添加的操作不渲染
+        section('操作（命中后执行的操作）', allowed
+          ? '本抽屉仅允许配置「' + opts.title + '」所属的最小任务包，不可越界添加其它动作类型。'
+          : '先选「目标源站」，再点「添加操作」加入需要的动作；每个动作是独立卡片，未添加的不显示', [
+          // 目标源站属于 ⑨ Origin Rules 的「候选源站」动作，非该包的受限抽屉隐藏，避免越界
+          ...(hideTargetPool ? [] : [field('目标源站（这条规则命中后回到哪台后端）', el('div', {}, [poolSel, poolDatalist]),
+            '决定「命中条件的请求」回源到哪个源站：留空则回退到站点默认源站；也可从「源站」页已有的单一源站 / 源站池里选一个。简单站一般不用改，留空即可。')]),
+          ...(shownGroups.length ? [el('div', { class: 'op-add' }, [
+            el('span', { class: 'op-add-label', text: '添加操作：' }),
+            actionAddSel,
+          ])] : [el('div', { class: 'hint' }, '本任务包没有可添加的子操作（仅「目标源站」一项）。')]),
+          opsList,
+        ]),
       ]),
     ]);
+    // 点 header 折叠/展开
+    card.querySelector('.rule-head').addEventListener('click', () => card.classList.toggle('collapsed'));
+    // 「添加操作」后确保卡片处于展开态并滚动可见（否则折叠态下看不到刚加的操作卡）
+    const ensureExpanded = () => card.classList.remove('collapsed');
 
     const read = () => {
       // 受限模式：以原始 action 为基底，只覆盖本包允许编辑的字段，其余字段原样保留（不丢数据、不越界）
       const action = allowed ? JSON.parse(JSON.stringify(rule.action || {})) : {};
       if (!allowed || !hideTargetPool) action.poolId = poolSel.value;
       for (const r of opReaders) Object.assign(action, r());
-      // 关键：stage 是全链路唯一阶段索引。
-      // 受限抽屉（opts.stage 来自 STAGE_OPS 字典）→ 直接写入该阶段；
-      // 完整编辑器 → 可添加 action 的下拉列表由阶段字段决定，故其中任意
-      //   action 反推（stageForAction）都落在该阶段，两者必然一致，不存在跨阶段。
-      const stage = opts.stage || stageForAction(action);
+      // 关键：stage 是全链路唯一阶段索引，且只来自「抽屉入口」，绝不反推。
+      // 受限抽屉的 opts.stage 直接来自 STAGE_OPS 字典（下拉框选项受 allowedOps
+      // 约束，只能是本阶段那一个动作类型），故落库阶段在「用户选择抽屉」那一刻
+      // 就唯一确定了，不需要、也不允许从 action 反推（反推顺序不可控，曾导致
+      // 响应头规则被误判进缓存阶段）。方案 B 已彻底移除完整编辑器，此处 opts.stage 必然存在。
+      const stage = opts.stage;
       return {
         id: rule.id || ('r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)),
         // name/note 跟随规则一起回写。不带上就会在每次保存时被抹掉，
@@ -1845,7 +1879,9 @@
         name: rName.value.trim(),
         note: rNote.value.trim(),
         enabled: en.checked,
-        priority: Number(priority.value) || 0,
+        // 优先级不暴露输入框，完全由拖拽排序决定（wireRuleDrag 重算后落库）。
+        // 新建规则默认 priority 0（排在本阶段顺序最后）；编辑沿用其原 priority。
+        priority: rule.priority || 0,
         // 阶段索引字段：流量序列渲染 / 抽屉归属 / 规则集聚合 / 合并落库 全部以它为准
         stage,
         match: {
@@ -1858,7 +1894,11 @@
   }
 
   // 全站通用规则（兜底）编辑器：规则对所有站点生效，仅当站点自身规则未命中时触发
-  async function openGlobalRulesDrawer() {
+  async function openGlobalRulesDrawer(stage, opts) {
+    // 方案 B：全站通用规则编辑器也按阶段受限，不再提供「完整编辑器」。
+    // stage/opts 缺省时回落到 cache（缓存阶段），确保任何入口都不会打开无限制的完整编辑器。
+    const effStage = stage && STAGE_OPS[stage] ? stage : 'cache';
+    const effOpts = opts && STAGE_OPS[effStage] ? { ...STAGE_OPS[effStage], stage: effStage } : { ...STAGE_OPS['cache'], stage: 'cache' };
     let rules = [];
     try {
       const data = await API.rules.global();
@@ -1869,34 +1909,42 @@
     }
     const poolOptions = buildPoolOptions();
 
+    // 受限抽屉只展示属于本阶段（rule.stage === effStage）的全局规则，避免把其它阶段混进来误改
+    const allRules = rules.slice();
+    const shownRules = allRules.filter((r) => ruleStage(r) === effStage);
+
     const rulesBox = el('div', { class: 'rules-box' });
     const ruleReaders = [];
-    rules.forEach((r) => {
-      const { card, read } = buildRuleCard(r, poolOptions);
-      ruleReaders.push(read);
-      rulesBox.appendChild(card);
-    });
-
-    const addRuleBtn = el('button', { class: 'btn btn-sm', text: '+ 添加规则' });
-    addRuleBtn.onclick = () => {
-      const { card, read } = buildRuleCard(null, poolOptions);
+    const makeCard = (r) => {
+      const { card, read } = buildRuleCard(r, poolOptions, null, effOpts);
       ruleReaders.push(read);
       rulesBox.appendChild(card);
     };
+    shownRules.forEach(makeCard);
+
+    const addRuleBtn = el('button', { class: 'btn btn-sm', text: '+ 添加规则' });
+    addRuleBtn.onclick = () => makeCard(null);
+
+    const emptyHint = el('p', { class: 'empty' }, '暂无属于本任务包的全站通用规则，点击「+ 添加规则」新建一条。');
+    emptyHint.style.display = shownRules.length ? 'none' : '';
 
     const body = el('div', { class: 'drawer-body' }, [
-      el('p', { class: 'hint' }, '全站通用规则对任何站点都生效，仅当某站点的自身规则未命中时才触发，相当于全局默认设置（EO 的全局规则概念）。按优先级从上到下匹配，每条规则可独立配置匹配条件与动作。'),
-      el('div', { class: 'subhead' }, [el('span', {}, '全站通用规则'), addRuleBtn]),
+      el('p', { class: 'hint' }, '全站通用规则对任何站点都生效，仅当某站点的自身规则未命中时才触发，相当于全局默认设置（EO 的全局规则概念）。本抽屉只管理「' + effOpts.title + '」这一最小任务包的规则，只能添加/编辑该包允许的动作类型，不会越界到其它包。'),
+      el('div', { class: 'subhead' }, [el('span', {}, '全站通用规则 · ' + effOpts.title), addRuleBtn]),
+      emptyHint,
       rulesBox,
     ]);
 
     const onSave = async () => {
-      const out = [];
+      const edited = [];
       for (const read of ruleReaders) {
         const r = read();
-        if (r) out.push(r);
+        if (r) edited.push(r);
       }
-      await API.rules.saveGlobal(out);
+      // 受限抽屉只动了属于本阶段的规则，其余全局规则原样保留，避免误删其它阶段的规则
+      const editedIds = new Set(edited.map((r) => r.id));
+      const kept = allRules.filter((r) => !editedIds.has(r.id) && ruleStage(r) !== effStage);
+      await API.rules.saveGlobal(kept.concat(edited));
     };
 
     openDrawer('全站通用规则（兜底）', '以下规则对所有站点生效，仅当站点自身规则未命中时触发（全局默认设置）', body, onSave);
@@ -2569,9 +2617,12 @@
     let site;
     try { site = await API.sites.get(host); } catch (e) { toast(e.message, 'err'); return; }
     const poolOptions = buildPoolOptions();
+    // 方案 B：彻底移除「完整编辑器」。任何入口都必须携带 STAGE_OPS 字典的 opts（含 allowedOps）
+    // 以进入受限抽屉；若调用方未传（防御性兜底），回落到 ⑪ 受限抽屉，绝不打开无限制的完整编辑器。
+    if (!opts || !opts.allowedOps) opts = { ...STAGE_OPS['cache'], stage: 'cache' };
     // 受限抽屉的 opts 来自 STAGE_OPS 字典，统一补上 stage（归属阶段）字段，
     // 作为「抽屉归属 / 规则筛选 / 合并落库」的唯一索引。
-    if (opts && opts.allowedOps) opts = { ...opts, stage: opts.stage || null };
+    opts = { ...opts, stage: opts.stage || null };
     const confined = !!(opts && opts.allowedOps);
     const confinedStage = confined ? opts.stage : null;
 
