@@ -161,6 +161,47 @@ esa-cli domain add <domain>   # 绑定域名（须 ESA 子域且已备案）
 
 无论 A/B/C，部署目录都是**仓库根目录**（含 `esa.jsonc` + `dist/public`），不是只传 `dist/public`。
 
+### 方式 D：基于官方 skill 的脚本化部署（esa-cli 驱动，**不依赖 OSS**）
+本仓库已接入阿里云官方 Agent Skills 仓库 `aliyun/alibabacloud-aiops-skills` 中的
+**`alibabacloud-esa-pages-deploy`** skill（项目级软链接：`/workspace/.codebuddy/skills/alibabacloud-esa-pages-deploy`）。
+
+该 skill 描述的是把代码部署到 ESA Functions & Pages。但需注意：**阿里云官方的编程式上传通道
+（`mcp-server-esa` 的 `html_deploy`/`folder_deploy`、以及 SDK 的 `CreateRoutineWithAssetsCodeVersion`）
+底层都会走 OSS 中转上传**。本仓库**刻意不采用 OSS 通道**，而是复用 skill 给出的 `esa-cli` 路径：
+由官方 `esa-cli` 读取 `esa.jsonc`（`entry` + `assets.directory`）完成打包，上传与构建由阿里云后台处理
+（与控制台/GitHub 连接部署是同一通道，**完全不经过 OSS**）。
+
+仓库已在 `scripts/deploy-esa-cli.mjs` 做了项目级接入，并封装为 npm 脚本 `deploy:esa:cli`：
+
+```bash
+# 前置：esa-cli login（AK/SK，需 AliyunESAFullAccess），并开 ER 服务
+npm run deploy:esa:cli                 # 默认 env=production
+npm run deploy:esa:cli staging "hotfix" # 可指定环境/说明
+# 等价手动：npm run build && esa-cli commit --description "..." && esa-cli deploy --environment production
+```
+
+> 与方式 A/B/C 的区别：方式 D 走 `esa-cli` 而非控制台/GitHub 连接，更适合脚本化 / 多环境
+> （preview/staging/production）切换与 CI 调用，但仍**不碰 OSS**（由阿里云后台上传）。
+> 部署后仍需在 ESA 控制台**绑定域名/路由并设 `REDIS_URL`**。
+
+---
+
+## 6.1 官方 skill 接入与软链接（跨 CLI 通用）
+
+本项目以 **CodeBuddy** 为主，skill 实体统一放在 `.codebuddy/skills/`；同时为兼容其它标准
+CLI（Claude Code / Codex 等约定 `~/.agents/skills` 或 `.agents/skills`），把 skill **软链接**
+到 `.agents/skills/`，实体只保留一份（避免两份漂移）。
+
+```text
+.codebuddy/skills/alibabacloud-esa-pages-deploy   ← skill 实体（唯一真源）
+.agents/skills/alibabacloud-esa-pages-deploy     → ../../.codebuddy/skills/alibabacloud-esa-pages-deploy  (软链接)
+.agents/skills/cloudflare                        → ../../.codebuddy/skills/cloudflare                      (软链接，同上)
+.agents/skills/edgeone-makers-tools              → ../../.codebuddy/skills/edgeone-makers-tools           (软链接，同上)
+```
+
+> 如需让其它 CLI 工具发现，可把 `.agents/skills` 软链到其约定的全局目录
+> （如 `ln -s /workspace/.agents/skills ~/.agents/skills` 或 `~/.claude/skills`）。
+
 ---
 
 ## 7. 验证

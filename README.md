@@ -62,6 +62,8 @@
 | 11 | [系统架构](./docs/11-architecture.md) | 代码分层、模块职责、平台能力降级 |
 | 12 | [请求处理流程](./docs/12-request-flow.md) | 一个请求从进到出的完整链路 |
 | 13 | [Redis/Webdis KV 兜底](./docs/13-redis-kv.md) | 无原生 KV 的平台（EO Pages/ESA）用自部署 Redis 持久化 |
+| 14 | [部署到阿里云 ESA](./docs/14-deploy-esa.md) | 把网关部署到 ESA Functions/Pages（控制台 / esa-cli / 流水线） |
+| 15 | [ESA MCP Server](./docs/15-mcp-esa.md) | 在 AI IDE 里用自然语言直接管理 ESA Pages / 边缘函数 / 站点 |
 
 ---
 
