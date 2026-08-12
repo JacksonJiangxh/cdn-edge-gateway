@@ -46,8 +46,8 @@ const DEFAULT_DEV_VARS = `# 本地开发 Secrets（已被 .gitignore 忽略，�
 ADMIN_PASSWORD=local-dev-pass
 JWT_SECRET=0011223344556677889900aabbccddeeff0011223344556677889900aabbccddeeff
 
-# 声明本地模拟 EdgeOne 能力集
-CLOUD_PLATFORM=edgeone
+# 声明本地模拟 EdgeOne 能力集（规范值 eo；--cf 时注入 cf）
+CLOUD_PLATFORM=eo
 `;
 if (!existsSync(devVars)) {
   writeFileSync(devVars, DEFAULT_DEV_VARS, "utf8");
@@ -78,8 +78,9 @@ if (!noBuild) {
   }
 }
 
-// 4) 平台能力集：默认 edgeone，--cf 切 cloudflare
-const platform = cfMode ? "cloudflare" : "edgeone";
+// 4) 平台能力集：默认 eo（EdgeOne），--cf 切 cf（Cloudflare）。
+// 注入 caps.js 的规范值 cf|eo（不能再用 edgeone/cloudflare 别名，否则 readPlatform 会告警/不一致）。
+const platform = cfMode ? "cf" : "eo";
 console.log(
   `🚀  启动本地 dev（端口 ${port}，平台能力集=${platform}${localOnly ? "，仅本地" : "，监听 0.0.0.0"}）`
 );

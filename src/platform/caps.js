@@ -29,6 +29,31 @@
 export const VALID_PLATFORMS = ['cf', 'eo', 'esa'];
 
 /**
+ * 旧别名 → 规范值 归一映射。
+ *
+ * 历史版本中 dev.mjs / esa 薄壳 / 文档曾使用 edgeone / cloudflare / aliyun-esa /
+ * pages 等别名，且 kv.js 的 isEsaPlatform 曾直读别名。为避免「有的地方容忍别名、
+ * 有的地方 throw」的双标准，这里把别名统一收口到单一实现：读到的任何取值都先经
+ * 本映射归一为规范值（cf|eo|esa），再参与平台判断。
+ *
+ * @type {Readonly<Record<string, 'cf'|'eo'|'esa'>>}
+ */
+export const PLATFORM_ALIASES = Object.freeze({
+  cf: 'cf',
+  'cloudflare': 'cf',
+  'workers': 'cf',
+  'pages': 'cf',
+  eo: 'eo',
+  'edgeone': 'eo',
+  es: 'esa',
+  esa: 'esa',
+  'aliyun-esa': 'esa',
+  'alibaba-esa': 'esa',
+  'aliyun': 'esa',
+  'alibaba': 'esa',
+});
+
+/**
  * isolate 级缓存。Workers 的模块级变量生命周期等同于 isolate，
  * 一个 isolate 内平台特征不会变化，因此缓存是安全的。
  * @type {import('../contracts.js').Caps|null}
@@ -153,9 +178,15 @@ function looksLikeR2(binding) {
 }
 
 /**
- * 读取并校验部署厂商环境变量 CLOUD_PLATFORM。
+ * 读取并归一化部署厂商环境变量 CLOUD_PLATFORM。
+ *
+ * 返回值恒为规范值 cf | eo | esa 之一：
+ *   - 未设置 → 抛错（强制显式声明，禁止运行时指纹猜测）；
+ *   - 规范值 / 历史别名（edgeone / cloudflare / aliyun-esa / pages 等）→ 归一为规范值，
+ *     若为别名则 console.warn 提示使用规范值（向后兼容，不再 throw）；
+ *   - 其它未知取值 → 抛错。
  * @param {Object} env 环境对象
- * @returns {'cf'|'eo'|'esa'} 厂商标识
+ * @returns {'cf'|'eo'|'esa'} 归一化后的厂商标识
  * @throws {Error} 未设置或取值非法时
  */
 function readPlatform(env) {
@@ -166,12 +197,18 @@ function readPlatform(env) {
       '取值为 cf / eo / esa 之一（分别对应 Cloudflare / EdgeOne / 阿里云 ESA）。'
     );
   }
-  if (!VALID_PLATFORMS.includes(/** @type {any} */ (declared))) {
+  const canonical = PLATFORM_ALIASES[declared];
+  if (!canonical) {
     throw new Error(
-      `[caps] CLOUD_PLATFORM 取值 "${declared}" 非法，必须为 cf / eo / esa 之一。`
+      `[caps] CLOUD_PLATFORM 取值 "${declared}" 非法，必须为 cf / eo / esa 之一` +
+      `（亦兼容旧别名 edgeone / cloudflare / aliyun-esa / pages）。`
     );
   }
-  return /** @type {'cf'|'eo'|'esa'} */ (declared);
+  if (canonical !== declared) {
+    // 历史别名向后兼容：不阻断运行，仅告警提示规范化
+    console.warn(`[caps] CLOUD_PLATFORM="${declared}" 已归一为 "${canonical}"，建议显式使用 cf / eo / esa。`);
+  }
+  return canonical;
 }
 
 /**

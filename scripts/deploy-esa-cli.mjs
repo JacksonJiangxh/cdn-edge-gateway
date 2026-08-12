@@ -101,4 +101,4 @@ if (deploy.status !== 0) {
 
 console.log('\n=== ESA Pages 部署完成（esa-cli，未使用 OSS）===');
 console.log('下一步：在 ESA 控制台为该 Routine/Pages 绑定域名/路由，并设置环境变量');
-console.log('  CLOUD_PLATFORM=aliyun-esa  REDIS_URL=<必填>  ADMIN_PASSWORD/JWT_SECRET=<可选>');
+console.log('  CLOUD_PLATFORM=esa  REDIS_URL=<必填>  ADMIN_PASSWORD/JWT_SECRET=<可选>');

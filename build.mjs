@@ -29,6 +29,8 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as esbuild from 'esbuild';
+import { generateEntries } from './scripts/gen-entries.mjs';
+import { runChecks } from './scripts/check.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const WEB = join(ROOT, 'web');
@@ -116,7 +118,9 @@ function escapeScriptBoundary(s) {
 async function buildStageGen() {
   console.log('▸ [0/5] 生成前端阶段字典 web/_stage.gen.js（单一来源）...');
   const entry = join(WEB, '_stage.entry.js');
-  if (!existsSync(entry)) throw new Error('缺少 web/_stage.entry.js');
+  // 入口由 scripts/gen-entries.mjs 在 build 早期自动生成；此处兜底再确认一次，
+  // 防止生成步骤被跳过导致后续 esbuild 读不到输入而报错（报错信息更可读）。
+  if (!existsSync(entry)) throw new Error('缺少 web/_stage.entry.js（请确认已执行 gen-entries）');
   await esbuild.build({
     entryPoints: [entry],
     outfile: join(WEB, '_stage.gen.js'),
@@ -149,7 +153,7 @@ async function buildStageGen() {
 async function buildFrontendJs() {
   console.log('▸ [1/5] 打包前端 JS（esbuild bundle + 压缩）...');
   const entry = join(WEB, '_app.entry.js');
-  if (!existsSync(entry)) throw new Error('缺少 web/_app.entry.js');
+  if (!existsSync(entry)) throw new Error('缺少 web/_app.entry.js（请确认已执行 gen-entries）');
   const result = await esbuild.build({
     entryPoints: [entry],
     bundle: true,
@@ -172,16 +176,108 @@ async function buildFrontendJs() {
 // 步骤 2：内联兜底 HTML（src/ui.gen.js）—— 用 JSON 字符串字面量，由 esbuild 安全转义
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 注入标记：web/index.html 中「单一注入真相源」的显式锚点。
+// build 用「标记替换」取代「正则猜标签结构」，HTML 结构变更不再导致注入失配。
+// 这两个标记在 index.html 中必须唯一且位置稳定（STYLE 在 <head>、SCRIPT 在 </body> 前）。
+// ---------------------------------------------------------------------------
+const MARK = {
+  STYLE: '<!-- BUILD:STYLE -->',
+  SCRIPT: '<!-- BUILD:SCRIPT -->',
+};
+
+/**
+ * 校验 index.html 中注入标记存在且唯一。
+ * 任一缺失或重复都会显式失败——把「结构猜错/标记删掉 → 产物缺资源」的隐性
+ * 回归变成构建期可读错误。
+ * @param {string} html
+ * @param {string} label 用于报错提示
+ */
+function assertMarkers(html, label) {
+  const countStyle = html.split(MARK.STYLE).length - 1;
+  const countScript = html.split(MARK.SCRIPT).length - 1;
+  if (countStyle !== 1) {
+    throw new Error(`${label}: index.html 中 BUILD:STYLE 标记出现 ${countStyle} 次（须恰好 1 次）`);
+  }
+  if (countScript !== 1) {
+    throw new Error(`${label}: index.html 中 BUILD:SCRIPT 标记出现 ${countScript} 次（须恰好 1 次）`);
+  }
+}
+
+/**
+ * 内联注入：把 STYLE 标记替换为内联 <style>；把「SCRIPT 标记 + 其后原始
+ * <script src=api|app.js>…</script> 块」整体替换为内联 <script>。
+ * 替换完成后断言内联产物存在，否则抛错。
+ * @param {string} html
+ * @param {string} css
+ * @param {string} safeJs 已做 </script> 边界转义的 JS
+ */
+function injectInline(html, css, safeJs) {
+  assertMarkers(html, '内联注入');
+  let out = html;
+  // 移除 index.html 中用于本地开发的原始 <link rel="stylesheet" href="style.css">，
+  // 它只是开发真相源引用，构建后不应残留（内联版已由 <style> 替代）。
+  out = out.replace(/<link[^>]*style\.css[^>]*>/i, '');
+  out = out.replace(MARK.STYLE, () => `<style>${css}</style>`);
+  // 吃掉「SCRIPT 标记 + 其后一个或多个原始 <script src=…></script> 块」直到 </body>，
+  // 整体替换为内联 <script>。标记保留作为定位锚点；(?:…)+ 兼容 api.js+app.js 多块结构。
+  out = out.replace(
+    new RegExp(
+      `${escapeRegExp(MARK.SCRIPT)}\\s*(?:<script[^>]*>\\s*<\\/script>\\s*)+<\\/body>`,
+      'i'
+    ),
+    () => `${MARK.SCRIPT}<script>${safeJs}</script></body>`
+  );
+  if (!/<style>[\s\S]*<\/style>/.test(out) || !/<script>[\s\S]*<\/script>/.test(out)) {
+    throw new Error('内联注入后缺少 style/script 产物');
+  }
+  return out;
+}
+
+/**
+ * 静态注入：把 STYLE 标记替换为外部 <link rel="stylesheet" href="/assets/app.css">；
+ * 把「SCRIPT 标记 + 其后原始脚本块」整体替换为外部 <script src="/assets/app.js">。
+ * 替换完成后断言外部资源引用存在。
+ * @param {string} html
+ * @param {string} assetBase 固定物理资源路径前缀（默认 /assets）
+ */
+function injectExternal(html, assetBase) {
+  assertMarkers(html, '静态注入');
+  let out = html;
+  // 移除 index.html 中用于本地开发的原始 <link rel="stylesheet" href="style.css">，
+  // 它只是开发真相源引用，静态版已由外部 <link href="/assets/app.css"> 替代。
+  out = out.replace(/<link[^>]*style\.css[^>]*>/i, '');
+  out = out.replace(MARK.STYLE, () => `<link rel="stylesheet" href="${assetBase}/app.css">`);
+  out = out.replace(
+    new RegExp(
+      `${escapeRegExp(MARK.SCRIPT)}\\s*(?:<script[^>]*>\\s*<\\/script>\\s*)+<\\/body>`,
+      'i'
+    ),
+    () => `${MARK.SCRIPT}<script src="${assetBase}/app.js"></script></body>`
+  );
+  if (!/rel="stylesheet"[^>]*app\.css/.test(out) || !/<script[^>]*app\.js/.test(out)) {
+    throw new Error('静态注入后缺少外部 css/js 引用');
+  }
+  return out;
+}
+
+/** 正则元字符转义，用于把字面标记安全嵌入 RegExp 构造 */
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * 构建内联兜底 HTML（src/ui.gen.js）。用于 CF Workers 直接粘贴 worker、
  * 或任何没有独立静态托管能力的部署形态。管理面请求仍走函数，但保证可用。
  *
  * 关键改动（消除脆弱 hack）：
- *   旧方案把含反引号/<>/$ 的 HTML 先 base64 再内联，运行时解码，规避「esbuild
- *   改写超长字符串时边界破裂」。但这是把字符串直接拼进 HTML 文本才有的问题；
- *   现在 UI_HTML 只是 src/ui.gen.js 里的一个普通 JS 字符串字面量（经 JSON.stringify
- *   生成，对 " \ 控制字符自动转义，反引号/<> 在双引号串内天然安全），由 esbuild
- *   打包进 worker 时再次安全转义，绝无边界破裂风险。故 base64 中转不再必要。
+ *   - 注入改用 BUILD:STYLE / BUILD:SCRIPT 显式标记替换（见 injectInline），
+ *     不再用正则去猜 <link style.css> / <script src=api|app.js> / </body> 的位置。
+ *   - 移除 base64 双份冗余：不再导出 UI_HTML_B64 / UI_CSS_B64（旧产物无需兼容），
+ *     仅导出直接字符串 UI_HTML / UI_CSS，体积更小、消费方更简单。
+ *   - UI_HTML 只是 src/ui.gen.js 里的普通 JS 字符串字面量（经 JSON.stringify 生成，
+ *     对 " \ 控制字符自动转义，反引号/<> 在双引号串内天然安全），由 esbuild 打包
+ *     进 worker 时再次安全转义，绝无边界破裂风险。
  *
  * @param {string} frontendJs 已压缩前端 JS
  * @param {string} css 已压缩 CSS
@@ -198,28 +294,13 @@ async function buildInlineUI(frontendJs, css) {
 <body><p>管理面前端尚未完成构建。</p></body></html>`;
   }
 
-  // --- 注入 CSS：把 <link style.css> 替换为内联 <style>（用模板字符串，非 String.replace）---
-  const styleTag = `<style>${css}</style>`;
-  html = html.replace(/<link[^>]+style\.css[^>]*>/i, () => styleTag);
-  html = html.replace(/<!--\s*BUILD:STYLE\s*-->/i, '');
-
-  // --- 注入 JS：移除原始 <script src=api|app.js>，在 </body> 前插入内联 <script> ---
   // frontendJs 经 escapeScriptBoundary 处理，杜绝 </script> 提前闭合。
   const safeJs = escapeScriptBoundary(frontendJs);
-  const scriptTag = `<script>${safeJs}</script>`;
-  html = html.replace(/<script[^>]+src=["'](?:\.\/)?(?:api|app)\.js["'][^>]*>\s*<\/script>/gi, '');
-  if (/<\/body>/i.test(html)) {
-    html = html.replace(/<\/body>/i, () => `${scriptTag}</body>`);
-  } else {
-    html += scriptTag;
-  }
+  html = injectInline(html, css, safeJs);
 
   html = minifyHtml(html);
 
   // 用 JSON.stringify 生成安全的 JS 字符串字面量（JSON 是 JS 子集，自动转义特殊字符）。
-  // 同时保留旧版 UI_HTML_B64 / UI_CSS_B64 兼容导出（未重新构建的旧产物仍可解码）。
-  const uiHtmlB64 = Buffer.from(html, 'utf8').toString('base64');
-  const uiCssB64 = Buffer.from(css ?? '', 'utf8').toString('base64');
   const out = `/**
  * 自动生成文件 —— 请勿手动编辑
  * 由 build.mjs 从 web/ 内联生成（无静态托管环境兜底用）
@@ -229,9 +310,6 @@ async function buildInlineUI(frontendJs, css) {
 // worker 时再次安全转义，无需 base64 中转，消除超长字符串边界破裂风险。
 export const UI_HTML = ${JSON.stringify(html)};
 export const UI_CSS = ${JSON.stringify(css ?? '')};
-// 兼容旧版消费方（adminPage 的回退分支）。
-export const UI_HTML_B64 = ${JSON.stringify(uiHtmlB64)};
-export const UI_CSS_B64 = ${JSON.stringify(uiCssB64)};
 `;
 
   await mkdir(SRC, { recursive: true });
@@ -265,12 +343,9 @@ async function buildPublic(frontendJs, css) {
   const assetBase = '/assets';
   const safeJs = escapeScriptBoundary(frontendJs);
 
-  // 站点根页：移除原始 <link style.css> 与 <script src=...>，改为引用固定 /assets/*
-  html = html.replace(/<link[^>]+style\.css[^>]*>/i, `<link rel="stylesheet" href="${assetBase}/app.css">`);
-  html = html.replace(/<!--\s*BUILD:STYLE\s*-->/i, '');
-  html = html.replace(/<script[^>]+src=["'](?:\.\/)?api\.js["'][^>]*>\s*<\/script>/gi, '');
-  html = html.replace(/<script[^>]+src=["'](?:\.\/)?app\.js["'][^>]*>\s*<\/script>/gi, '');
-  // 站点根页不注入任何后台路径；管理面 BASE 由运行时 renderAdminPage 注入（no-store）。
+  // 站点根页：把 BUILD:STYLE / BUILD:SCRIPT 标记替换为固定 /assets/* 引用。
+  // 不注入任何后台路径；管理面 BASE 由运行时 renderAdminPage 注入（no-store）。
+  html = injectExternal(html, assetBase);
   html = minifyHtml(html);
 
   await mkdir(DIST_PUBLIC, { recursive: true });
@@ -472,6 +547,15 @@ async function syntaxChecks(inlineHtml, inlineJs) {
 async function verify() {
   console.log('▸ 产物自检...');
 
+  // 平台口径一致性 + 前端入口可解析（复用 scripts/check.mjs 的 runChecks）。
+  // 拦截「CLOUD_PLATFORM 取值回退到非规范别名」与「自动生成入口损坏」两类回归。
+  const checkProblems = await runChecks({ quiet: true });
+  if (checkProblems.length) {
+    throw new Error(
+      '静态一致性检查未通过：\n  - ' + checkProblems.join('\n  - ')
+    );
+  }
+
   const required = [
     join(ROOT, '_worker.js'),
     join(DIST_PUBLIC, 'index.html'),
@@ -517,6 +601,10 @@ async function main() {
   const t0 = Date.now();
   console.log('cdn-edge-gateway 构建开始' + (MINIFY ? '（压缩模式）' : ''));
 
+  // 步骤 -1：自动生成前端入口（web/_stage.entry.js + web/_app.entry.js）。
+  // 取代「手写 gitignored 入口文件」，从根上消除非标准导出/误转义导致的构建期语法错误。
+  await generateEntries();
+
   // 步骤 0：前端阶段字典单一来源（取代旧的文本切片一致性断言）
   await buildStageGen();
 
@@ -556,6 +644,7 @@ async function main() {
 
 async function runWatch() {
   console.log('监听模式启动...');
+  await generateEntries();
   await buildStageGen();
   const cssRaw = await readSafe(join(WEB, 'style.css'));
   const frontendJs = await buildFrontendJs();

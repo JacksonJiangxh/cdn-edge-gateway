@@ -57,6 +57,9 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
+      - name: 静态一致性检查
+        run: npm run check
+
       - name: 构建（含产物自检）
         # 必须先 build：wrangler.toml 的 assets 绑定会把 dist/public/ 作为 CF 静态资产
         # 上传，管理面静态资源（/{adminPath}/assets/*）由此命中边缘缓存、零函数额度。

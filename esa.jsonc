@@ -17,7 +17,7 @@
   // 4. 函数代码包 ≤ 4MB、静态单文件 ≤ 25MB、静态总数 ≤ 2000（本项目远小于此）。
   // 5. 运行限制：内存 128MB、执行时间 120s、每请求子请求(fetch)上限 4 个。
   // 6. 环境变量在【ESA 控制台】设置（esa.jsonc 不支持顶层 env 字段），包括：
-  //      CLOUD_PLATFORM=aliyun-esa   —— 显式声明平台，caps.js 据此探测
+  //      CLOUD_PLATFORM=esa          —— 显式声明平台（规范值），caps.js 据此探测
   //      REDIS_URL                   —— 【必填】外置持久化。ESA 的 EdgeKV 按量收费
   //                                      且无免费额度，本项目在 ESA 上统一禁用厂商 KV，
   //                                      持久化一律走 REDIS_URL（自建 Webdis/Redis）。

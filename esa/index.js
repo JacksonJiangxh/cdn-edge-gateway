@@ -13,7 +13,7 @@
 // fetch(request, env, ctx)。为兼容两种可能，本薄壳：
 //   1. 若 fetch 被传入第二参数 env，优先使用；
 //   2. 否则回退到 process.env（ESA 构建文档确认运行时可读 process.env）；
-//   3. 强制补 CLOUD_PLATFORM=aliyun-esa（若未设），确保 caps.js 准确探测。
+//   3. 强制补 CLOUD_PLATFORM=esa（规范值，若未设），确保 caps.js 准确探测。
 // 这样无论 ESA 走哪种传参，_worker.js 内部探测与 KV（EdgeKV 全局类 /
 // REDIS_URL）都能正确拿到配置。
 //
@@ -40,9 +40,10 @@ function resolveEnv(passedEnv) {
   } else if (typeof process !== 'undefined' && process.env && typeof process.env === 'object') {
     base = process.env;
   }
-  // 强制平台声明，避免 caps.js 因 env 缺失而误判 unknown
+  // 强制平台声明，避免 caps.js 因 env 缺失而误判 unknown。
+  // 用规范值 esa（旧版用 aliyun-esa，caps.js 现已归一，但保持规范写法）。
   if (!base.CLOUD_PLATFORM) {
-    base = { ...base, CLOUD_PLATFORM: 'aliyun-esa' };
+    base = { ...base, CLOUD_PLATFORM: 'esa' };
   }
   return base;
 }

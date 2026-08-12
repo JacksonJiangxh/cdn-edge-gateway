@@ -261,9 +261,9 @@ ESA「即时日志」**只采集 `console.alert(...)` 输出**（映射到日志
 
 1. **env 注入方式**：ESA 文档示例 `fetch(request)` 只显式写 request 一个参数，但未说明是否支持 CF Workers 范式的 `fetch(request, env, ctx)` 第二/第三参数。本薄壳已做双重兜底（优先 fetch 第二参数、回退 process.env、强制 CLOUD_PLATFORM）。若实测 ESA 确实只传 request 且运行时变量在 `process.env`，当前方案已覆盖；若 ESA 走其它注入（如 `request` 上挂 bindings），需在 `esa/index.js` 的 `resolveEnv` 补对应提取。
 2. **导航请求兜底**：§2 所述 `notFoundStrategy` 取舍，需实测 ESA 默认行为后定稿（当前选择不配置 notFoundStrategy，让 `/__panel` 导航请求落到函数）。
-3. **运行时指纹**：`caps.js` 的 `detectAliyunEsaRuntime` 已用 `CLOUD_PLATFORM=esa` 显式声明兜底（薄壳也会强制补）；若想免设环境变量自动探测，需在 ESA 控制台（用 `esa-cli dev` 或临时函数）跑
+3. **平台识别**：`caps.js` 已改为「`CLOUD_PLATFORM` 显式声明 + 别名归一」（`readPlatform` 会把 `aliyun-esa`/`alibaba-esa` 等旧别名归一为 `esa`，非法值才抛错），薄壳 `esa/index.js` 会强制补 `CLOUD_PLATFORM=esa`，因此不需要运行时指纹探测。若想免设环境变量，需在 ESA 控制台（用 `esa-cli dev` 或临时函数）跑
    `console.alert(navigator.userAgent, Object.keys(globalThis).filter(k=>/esa/i.test(k)))`
-   把指纹补进 `detectAliyunEsaRuntime`（注意用 `console.alert` 才能进即时日志，见 §9.1）。
+   把指纹补进 `caps.js`（注意用 `console.alert` 才能进即时日志，见 §9.1）。
 4. **REDIS_URL 子请求预算**：ESA 每请求子请求上限 = 4，而 REDIS_URL 每次 KV 读占 1 个 fetch（§4）。
    已确认数据面 ≤2 fetch 安全；管理面 `listSites` 在站点数 >3 时可能突破上限，建议控制
    站点规模或将管理面放其它平台。若后续 Webdis 支持 MGET 批量，可在 `redis-kv.js` 扩展 `mget`

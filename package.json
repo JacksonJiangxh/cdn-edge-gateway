@@ -6,6 +6,7 @@
   "main": "_worker.js",
   "scripts": {
     "build": "node build.mjs",
+    "check": "node scripts/check.mjs",
     "dev": "node scripts/dev.mjs",
     "dev:clean": "node scripts/dev.mjs --clean",
     "dev:cf": "node scripts/dev.mjs --cf",

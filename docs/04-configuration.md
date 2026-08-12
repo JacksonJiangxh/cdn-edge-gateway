@@ -333,7 +333,7 @@ conditions: [
 | `ADMIN_PASSWORD` | **Secret**（加密） | 运行时 | 管理面初始登录密码 | 是 |
 | `JWT_SECRET` | **Secret**（加密） | 运行时 | 登录态签名，`openssl rand -hex 32` 生成 | 是 |
 | `ADMIN_PATH` | **不进变量页** | 运行时（KV） | 管理面入口前缀（浏览器访问用），建议随机串（**第一层防护**）；由管理面保存到 KV，优先级最高，部署时用默认 `__panel` 兜底 | 否（部署后管理面改） |
-| `CLOUD_PLATFORM` | Variable（明文） | 运行时 | `edgeone`(EO) / `pages`(CF Pages) / 不填(CF Workers) | EO/Pages 必填 |
+| `CLOUD_PLATFORM` | Variable（明文） | 运行时 | 规范取值 `cf`(CF Workers/Pages) / `eo`(EdgeOne) / `esa`(阿里云 ESA)；填错或漏填会抛错或功能残缺 | EO/ESA 必填 |
 | `CLOUDFLARE_API_TOKEN` | Secret（CI 用） | CI 运行时 | CF 部署令牌（Workers:Edit 或 Pages:Edit） | 仅 CI |
 | `EO_SECRET` | Secret（CI 用） | CI 运行时 | EO Pages API Token | 仅 CI |
 

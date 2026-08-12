@@ -10,11 +10,12 @@
  *        - CF Workers：通过 wrangler.toml 的 assets 绑定（env.ASSETS）走 CF 静态资产层；
  *        - EO Makers：边缘函数静态目录托管；
  *        - CF Pages：Pages 静态层。
- *   2. 内联兜底（兼容 worker 直接粘贴/无静态层）：同一份 _worker.js 也可把 /{adminPath}/assets/*
- *      作为静态内容透传（资源字节由 build.mjs 写入 ui.gen.js 的 UI_CSS/UI_JS 导出），
+ *   2. 内联兜底（兼容 worker 直接粘贴/无静态层）：同一份 _worker.js 也可把管理面
+ *      完整 HTML 以内联形式返回（由 build.mjs 写入 src/ui.gen.js 的 UI_HTML 导出，
+ *      其内联 <script> 已含全部前端逻辑；CSS 另有直接字符串 UI_CSS 导出），
  *      保证无静态目录环境（如纯 Dashboard 粘贴 _worker.js，无 ASSETS 绑定）也能完整运行管理面。
  *
- * UI_HTML / UI_CSS / UI_JS 均由 build.mjs 从 web/ 生成（src/ui.gen.js）。
+ * UI_HTML / UI_CSS 均由 build.mjs 从 web/ 生成（src/ui.gen.js，构建期中间产物，勿手改）。
  * 为避免未构建时报错，这里做了动态兜底。
  * ============================================================================
  */
@@ -82,12 +83,8 @@ export async function tryServePanelStatic(ctx, req, adminPath) {
     if (!isCss) return null;
     try {
       const mod = await import('../ui.gen.js');
-      const b64 = mod.UI_CSS_B64;
-      if (b64) {
-        const body = typeof atob === 'function'
-          ? Buffer.from(b64, 'base64').toString('utf8')
-          : Buffer.from(b64, 'base64').toString('utf8');
-        return new Response(body, {
+      if (typeof mod.UI_CSS === 'string' && mod.UI_CSS) {
+        return new Response(mod.UI_CSS, {
           status: 200,
           headers: {
             'content-type': 'text/css; charset=utf-8',
@@ -121,12 +118,10 @@ export async function renderAdminPage(ctx, adminPath) {
   try {
     // 动态 import：未执行构建时 ui.gen.js 可能不存在，避免整体崩溃
     const mod = await import('../ui.gen.js');
-    // 优先使用直接字符串导出 UI_HTML（由 build.mjs 经 JSON 安全转义生成）。
-    // 兼容历史旧版 UI_HTML_B64（base64）：若存在则解码。
+    // 仅使用直接字符串导出 UI_HTML（由 build.mjs 经 JSON 安全转义生成）。
+    // 已移除旧版 UI_HTML_B64 base64 回退分支（不再兼容旧产物）。
     if (typeof mod.UI_HTML === 'string' && mod.UI_HTML) {
       html = mod.UI_HTML;
-    } else if (typeof mod.UI_HTML_B64 === 'string' && mod.UI_HTML_B64) {
-      html = Buffer.from(mod.UI_HTML_B64, 'base64').toString('utf8');
     }
   } catch {
     html = FALLBACK_HTML;

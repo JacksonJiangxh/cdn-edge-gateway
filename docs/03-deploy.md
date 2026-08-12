@@ -144,7 +144,7 @@ npm run build
 | `JWT_SECRET` | **Secret / 密钥** | 终端跑 `openssl rand -hex 32` 的输出 | 登录态签名，勿用简单串 |
 
 - **CF**：Worker/Pages → **Settings → Environment Variables**。两项均选 **Secret（加密）** 类型。
-- **EO**：项目设置 → **环境变量**：`ADMIN_PASSWORD`(密钥) / `JWT_SECRET`(密钥) / 额外加 **`CLOUD_PLATFORM=edgeone`**（必填，驱动平台识别；CF 侧代码自动探测可省略）。
+- **EO**：项目设置 → **环境变量**：`ADMIN_PASSWORD`(密钥) / `JWT_SECRET`(密钥) / 额外加 **`CLOUD_PLATFORM=eo`**（必填，驱动平台识别；CF 侧代码自动探测可省略）。
 
 ### 🔑 关于 `ADMIN_PATH`（管理面入口前缀）—— 不要在变量页面设置
 
@@ -333,7 +333,7 @@ Published edge-cdn (x.xx sec)
 
 项目已在第 1 步建好（Makers 新建并连 Git），第 3–5 步的 KV/变量/缓存也已设好，这里只做 EO 侧收尾：
 
-1. 项目设置 → **环境变量**已含：`ADMIN_PASSWORD`(密钥) / `JWT_SECRET`(密钥) / `CLOUD_PLATFORM=edgeone`（见第 4 步；`ADMIN_PATH` 不是变量，由管理面存 KV，不在此设）。
+1. 项目设置 → **环境变量**已含：`ADMIN_PASSWORD`(密钥) / `JWT_SECRET`(密钥) / `CLOUD_PLATFORM=eo`（见第 4 步；`ADMIN_PATH` 不是变量，由管理面存 KV，不在此设）。
 2. **存储 → KV 存储** 创建命名空间 → **存储绑定**，变量名 `CDN_KV`（见第 3 步）。
 3. 推代码：用 **EO 流水线**（见分支 A4 的 EO 部分）或 EO 控制台连 Git 手动触发构建部署。部署目录为仓库根 `.`。
 
@@ -390,7 +390,7 @@ https://<你的域名或 *.workers.dev>/__health
 - [ ] 第 7 步：自定义域名已绑定
 - [ ] 第 8 步：`/__health` 返回 `ok: true` 且 `hasKV: true`；管理面能登录
 - [ ] 连续两次请求 `x-cache-status` 从 `MISS` 变 `HIT`
-- [ ] EO 部署确认 `CLOUD_PLATFORM=edgeone`（CF 侧可省略）
+- [ ] EO 部署确认 `CLOUD_PLATFORM=eo`（CF 侧可省略）
 
 ---
 

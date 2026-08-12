@@ -35,6 +35,10 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
+      - name: 静态一致性检查
+        # scripts/check.mjs：平台口径恒为规范值 cf|eo|esa + 自动生成入口可解析/可重建
+        run: npm run check
+
       - name: 构建（含产物自检）
         # build.mjs 内置校验：产物完整性 + _worker.js 可被 import + 导出面正确
         run: npm run build

@@ -51,6 +51,7 @@
 
 import { encodeKey, decodeKey, encodePrefix } from './keyCodec.js';
 import { hasRedisConfig, createRedisKV } from './redis-kv.js';
+import { PLATFORM_ALIASES } from './caps.js';
 
 /**
  * @typedef {Object} KVListKey
@@ -503,7 +504,9 @@ function createEdgeKVAdapter(env) {
 function isEsaPlatform(env) {
   const p = (env && (env.CLOUD_PLATFORM || '')) || '';
   const lower = String(p).toLowerCase();
-  return lower === 'aliyun-esa' || lower === 'esa' || lower === 'alibaba-esa';
+  // 复用 caps.js 的别名归一映射，与 detectCaps 的厂商口径保持单一真相源。
+  // 只有归一后为 'esa' 才判定为 ESA（edgeone/cloudflare 等其它取值不再误判）。
+  return PLATFORM_ALIASES[lower] === 'esa';
 }
 
 /**

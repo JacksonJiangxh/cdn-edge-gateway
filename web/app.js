@@ -608,7 +608,7 @@ import { STAGE_ORDER, STAGE_OPS, STAGE_ALIASES, normalizeStage } from './_stage.
             : `无规则覆盖 → 沿用 ③ 的 ${site.poolId ? poolName(site.poolId) : '未配置'}`),
         '推导', null, null, null));
 
-      renderRuleStage('⑪', '📥', 'Cache Rules（缓存请求设置）', '缓存策略（edgeTtl / SWR / browserTtl / 绕过缓存）等请求级缓存设置', null, STAGE_OPS['⑪']);
+      renderRuleStage('cache', '📥', 'Cache Rules（缓存请求设置）', '缓存策略（edgeTtl / SWR / browserTtl / 绕过缓存）等请求级缓存设置', null, STAGE_OPS['cache']);
 
       // ── ⑫ 缓存键（可干预：站点 cacheGen）──────────────────────
       flow.appendChild(seqGroup('⑫', '缓存键', '合并 policy = 默认 < 源站级 cache < cache 阶段(Cache Rules)；本环节可干预项：站点 cacheGen（代次）。'));

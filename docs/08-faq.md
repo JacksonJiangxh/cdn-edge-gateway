@@ -152,7 +152,7 @@ EO **原生支持 `caches.default` API**（基于 Web Cache API，接口与 CF �
 默认是 `local-dev-pass`。若改过又忘了：编辑 `.dev.vars` 把 `ADMIN_PASSWORD` 改回已知值，再 `npm run dev:clean` 清空本地 KV 后重启，首次登录会用新密码重置。
 
 **Q：本地测出来的结果能代表 EdgeOne 线上吗？**
-基本能，前提是本地 `.dev.vars` 设了 `CLOUD_PLATFORM=edgeone`（默认已设）。唯一本地测不了的是 EO 真机全球边缘网络表现，那只能上线后看。
+基本能，前提是本地 `.dev.vars` 设了 `CLOUD_PLATFORM=eo`（默认已设）。唯一本地测不了的是 EO 真机全球边缘网络表现，那只能上线后看。
 
 **Q：本地 KV 配置和线上混了吗？**
 不会。本地 KV 是 Miniflare 在 `.wrangler/state` 的模拟存储，与线上 Dashboard 的 KV 完全隔离。删 `.wrangler` 即清空。

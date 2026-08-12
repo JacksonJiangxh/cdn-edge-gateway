@@ -37,6 +37,9 @@ import {
   deepClone,
 } from './defaults.js';
 import { DEFAULT_RETRY_ON, CONFIG_VERSION } from '../contracts.js';
+// node:crypto 在 build.mjs 的 EXTERNAL_MODULES 中（CF/EO nodejs_compat 与 Node 均提供），
+// 用于 webcrypto.getRandomValues 兜底；edge worker 中优先用 globalThis.crypto（WebCrypto）。
+import { webcrypto as nodeWebcrypto } from 'node:crypto';
 
 // ----------------------------------------------------------------------------
 // 限制常量 —— 防止单个配置对象膨胀导致 KV 写入失败（CF KV 单值上限 25MB，
@@ -113,10 +116,12 @@ function enumOf(v, allowed, dft) {
 function generatePoolId() {
   const ts = Date.now().toString(36);
   let rnd = '';
-  // 优先用 crypto 随机（环境可用时），否则退化为 Math.random
+  // 优先用 WebCrypto 随机（三平台均提供 globalThis.crypto），否则回退 node:crypto，
+  // 再不行退化为 Math.random。不用 CJS `require('crypto')`（worker 运行时无全局 require）。
   try {
     const buf = new Uint8Array(6);
-    (globalThis.crypto || require('crypto')).getRandomValues(buf);
+    const gcr = (globalThis && globalThis.crypto) || nodeWebcrypto;
+    (gcr && typeof gcr.getRandomValues === 'function' ? gcr : nodeWebcrypto).getRandomValues(buf);
     rnd = Array.from(buf).map((b) => b.toString(36)).join('');
   } catch {
     rnd = Math.random().toString(36).slice(2, 10);
