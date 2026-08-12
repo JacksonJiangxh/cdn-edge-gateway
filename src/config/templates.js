@@ -428,19 +428,49 @@ export function applyTemplate(id, overrides) {
   }
 
   const specs = t.build(params) || [];
-  return specs.map((spec, i) => ({
-    // priority 从 10 起步、步长 10：给用户留出往中间插自己规则的空间，
-    // 不至于一加规则就得把整串重排。
-    id: `tpl-${id}-${i + 1}`,
-    priority: (i + 1) * 10,
-    enabled: true,
-    name: spec.name || '',
-    note: spec.note || '',
-    match: spec.match || {},
-    action: {
+  return specs.map((spec, i) => {
+    const action = {
       cache: { ...DEFAULT_CACHE_POLICY, ...(spec.cache || {}) },
-    },
-  }));
+    };
+    // 阶段索引字段（与前端 STAGE_OPS 字典同源的最底层 action→stage 映射）：
+    // 模板生成的规则只含 cache 动作，归一归属 ⑪ Cache Rules。落库即带 stage，
+    // 后续流量序列渲染 / 抽屉归属 / 合并落库 全链路以它为准，无需反推。
+    const stage = stageForAction(action);
+    return {
+      // priority 从 10 起步、步长 10：给用户留出往中间插自己规则的空间，
+      // 不至于一加规则就得把整串重排。
+      id: `tpl-${id}-${i + 1}`,
+      priority: (i + 1) * 10,
+      enabled: true,
+      name: spec.name || '',
+      note: spec.note || '',
+      match: spec.match || {},
+      stage,
+      action,
+    };
+  });
+}
+
+/**
+ * 最底层 action → 阶段 的映射（模板侧最小实现，约定与前端 STAGE_OPS 完全一致）。
+ * 模板当前只会生成 cache 类规则，故只覆盖 ⑪；如未来模板支持其它动作，按同一
+ * 字典在此扩展即可（每个 action 只属于一个阶段，不存在跨阶段叠加）。
+ * 完整权威字典见前端 web/app.js 的 STAGE_OPS。
+ * @param {Object} a
+ * @returns {string|null}
+ */
+function stageForAction(a) {
+  a = a || {};
+  if (a.cache && (a.cache.enabled || a.cache.mode === 'noCache')) return '⑪';
+  if (a.rewrite && a.rewrite.type && a.rewrite.type !== 'none') return '⑤';
+  if (a.redirect && a.redirect.enabled) return '⑥';
+  if (a.forceHttps || (a.directResponse && a.directResponse.enabled)) return '⑦';
+  if ((a.reqHeaders && ((a.reqHeaders.set && Object.keys(a.reqHeaders.set).length) || (a.reqHeaders.remove && a.reqHeaders.remove.length)))) return '⑧';
+  if (a.poolId || (a.inlineOrigins || []).length
+    || (a.hostHeader && a.hostHeader.mode && a.hostHeader.mode !== 'accel' && a.hostHeader.mode !== 'inherit')
+    || a.engine || a.scheme || Number(a.port) > 0) return '⑨';
+  if (a.respHeaders && ((a.respHeaders.set && Object.keys(a.respHeaders.set).length) || (a.respHeaders.remove && a.respHeaders.remove.length))) return '⑯';
+  return null;
 }
 
 /**
