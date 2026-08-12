@@ -24,6 +24,13 @@
  */
 
 import { getGlobal } from '../config/store.js';
+import {
+  registerDomain,
+  allocBytes,
+  releaseBytes,
+  syncEntries,
+  getDomainQuota,
+} from '../platform/memBudget.js';
 
 // ============================================================================
 // 常量
@@ -35,8 +42,83 @@ const FLUSH_COUNT_THRESHOLD = 500;
 /** 距上次落盘多少毫秒后触发。 */
 const FLUSH_INTERVAL_MS = 300000;
 
-/** 内存中最多聚合多少个 host，超出丢弃新 host，防止被构造的 Host 头打爆内存。 */
+/** 内存中最多聚合多少个 host（兜底最大值），超出丢弃新 host，防止被构造的 Host 头打爆内存。 */
 const MAX_HOSTS = 500;
+
+/**
+ * 单 host 聚合桶的估算字节（用于 memBudget 记账与配额推导）。
+ * 桶含计数器、durSamples(最多 256 个)、origins 表等，序列化后通常数 KB，取 4096B 保守初值，
+ * memBudget 会按运行时采样自校准（见 platform/memBudget.js）。
+ * @param {any} entry
+ * @returns {number}
+ */
+function estimateBucketBytes(entry) {
+  if (!entry || typeof entry !== 'object') return 4096;
+  try {
+    const samples = Array.isArray(entry.durSamples) ? entry.durSamples.length : 0;
+    const origins = entry.origins ? Object.keys(entry.origins).length : 0;
+    // 固定结构开销 + 每样本 ~8B + 每 origin 键 ~32B
+    return Math.max(256, 1024 + samples * 8 + origins * 32);
+  } catch {
+    return 4096;
+  }
+}
+
+/**
+ * 由 memBudget 配额推导的「统计聚合 host 上限」。
+ * 取 min(MAX_HOSTS, 配额字节 / 估算每桶字节)，至少为 1。
+ * 内存预算紧张时，统计域（可激进回收）上限随之收紧，把空间让给配置等保守域。
+ * @returns {number}
+ */
+function statsHostCap() {
+  try {
+    const quota = getDomainQuota('stats');
+    if (quota > 0) {
+      const byBytes = Math.floor(quota / estimateBucketBytes(null));
+      return Math.max(1, Math.min(MAX_HOSTS, byBytes));
+    }
+  } catch {
+    /* 拿不到配额时退回硬上限 */
+  }
+  return MAX_HOSTS;
+}
+
+/**
+ * 统计域回收回调（memBudget 软/硬水位触发）。
+ * stats 域 allowAggressiveEvict=true：统计/限流数据可激进丢弃（现状已接受
+ * 「isolate 回收最多丢 500 条或 5 分钟」的损失）。evict 必须是同步、无 await
+ * 的，因此这里只做内存释放，不做落盘 IO（落盘仍由 flush 按 5min/阈值驱动）。
+ *
+ * @param {boolean} aggressive 是否激进。stats 域在软水位即被调用（aggressive=true），
+ *   直接丢弃最旧的一半 host（按插入顺序），其余 host 的已聚合数据保留。
+ */
+function evictStats(aggressive) {
+  try {
+    if (buckets.size === 0) return;
+    const drop = aggressive ? Math.ceil(buckets.size / 2) : 0;
+    if (drop <= 0) return;
+    let removed = 0;
+    for (const key of buckets.keys()) {
+      if (removed >= drop) break;
+      buckets.delete(key);
+      removed += 1;
+    }
+    pendingCount = Math.max(0, pendingCount - removed);
+    syncEntries('stats', buckets.size);
+  } catch {
+    /* ignore */
+  }
+}
+
+// 向统一内存预算单例注册「stats 域」。
+// - weight 给到 2（统计可激进回收，权重低于配置域，预算紧张时先让位）
+// - allowAggressiveEvict=true：软水位即可触发 evictStats 释放
+registerDomain('stats', {
+  weight: 2,
+  estimateBytes: estimateBucketBytes,
+  evict: evictStats,
+  allowAggressiveEvict: true,
+});
 
 /** 每个 host 最多记录多少个不同的 originId。 */
 const MAX_ORIGINS_PER_HOST = 32;
@@ -143,9 +225,11 @@ export function record(ctx, entry) {
     let b = buckets.get(host);
     if (!b) {
       // 超出 host 上限时静默丢弃，保护 isolate 内存
-      if (buckets.size >= MAX_HOSTS) return;
+      if (buckets.size >= statsHostCap()) return;
       b = newBucket();
       buckets.set(host, b);
+      // 新桶记账：memBudget 据此掌握占用并触发水位回收
+      allocBytes('stats', b);
     }
 
     b.requests += 1;
@@ -225,6 +309,8 @@ function takeSnapshot() {
   buckets = new Map();
   pendingCount = 0;
   lastFlushAt = Date.now();
+  // 内存已清空：释放对应记账字节（memBudget 据此回收配额）
+  if (count > 0) releaseBytes('stats', count);
   return { snapshot, count };
 }
 
@@ -278,8 +364,9 @@ function restore(snapshot) {
     for (const [host, b] of snapshot) {
       const cur = buckets.get(host);
       if (!cur) {
-        if (buckets.size >= MAX_HOSTS) continue;
+        if (buckets.size >= statsHostCap()) continue;
         buckets.set(host, b);
+        allocBytes('stats', b);
         continue;
       }
       cur.requests += b.requests;

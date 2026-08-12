@@ -29,6 +29,14 @@
 export const VALID_PLATFORMS = ['cf', 'eo', 'esa'];
 
 /**
+ * isolate 内存预算默认上限（字节）。统一按 128MB 假设规划。
+ * 实际值可由运行时环境变量 MEM_BUDGET_BYTES 覆盖（见 platform/memBudget.js）。
+ * 预留 64KB 给运行时自身开销（编译后代码、栈、V8 内部），应用内存按此值管理。
+ * @type {number}
+ */
+const DEFAULT_MEM_BUDGET_BYTES = 128 * 1024 * 1024 - 64 * 1024;
+
+/**
  * 旧别名 → 规范值 归一映射。
  *
  * 历史版本中 dev.mjs / esa 薄壳 / 文档曾使用 edgeone / cloudflare / aliyun-esa /
@@ -266,6 +274,12 @@ export function detectCaps(env) {
     //   - CF / EO 宽松（远大于 32），给一个大数防误伤
     //   用途：管理面 listSites 等批读据此控制合并（见 store.js / kv.js）
     maxSubRequests: platform === 'esa' ? 32 : 1000,
+    // isolate 内存预算上限（字节），供 memBudget 统一内存管理使用。
+    // 统一按 128MB 假设规划（CF 标准 128MB、ESA 函数侧 128MB 见 esa.jsonc；
+    // ESA 文档 512MB 为企业另一档配额，不在本假设内）。可由环境变量
+    // MEM_BUDGET_BYTES 在运行时覆盖（见 platform/memBudget.js）。
+    // 预留 64KB 给运行时本身（编译后代码、栈、V8 内部开销），不计入应用内存。
+    memBudgetBytes: DEFAULT_MEM_BUDGET_BYTES,
     // 仅 Cloudflare 支持 fetch 直连裸 IP / 自定义端口 / 自定义 SNI
     hasRawIpFetch: platform === 'cf',
     // 仅 Cloudflare 有 cloudflare:sockets，用于「裸 IP + HTTPS + 自定义 SNI」内部兜底

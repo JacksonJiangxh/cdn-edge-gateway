@@ -21,6 +21,7 @@ import { renderAdminPage, tryServePanelStatic } from '../api/adminPage.js';
 import { handleProxy } from '../proxy/pipeline.js';
 import { renderDisguise } from '../proxy/disguise.js';
 import { flush } from '../stats/collector.js';
+import { getBudgetSnapshot } from '../platform/memBudget.js';
 
 /**
  * 请求主入口
@@ -33,11 +34,20 @@ export async function handleRequest(ctx) {
 
   // ---- 健康检查：不读 KV，用于探活与部署验证 ----
   if (pathname === '/__health') {
+    // memBudget 快照：暴露各域配额使用与估算内存占用（统一内存预算可观测性）。
+    // 未初始化时返回 null，不影响探活。
+    let memBudget = null;
+    try {
+      memBudget = getBudgetSnapshot();
+    } catch {
+      memBudget = null;
+    }
     return new Response(
       JSON.stringify({
         ok: true,
         platform: ctx.caps.platform,
         caps: ctx.caps,
+        memBudget,
         time: new Date().toISOString(),
       }),
       { headers: { 'content-type': 'application/json; charset=utf-8' } }

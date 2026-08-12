@@ -14,6 +14,7 @@
 
 import { detectCaps } from './platform/caps.js';
 import { preloadKV } from './platform/kv.js';
+import { initMemBudget } from './platform/memBudget.js';
 import { handleRequest } from './core/app.js';
 import { resolveRequestId, REQUEST_ID_HEADER } from './utils/reqid.js';
 import { normalizeError, sanitizeMessage } from './utils/errors.js';
@@ -70,6 +71,15 @@ async function dispatch(request, env, waitUntilFn) {
   const reqId = resolveRequestId(request);
 
   const caps = detectCaps(env);
+
+  // 初始化 isolate 级内存预算单例（统一按 128MB 假设，env.MEM_BUDGET_BYTES 可覆盖）。
+  // 各内存域（config/stats/ratelimit）在各自模块加载时自注册到该单例，
+  // 此处只负责把平台内存上限与运行时 env 注入。幂等，重复调用安全。
+  try {
+    initMemBudget({ totalBytes: caps.memBudgetBytes, env });
+  } catch (e) {
+    console.error('[entry] initMemBudget 失败，降级为无统一内存管理:', e?.message);
+  }
 
   // 预热 KV 适配器并填充 isolate 级包装缓存。
   // CF 与 EdgeOne 均通过 CDN_KV / KV 绑定提供 KV，包装是纯同步操作，

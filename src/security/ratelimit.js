@@ -28,6 +28,14 @@
  */
 
 import { getKV } from '../platform/kv.js';
+import {
+  registerDomain,
+  allocBytes,
+  releaseBytes,
+  syncEntries,
+  getDomainQuota,
+  touchBudget,
+} from '../platform/memBudget.js';
 
 // ============================================================================
 // 常量
@@ -46,8 +54,78 @@ const RL_TTL_SEC = 120;
  */
 const REMOTE_SYNC_INTERVAL_MS = 30000;
 
-/** 内存表最大条目数，超出则整体清理，防止内存无限增长导致 isolate OOM。 */
+/** 内存表最大条目数（兜底最大值），超出则整体清理，防止内存无限增长导致 isolate OOM。 */
 const MEM_MAX_ENTRIES = 5000;
+
+/**
+ * 单条限流计数槽的估算字节（用于 memBudget 记账与配额推导）。
+ * 一个 slot 仅含 3 个字段，约 100-200B，取 128B 保守初值，
+ * memBudget 会按运行时采样自校准（见 platform/memBudget.js）。
+ * @param {any} entry
+ * @returns {number}
+ */
+function estimateSlotBytes(entry) {
+  if (!entry || typeof entry !== 'object') return 128;
+  try {
+    return Math.max(48, JSON.stringify(entry).length + 32);
+  } catch {
+    return 128;
+  }
+}
+
+/**
+ * 由 memBudget 配额推导的「限流内存表条目上限」。
+ * 取 min(MEM_MAX_ENTRIES, 配额字节 / 估算每槽字节)，至少为 1。
+ * 内存预算紧张时，限流域（可激进回收）上限随之收紧。
+ * @returns {number}
+ */
+function rlEntryCap() {
+  try {
+    const quota = getDomainQuota('ratelimit');
+    if (quota > 0) {
+      const byBytes = Math.floor(quota / estimateSlotBytes(null));
+      return Math.max(1, Math.min(MEM_MAX_ENTRIES, byBytes));
+    }
+  } catch {
+    /* 拿不到配额时退回硬上限 */
+  }
+  return MEM_MAX_ENTRIES;
+}
+
+/**
+ * 限流域回收回调（memBudget 软/硬水位触发）。
+ * ratelimit 域 allowAggressiveEvict=true：限流计数可激进丢弃（短暂失准可接受，
+ * fail-safe 设计下 KV 不可用时本就按本地计数判定，内存清空只是回到「从零计数」）。
+ *
+ * @param {boolean} aggressive 是否激进。软水位即有 aggressive=true：
+ *   先清当前分钟槽之外的过期项（sweep），若清后规模仍超过动态上限的一半，
+ *   则整体清空（最激进释放）。限流短暂失准但内存安全。
+ */
+function evictRatelimit(aggressive) {
+  try {
+    if (memCounters.size === 0) return;
+    sweep(currentMinute());
+    if (aggressive && memCounters.size > rlEntryCap() * 0.5) {
+      const n = memCounters.size;
+      memCounters.clear();
+      if (n > 0) releaseBytes('ratelimit', n);
+    } else {
+      syncEntries('ratelimit', memCounters.size);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+// 向统一内存预算单例注册「ratelimit 域」。
+// - weight 给到 1（限流计数最不敏感，预算紧张时最先让位）
+// - allowAggressiveEvict=true：软水位即可触发 evictRatelimit 释放
+registerDomain('ratelimit', {
+  weight: 1,
+  estimateBytes: estimateSlotBytes,
+  evict: evictRatelimit,
+  allowAggressiveEvict: true,
+});
 
 // ============================================================================
 // isolate 级内存状态
@@ -83,8 +161,10 @@ function currentMinute() {
  * @returns {void}
  */
 function sweep(minute) {
-  if (memCounters.size > MEM_MAX_ENTRIES) {
+  if (memCounters.size > rlEntryCap()) {
+    const n = memCounters.size;
     memCounters.clear();
+    if (n > 0) releaseBytes('ratelimit', n);
     lastSweepMinute = minute;
     return;
   }
@@ -92,8 +172,13 @@ function sweep(minute) {
   lastSweepMinute = minute;
   const suffix = `:${minute}`;
   for (const key of memCounters.keys()) {
-    if (!key.endsWith(suffix)) memCounters.delete(key);
+    if (!key.endsWith(suffix)) {
+      memCounters.delete(key);
+      releaseBytes('ratelimit', 1);
+    }
   }
+  // 顺带让 memBudget 检查一次水位，及时触发跨域回收（限流域可激进释放）
+  touchBudget();
 }
 
 /**
@@ -164,6 +249,8 @@ export async function checkRateLimit(ctx, host, ip, rpm) {
   if (!slot) {
     slot = { local: 0, tripped: false, remoteAt: 0 };
     memCounters.set(memKey, slot);
+    // 新槽记账：memBudget 据此掌握占用并触发水位回收
+    allocBytes('ratelimit', slot);
   }
   slot.local += 1;
 

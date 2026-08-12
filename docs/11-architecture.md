@@ -166,7 +166,7 @@ KV 是 CF 与 EO **共用**的存储层，但计费口径不同，优化必须�
 - **无持久硬盘**：缓存/配置/统计都不存在本地磁盘；
 - **内存极小**：只够做请求级临时状态（如本请求的熔断排除列表），不能跨请求长期保存。
 
-因此「缓存」**不是本项目自己存的**，而是**完全依赖底层边缘**：
+因此「响应缓存」**不是本项目自己存的**，而是**完全依赖底层边缘**：
 - **Cloudflare**：用 `caches.default` API 直接把响应存进 CF 边缘；同时下发 `Cache-Control` / `CDN-Cache-Control` 让 CF 边缘也按头缓存。但 **CF 生产环境的缓存权威是面板两条规则，必须成对设置**，否则源站返回的头（如 `no-store`/`private`）会反客为主：
   - **Cache Rules（请求/命中侧）**：决定"存不存、存多久"（`Cache eligibility`、`Edge TTL`、`Browser TTL`、并设 `Origin Cache-Control = Ignore if present` 覆盖源站头）。
   - **Cache Response Rules（响应侧，Modify cache response headers and tags）**：响应离开边缘前改写 `Cache-Control`/`CDN-Cache-Control`、加 `Cache-Tag`、清掉 `Set-Cookie` 等。本项目代码下发的头仅作跨平台兜底，CF 上以这两条面板规则为准（详见部署文档 CF 段）。
@@ -235,6 +235,50 @@ const originResp = await requestWithFailover(ctx, [pick], rule, effectiveHostHea
 
 - 多域名 LB fetch storage = **路径 B**，能跑、推荐；只是别指望它顺带触发 `cdn.example.com` 的同站节点缓存。
 - 想要 `cdn.example.com/img/` 这一跳**也**被 EO 节点缓存且零函数开销（路径 A），必须让 storage 内容**回源到 `cdn.example.com` 同源站组**，再用同站 fetch——但这与「多域名独立源站 LB」冲突，二选一。
+
+---
+
+## 4.3 内存预算与自回收（isolate 级统一内存管理）
+
+§4.1 说「本项目无持久硬盘」是对的——但 isolate **确实有可用内存**（CF / EO / ESA 的运行时都有上限）。本项目已确认统一按 **128MB 假设**规划：CF Workers 标准 128MB、ESA 函数侧 128MB（见 `esa.jsonc`；ESA 文档 512MB 为企业另一档配额，不在本假设内）。这段内存足够做**跨请求的内存缓存**，正是压低 KV/D1 读写的关键杠杆。
+
+> 关键约束：三平台的 V8 边缘运行时**均无 JS 堆内省 API**（浏览器才有的 `performance.memory` 在边缘不可用），运行时无法真实测量堆占用。本项目因此用「**条目数 × 每类平均估算字节（运行采样自校准）+ 条目数硬上限**」双约束来近似计量，而非依赖 heap 探测。
+
+### 4.3.1 为什么需要统一层（memBudget）
+
+原有三处内存使用各自为政、互不知道彼此占了多少：
+
+- `config`（配置 L1 缓存，`config/store.js`，原上限 500 条）
+- `stats`（访问统计内存聚合，`stats/collector.js`，原上限 500 host）
+- `ratelimit`（限流内存计数，`security/ratelimit.js`，原上限 5000 条）
+
+任一处无脑增长都可能把 isolate 推向 OOM 而被平台冷杀。`src/platform/memBudget.js` 提供一个 **isolate 级单例**，统一掌握「总预算 + 各域配额 + 软/硬水位」：
+
+- 各域注册时声明**权重、单条估算字节、evict 回调、是否允许激进回收**；
+- 写内存前先 `allocBytes`，域超自身配额或全局逼近硬水位时回调各域 evict 自回收；
+- 硬水位（90%）强制所有域 trim 到软水位（70%）之下，避免 OOM。
+
+### 4.3.2 收敛后的三域策略
+
+| 域 | 权重 | 回收策略 | 及时反馈保证 |
+|---|---|---|---|
+| `config` | 3（最高） | **保守**：仅全局硬水位(90%)才被迫释放；释放只清过期项 | 写操作后 `invalidateMemCache()` 立即失效当前 isolate 内存，下次读直连 KV → **新增/修改/删除配置即时生效、前端渲染永远正确**；TTL 不激进延长 |
+| `stats` | 2 | **激进**：超自身配额即丢弃最旧一半 host | 统计可容忍近似丢失（现状已接受） |
+| `ratelimit` | 1 | **激进**：超自身配额即清过期/全清 | 限流短暂失准但 fail-safe（本地计数兜底） |
+
+- **配额分配**：按权重把总预算（预留 5% 边距）分给三域；各域内存表条目上限 = `min(原硬上限, 配额字节 / 估算每条约字节)`，预算缩小时上限自动收紧。
+- **域级水位 + 全局硬水位兜底**：域超自身配额就 evict 自己（天然维持在配额上限附近震荡），不依赖其它域状态；全局逼近 90% 时强制所有域 trim 到 70% 安全线之下。
+- **初始化**：`entry.js` 的 `dispatch` 中调用 `initMemBudget({ totalBytes: caps.memBudgetBytes, env })` 一次初始化（`caps.memBudgetBytes` 默认 128MB，可由 `MEM_BUDGET_BYTES` 覆盖）；三域在各自模块加载时自注册。
+- **可观测**：`getBudgetSnapshot()` 暴露各域配额使用、估算内存占用、水位阈值，供 `/__health`、`/debug` 响应展示。
+
+### 4.3.3 配置域的「及时生效」契约（重点）
+
+前端「保存配置后应立即看到」的诉求，由以下不变量保证（与内存预算收敛不冲突）：
+
+1. **当前 isolate 写后即生效**：`putSite/putPool/putGlobal/deleteSite/deletePool/putGlobalRules` 等写操作均调用 `invalidateMemCache()`，清空当前 isolate 的 L1，下次读直连 KV。
+2. **管理面绕过 L1**：管理 API 直接读 KV/Redis（不经 `getCachedConfig` 的 `memGet`），写后立即可见，绝不为省额度而看旧值。
+3. **内存预算不延长 TTL**：`configCacheTtl=0` 仍保留「防穿透短窗口」语义（`MIN_MEM_TTL_MS`）；仅 EO 下生效值 clamp 到 ≥120s 以避开 KV 跨节点约 60s 最终一致。配置域即使被硬水位回收，清后读必回 KV，绝不返回陈旧值。
+4. **跨 isolate 最终一致**：其他 isolate 仍受 `configCacheTtl` 控制（保守短窗口），这是边缘多 isolate 架构的固有特性，非 bug。
 
 ---
 

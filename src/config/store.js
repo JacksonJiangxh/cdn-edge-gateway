@@ -30,6 +30,7 @@ import {
   deepClone,
 } from './defaults.js';
 import { validateGlobal } from './schema.js';
+import { registerDomain, allocBytes, releaseBytes, syncEntries } from '../platform/memBudget.js';
 
 // ----------------------------------------------------------------------------
 // KV Key 常量
@@ -61,8 +62,71 @@ const MAX_TOTAL_SITES_SCAN = 300;
 /** @type {Map<string, {value:any, expireAt:number}>} */
 const _mem = new Map();
 
-/** 内存缓存条目上限，防止泛域名场景下无限增长导致 isolate 内存溢出 */
+/** 内存缓存条目硬上限（兜底最大值），防止泛域名场景下无限增长导致 isolate 内存溢出 */
 const MEM_MAX = 500;
+
+/**
+ * 单条配置对象的估算字节（用于 memBudget 记账与配额推导）。
+ * 站点/源站池配置序列化后通常几百 B ~ 几 KB，取 2048B 作为保守初值，
+ * memBudget 会按运行时采样自校准（见 platform/memBudget.js）。
+ * @param {any} entry
+ * @returns {number}
+ */
+function estimateConfigBytes(entry) {
+  if (!entry || typeof entry !== 'object') return 2048;
+  try {
+    return Math.max(64, JSON.stringify(entry).length + 64);
+  } catch {
+    return 2048;
+  }
+}
+
+/**
+ * 把当前 _mem 条目数回传给 memBudget（evict 后校正记账，避免只增不减）。
+ * @param {boolean} aggressive 是否激进回收（config 域只在硬水位被调用，且只清过期项）
+ * @returns {void}
+ */
+function evictConfig(aggressive) {
+  // config 域保守：只清过期项，绝不丢弃未过期配置。
+  // 清后下次读会回退真实 KV（memGet miss → readJson），保证前端渲染永远正确。
+  // 即便 aggressive=true（硬水位兜底），也只清过期项——未过期配置宁可占用内存
+  // 也不返回陈旧/缺失，宁可让硬水位触发 ratelimit/stats 等可容忍域先释放。
+  const now = Date.now();
+  for (const [k, v] of _mem) {
+    if (now > v.expireAt) _mem.delete(k);
+  }
+  syncEntries('config', _mem.size);
+}
+
+// 向统一内存预算单例注册「config 域」。
+// - weight 给到 3（相对 stats/ratelimit 更高权重，配置是高频热路径，应优先保活）
+// - allowAggressiveEvict=false：软水位永不主动清配置；仅硬水位时 evict(true)
+//   也只清过期项，且清后读必回 KV（见 evictConfig 注释），保证配置及时生效与正确。
+registerDomain('config', {
+  weight: 3,
+  estimateBytes: estimateConfigBytes,
+  evict: evictConfig,
+  allowAggressiveEvict: false,
+});
+
+/**
+ * 由 memBudget 配额推导的「配置 L1 条目上限」。
+ * 取 min(MEM_MAX, 配额字节 / 估算每条约字节)，并至少为 1。
+ * 这样内存预算缩小时，配置缓存条目上限随之收紧，形成跨域统一约束。
+ * @returns {number}
+ */
+function configEntryCap() {
+  try {
+    const snap = getDomainQuota('config');
+    if (snap > 0) {
+      const byBytes = Math.floor(snap / estimateConfigBytes(null));
+      return Math.max(1, Math.min(MEM_MAX, byBytes));
+    }
+  } catch {
+    /* 拿不到配额时退回硬上限 */
+  }
+  return MEM_MAX;
+}
 
 /** 默认缓存 TTL（毫秒），实际值以 GlobalConfig.configCacheTtl 为准 */
 let _ttlMs = 30_000;
@@ -120,16 +184,28 @@ function memSet(key, value) {
   // 又能把同一瞬间的重复穿透合并掉。
   const ttl = _ttlMs > 0 ? _ttlMs : MIN_MEM_TTL_MS;
 
-  // LRU：超限时淘汰最久未使用的（Map 头部）
-  if (_mem.size >= MEM_MAX) {
+  // 若键已存在，先记一笔释放，再写入时会重新 alloc（保持记账准确）。
+  if (_mem.has(key)) releaseBytes('config', 1);
+
+  // LRU：超限时淘汰最久未使用的（Map 头部），并释放其记账字节。
+  // 上限由 memBudget 配额动态推导（configEntryCap），MEM_MAX 仅作兜底。
+  const cap = configEntryCap();
+  while (_mem.size >= cap) {
     const oldest = _mem.keys().next().value;
-    if (oldest !== undefined) _mem.delete(oldest);
+    if (oldest === undefined) break;
+    _mem.delete(oldest);
+    releaseBytes('config', 1);
   }
   _mem.set(key, { value, expireAt: Date.now() + ttl });
+  // 写入即记账：memBudget 据此掌握占用并触发水位回收（统计/限流域优先释放）。
+  allocBytes('config', value);
 }
 
 function memDel(key) {
-  _mem.delete(key);
+  if (_mem.has(key)) {
+    _mem.delete(key);
+    releaseBytes('config', 1);
+  }
 }
 
 /**
@@ -138,7 +214,9 @@ function memDel(key) {
  * 注意：只影响当前 isolate，其他 isolate 仍需等待 TTL 自然过期。
  */
 export function invalidateMemCache() {
+  const n = _mem.size;
   _mem.clear();
+  if (n > 0) releaseBytes('config', n);
 }
 
 // ----------------------------------------------------------------------------
