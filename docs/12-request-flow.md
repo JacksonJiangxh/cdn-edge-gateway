@@ -76,7 +76,6 @@
    ├─ 取站点默认上游 buildSitePool(site)：
    │     ├─ site.poolId → getPool(poolId) 取源站实体
    │     │     （kind=single 的单一源站 与 kind=pool 的源站池 走同一条路径）
-   │     └─ 兼容分支：升级前遗留、尚未迁移的站点内联 origins → 造临时池
    │     都为空 → 500 返回浏览器
    │
    ├─ 按负载均衡/选择逻辑选出一个对象 selectOrigin(pool, ctx, [])：
@@ -95,9 +94,7 @@
    │     rules=site.rules 过滤 enabled!==false → priority 降序排序
    │     逐条 isRuleMatched(rule, subject):
    │        a. buildMatchSubject(ctx) 提取特征(含 origin=ctx.origin.id, originAddr=ctx.origin.addr)
-   │        b. matchLegacy 旧版扁平条件(彼此AND): pathPrefix前缀 / pathRegex正则 / extIn / methodIn
-   │           任一不过 → 该规则不命中
-   │        c. m.conditions 二维条件(外OR内AND)：groups空→命中；
+   │        b. m.conditions 二维条件(外OR内AND)：groups空→命中；
    │           否则 groups.some(group.every(evalCondition))
    │             evalCondition: target 支持 origin/originAddr(header/cookie/query/path/host/ext...)
    │        命中即停 → ctx.debug.ruleId=rule.id, rule=该规则
@@ -115,7 +112,7 @@
    │     │     └─ 命中 → 返回跳 https 响应给浏览器（流程结束）  〔对应 CF: 配置规则/SSL〕
    │     ├─ 直接响应 (action.directResponse.enabled) → 用 body/status/contentType 构造响应
    │     │     └─ 命中 → 返回自定义响应给浏览器（结束）  〔对应 CF: 直接响应〕
-   │     ├─ 访问 URL 重定向 (action.redirect.enabled) → buildRedirectTarget($1..$9 引用 pathRegex)
+   │     ├─ 访问 URL 重定向 (action.redirect.enabled) → buildRedirectTarget
    │     │     └─ 命中 → 返回 302/自定义 Location 给浏览器（结束）  〔对应 CF: 重定向规则/批量重定向〕
    │     └─ 以上皆无 → 继续回源流程
    │

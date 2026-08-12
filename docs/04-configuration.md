@@ -171,15 +171,7 @@ bucket_name = "cdn-assets"
 
 #### 2.2 match（匹配条件）
 
-**方式一：简易快捷条件**（仍可用，适合单条件）
-| 字段 | 说明 | 示例 |
-|---|---|---|
-| `pathPrefix` | 路径前缀（自动补 `/`） | `/images` |
-| `pathRegex` | 路径正则（上限 200 字符，做 ReDoS 防护） | `^/api/.*\.json$` |
-| `extIn` | 扩展名列表（自动转小写、去点） | `["jpg","png"]` |
-| `methodIn` | HTTP 方法列表 | `["GET","HEAD"]` |
-
-**方式二：可视化多条件（推荐，更灵活）** —— `match.conditions` 是**二维数组**：
+匹配条件通过 `match.conditions`（二维数组）表达，外层 = OR、内层 = AND：
 
 ```
 conditions: [
@@ -216,7 +208,7 @@ conditions: [
 | `regex` / `notRegex` | 正则匹配 / 不匹配 | `path` `regex` `^/v\d+/` |
 | `exists` / `notExists` | 头/参数存在 / 不存在 | `header` `key=x-token` `exists` |
 
-> 方式一里的 `pathPrefix` / `pathRegex` / `extIn` / `methodIn` 是等价的快捷写法，会映射到上述 `target`+`op`（`extIn` ≈ `extension` `contain`、 `pathPrefix` ≈ `path` `prefix`）。
+
 > 没有条件 = 匹配所有请求（常用于「整站默认动作」兜底规则）。
 
 #### 2.3 action（动作）

@@ -43,7 +43,7 @@ POST /{ADMIN_PATH}/api/auth/logout       # 登出
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/pools` | 列出所有源站，每项附带 `kind`、`refs[]`、`refCount`、`deletable`；响应还含 `legacySites`（仍用旧版内联源站、待迁移的站点） |
+| `GET` | `/pools` | 列出所有源站，每项附带 `kind`、`refs[]`、`refCount`、`deletable` |
 | `POST` | `/pools` | **新建**源站（body 不传 `id`，系统自动生成机器主键） |
 | `GET` | `/pools/{id}` | 获取单条源站 |
 | `GET` | `/pools/{id}/refs` | 查询该源站的引用明细（谁在用、用在哪） |

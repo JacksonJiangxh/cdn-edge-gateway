@@ -13,5 +13,5 @@ for (const r of res.value.rules) {
 }
 
 console.log('\n--- 未显式配置缓存的规则，落到什么默认值 ---');
-const bare = validateSite({ host: 'b.com', origins, rules: [{ match: { pathPrefix: '/x' }, action: {} }] });
+const bare = validateSite({ host: 'b.com', origins, rules: [{ match: { conditions: [[{ target: 'path', op: 'prefix', values: ['/x'] }]] }, action: {} }] });
 console.log(JSON.stringify(bare.value.rules[0].action.cache));

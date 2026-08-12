@@ -255,7 +255,7 @@ const originResp = await requestWithFailover(ctx, [pick], rule, effectiveHostHea
 ## 7. 配置存储与品牌
 
 - 配置（站点 / 源站池 / 全局）统一存 KV（`CDN_KV`），key 前缀隔离（`site:` / `pool:` / `cfg:global`）。
-- **键名编码**：EdgeOne KV 官方限定 key「仅支持数字、字母及下划线」，与本项目 `site:`/`pool:`/`cfg:` 前缀及 host、IP 中的 `.` 冲突。`platform/keyCodec.js` 在适配层做可逆十六进制转义（`cfg:global` → `cfg_3Aglobal`），逐字符编码保证 `encode(prefix)` 恒为 `encode(fullKey)` 的前缀，`list({prefix})` 语义不变。编码后的键在 CF 上同样合法，两平台共用一套逻辑。**Edge Function（Edge 运行时）与 Cloud Function（Node 运行时）共用同一编码约定**，故管理 API 在 Node 侧读写 KV 时键名完全兼容。历史键由 `migration/` 在部署后一次性搬迁（幂等、不覆盖新数据，完成后落哨兵键跳过后续扫描）。
+- **键名编码**：EdgeOne KV 官方限定 key「仅支持数字、字母及下划线」，与本项目 `site:`/`pool:`/`cfg:` 前缀及 host、IP 中的 `.` 冲突。`platform/keyCodec.js` 在适配层做可逆十六进制转义（`cfg:global` → `cfg_3Aglobal`），逐字符编码保证 `encode(prefix)` 恒为 `encode(fullKey)` 的前缀，`list({prefix})` 语义不变。编码后的键在 CF 上同样合法，两平台共用一套逻辑。**Edge Function（Edge 运行时）与 Cloud Function（Node 运行时）共用同一编码约定**，故管理 API 在 Node 侧读写 KV 时键名完全兼容。
 - **双运行时分工（EdgeOne Makers）**：EO 区分 Edge Functions 与 Cloud Functions。
   - **Edge Functions**（`edge-functions/[[default]].js`）：边缘低延迟、KV 原生可用、但有 ≤200ms CPU / ≤1MB body 限制。本项目数据面代理与管理面全部在此——因为它们都依赖 KV，而 KV 仅 Edge 可用。
   - **Cloud Functions**（`cloud-functions/`，预留）：云端 Node 运行时，无原生 KV，但可跑 MySQL/Blob 等重 IO、长执行。**承载「不依赖本项目 KV 的重活」**：大文件转码、AI 推理、独立业务库、后台批处理。当前 KV-only 版本暂无此类场景，故目录仅作架构预留（详见其 README）。

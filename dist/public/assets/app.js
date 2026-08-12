@@ -720,8 +720,7 @@ if (typeof window !== 'undefined') window.API = API;
         flow.appendChild(seqStage(icon, `${no} ${title}`, summary, badge, 'sec-rules', onClick, owner));
         if (hasSite && matched.length) {
           flow.appendChild(el('div', { class: 'seq-rule-list' }, matched.map((r) => {
-            const condCount = (r.match && r.match.conditions || []).reduce((n, g) => n + g.length, 0)
-              + Object.keys(legacyMatchFields(r.match || {})).length;
+            const condCount = (r.match && r.match.conditions || []).reduce((n, g) => n + g.length, 0);
             const idx = rules.indexOf(r);
             const node = seqRuleInPack(r, ruleSubs(r), condCount, site.host, draggable);
             if (draggable && idx >= 0) ruleNodes.push({ node, index: idx });
@@ -994,8 +993,7 @@ if (typeof window !== 'undefined') window.API = API;
           () => openGlobalRulesDrawer(), '全站通用规则编辑器'));
         if (matched.length) {
           flow.appendChild(el('div', { class: 'seq-rule-list' }, matched.map((r) => {
-            const condCount = (r.match && r.match.conditions || []).reduce((n, g) => n + g.length, 0)
-              + Object.keys(legacyMatchFields(r.match || {})).length;
+            const condCount = (r.match && r.match.conditions || []).reduce((n, g) => n + g.length, 0);
             const node = seqRuleInPack(r, ruleSubs(r), condCount, '__global__', false);
             return node;
           })));
