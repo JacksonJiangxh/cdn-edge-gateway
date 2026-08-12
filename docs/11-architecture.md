@@ -45,7 +45,7 @@ cdn-edge-gateway/
 │   │   ├── matcher.js      # 规则匹配（多条件 OR 组 AND，按优先级）
 │   │   ├── rewrite.js      # 路径重写（prefix/strip/regex）
 │   │   ├── cachekey.js     # 缓存键生成（回源 URL + host 维度 + 代次 + 自定义维度）
-│   │   └── cache.js        # 边缘缓存读写（CF 用 caches.default；EO 走响应头委托 EDGE_HEADER + 同站 fetch 节点缓存 eoEdgeEngine.js）
+│   │   └── cache.js        # 边缘缓存读写（CF/EO 用 caches.default；ESA 用全局 cache 单实例；三平台均 hasCacheApi=true，差异见 cacheIsNodeLocal / cacheSingleInstance / cacheKeyHttpOnly / cacheSubreqLimit）
 │   ├── balancer/
 │   │   ├── pick.js         # 选源入口
 │   │   ├── strategy.js     # 调度策略：chain/roundrobin/weighted/random/iphash
@@ -99,11 +99,11 @@ cdn-edge-gateway/
    │     ├─ proxy.matcher()：按 priority 降序逐条匹配规则
    │     │      命中 → 执行该 rule.action（源站池/重写/Host/头/强制HTTPS/重定向/自定义响应/缓存）
    │     ├─ balancer.pick()：在目标池内按策略选源（chain/roundrobin/weighted/random/iphash）
-   │     │      ├─ proxy 回源（fetch/socket 引擎，带 pathPrefix/重写/自定义Host/超时/跟随3xx）
+   │     │      ├─ proxy 回源（fetch 引擎，带 pathPrefix/重写/自定义Host/超时/跟随3xx；CF 上裸 IP+HTTPS+自定义 SNI 内部自动走 socket 兜底）
    │     │      ├─ 失败（网络错误 / retryOn 状态码）→ 链式回退下一源站
    │     │      └─ 连续失败 → 被动熔断隔离（默认 60s，无需 Cron）
    │     ├─ proxy.headers()：入向注入 X-EdgeGateway-Client-IP；出向改写请求/响应头
-   │     ├─ proxy.cache()：边缘缓存（CF 用 caches.default API；EO 走响应头委托 + 路径 A 同站 fetch 节点缓存，详见缓存本质章节）
+   │     ├─ proxy.cache()：边缘缓存（CF/EO 用 caches.default API；ESA 用全局 cache 单实例；三平台均原生支持 Cache API，详见缓存本质章节）
    │     ├─ 图片优化：依赖 CF 平台原生 fetch 协商 webp/avif（**无独立 JS 模块**，`src/proxy/` 下不存在 image.js）；EO 因无该能力自动降级为原图
    │     └─ proxy.pipeline()：组装最终响应，注入品牌头 Server: EdgeGateway / Via: 1.1 EdgeGateway
    │
@@ -123,7 +123,7 @@ cdn-edge-gateway/
 
 | 能力 | Cloudflare (Workers/Pages) | EdgeOne Pages | 降级行为 |
 |---|---|---|---|
-| `caches.default` 缓存 API | ✅ | ❌ | EO 无此 API；但 `hasEdgeCache=true`，走「路径 B 响应头委托」+「路径 A 同站 fetch 节点缓存」（详见缓存章节与 eoEdgeEngine.js） |
+| `caches.default` 缓存 API | ✅ | ✅（节点本地化） | CF / EO 均原生支持 `caches.default`，差异仅「EO 缓存仅当前节点本地、不跨节点复制」。三平台均 `hasCacheApi=true`；EO 额外保留「路径 A 同站 fetch 节点缓存」并存（详见缓存章节与 eoEdgeEngine.js） |
 | D1 统计 | ✅ | ❌ | EO 无 D1，`statsDriver=d1` 时自动回落 **KV 驱动**（内存聚合 + 分片键落盘，写入频次与请求量解耦）；CF 链照常 |
 | KV 配置存储 | ✅ | ✅（Edge + Node 双运行时） | 两平台均通过 `CDN_KV` 绑定。EO KV 键名仅允许 `[0-9A-Za-z_]`，故适配层统一做可逆编码（见 `platform/keyCodec.js`），上层无感、两平台同构。**EO Edge Function 与 Cloud Function 共用同一 KV 命名空间与键编码**，管理 API 在 Node 侧读写完全兼容 |
 | Node API（process/fs/Blob） | ❌（仅 Edge） | ⚠️（Edge Function 无，但本项目已收口到 Edge Function） | 本项目全部收口到 Edge Function（`edge-functions/[[default]].js`），不拆 Cloud Function——因 EO KV 仅在 Edge Functions 可用，拆出去管理面会失 KV。Node API 受限但本项目未依赖；CF 上管理面同体运行于 Edge，低频可接受 |
@@ -140,15 +140,16 @@ KV 是 CF 与 EO **共用**的存储层，但计费口径不同，优化必须�
 | 措施 | 对 CF | 对 EO |
 |---|---|---|
 | `configCacheTtl` 默认 30s→60s | 命中 L1 后零冷读，省读次数 ✓ | 同 ✓ |
-| EO 平台下 `configCacheTtl` 生效值 clamp ≥120s | **不触发**（仅 `platform==='edgeone'` 分支） | 缓存窗口 ≥ KV 同步延迟，压冷读、避旧值 ✓ |
+| EO 平台下 `configCacheTtl` 生效值 clamp ≥120s | **不触发**（仅 `platform==='eo'` 分支） | 缓存窗口 ≥ KV 同步延迟，压冷读、避旧值 ✓ |
 | 统计键 TTL 7天→3天 | 纯省空间，写次数不变 ✓ | 省空间防撑爆 1GB ✓ |
 | 查询窗口 `MAX_QUERY_HOURS` 跟随 TTL 推导 | 避免无效 KV 读占用 subrequest 预算 ✓ | 同 ✓ |
 
 > 配置内存缓存（`configCacheTtl`）是数据面压低 KV 访问的核心杠杆：绝大多数请求命中 isolate 内 L1 缓存后 KV 冷读次数归零。EO 上进一步抬高低限，是因为 EO KV 跨节点最终一致约 60s，缓存窗口过短既拉高延迟又读不到新值。
-| TCP Socket 裸 IP 回源 | ✅（仅 Workers） | ❌（无 socket） | ❌（无 socket，但 fetch 可带自定义 Host 头访问公网；裸 IP+SNI 走平台源站组兜底） |
+| 自定义回源 Host（fetch 设 Host 头） | ✅ | ✅ | ✅（仅改 HTTP 头，连接按 URL 域名 DNS） |
+| TCP Socket 裸 IP + 自定义 SNI 回源 | ✅（CF 上由 fetchEngine 内部自动走 socket 兜底） | ❌（无 socket 且 fetch 不支持裸 IP；裸 IP 走平台源站组兜底） | ❌（fetch 不支持 IP/自定义端口；裸 IP 走平台源站组兜底） |
 | 图片优化(webp/avif) | ✅ | ❌ | EO 下降级为原图 |
 
-> 本地开发用 `CLOUD_PLATFORM=edgeone` 可强制按 EO 降级，确保「本地 = 线上」。详见 [09 本地开发](./09-local-development.md)。
+> 部署厂商由环境变量 `CLOUD_PLATFORM` 显式声明，取值 `cf` / `eo` / `esa`，程序不再靠运行时指纹猜测。本地开发可用 `CLOUD_PLATFORM=eo` 强制按 EO 降级，确保「本地 = 线上」。详见 [09 本地开发](./09-local-development.md)。
 
 ---
 
@@ -162,20 +163,25 @@ KV 是 CF 与 EO **共用**的存储层，但计费口径不同，优化必须�
 - **Cloudflare**：用 `caches.default` API 直接把响应存进 CF 边缘；同时下发 `Cache-Control` / `CDN-Cache-Control` 让 CF 边缘也按头缓存。但 **CF 生产环境的缓存权威是面板两条规则，必须成对设置**，否则源站返回的头（如 `no-store`/`private`）会反客为主：
   - **Cache Rules（请求/命中侧）**：决定"存不存、存多久"（`Cache eligibility`、`Edge TTL`、`Browser TTL`、并设 `Origin Cache-Control = Ignore if present` 覆盖源站头）。
   - **Cache Response Rules（响应侧，Modify cache response headers and tags）**：响应离开边缘前改写 `Cache-Control`/`CDN-Cache-Control`、加 `Cache-Tag`、清掉 `Set-Cookie` 等。本项目代码下发的头仅作跨平台兜底，CF 上以这两条面板规则为准（详见部署文档 CF 段）。
-- **EdgeOne（1+1 架构）**：**没有 `caches.default` API**，但边缘缓存能力真实存在（`hasEdgeCache=true`）：
-  - **路径 B 响应头委托**：响应下发 `CDN-Cache-Control: s-maxage=...`，由 EO 边缘按头缓存（`edgeTtl` 决定 TTL）——所有 EO 请求都享受。
-  - **路径 A 同站 fetch 节点缓存**（`proxy/engines/eoEdgeEngine.js`）：对「无自定义回源 Host 的可缓存请求」，边缘函数内 `fetch(同站加速域名)`（HOST 与 host 头一致）走 EO 节点缓存，命中零函数调用、未命中由 EO 按平台源站组回源（需预配 `docs/07-eo-origin-host.md`）。
+- **EdgeOne（1+1 架构）**：**原生支持 `caches.default` API**（基于 Web Cache API，接口与 CF 一致），`hasCacheApi=true`；差异仅「缓存仅当前边缘节点本地有效、不跨节点复制」（`cacheIsNodeLocal=true`）。同时边缘缓存能力还有两条路径并存：
+  - **路径 B `caches.default` 写入/读取**：与 CF 同构，走标准 Cache API。
+  - **路径 A 同站 fetch 节点缓存**（`proxy/engines/eoEdgeEngine.js`）：对「无自定义回源 Host 的可缓存请求」，边缘函数内 `fetch(同站加速域名)`（HOST 与 host 头一致）走 EO 节点缓存，命中零函数调用、未命中由 EO 按平台源站组回源（需预配 `docs/07-eo-origin-host.md`）。路径 A 与路径 B 互不冲突、并存。
+  - 响应头委托（`CDN-Cache-Control: s-maxage=...`）仍对所有 EO 请求生效，作兜底。
+- **阿里云 ESA**：**原生支持 Cache API**，但形态为全局 `cache` 单实例（无 `caches.default` / `open` 命名空间，`cacheSingleInstance=true`），`hasCacheApi=true`。关键差异：
+  - `cache.put` 的 key 必须为 **http URL**（引擎不支持 https key，写入时由 `cache.js` 自动降为 http，`cacheKeyHttpOnly=true`）；
+  - Cache 操作与 `fetch` **共享 32 子请求硬上限**（`cacheSubreqLimit=32`）；
+  - 单实例 `cache.delete` 仅作用于当前节点，存入条目仍须 TTL 到期才真正失效（不支持主动跨节点刷新）。
 
 ```
 本项目能「控制」的，只是：
   ① 是否下发缓存头、TTL 多少、是否带 stale-while-revalidate；
-  ② （CF 上）是否调用 caches.default 写入/读取。
+  ② （CF / EO 上）是否调用 caches.default 写入/读取；（ESA 上）是否调用全局 cache。
 真正「存」数据的，是底层边缘。这不是缺陷，而是边缘计算的本来面目。
 ```
 
-**因此带来的 EO 限制（非 bug）**：
-- `cacheGen`「整站清除」只对 `caches.default` 生效（CF）；EO 下无法主动清除，只能等 TTL 自然过期。
-- 想立即失效，只能缩短 `edgeTtl`，或改 `CDN-Cache-Control` 让新响应覆盖旧缓存键维度。
+**因此带来的平台差异（非 bug）**：
+- `cacheGen`「整站清除」：CF / EO 通过 `caches.default.delete` 真实删除（EO 仅清当前节点）；ESA 通过 `cache.delete` 真实删除（仅当前节点）。cacheGen 代次机制使旧键整体失效，三平台均适用。
+- 想立即失效，可调用 purge 单 URL、或缩短 `edgeTtl`、或改 `CDN-Cache-Control` 让新响应覆盖旧缓存键维度。
 
 ### 4.2 EO 多域名源站负载均衡（跨域名 fetch = 路径 B）
 

@@ -27,14 +27,14 @@
 | 约束 | 数值 | 对本项目的影响与应对 |
 |------|------|----------------------|
 | 函数代码包大小 | ≤ 4 MB | 本项目打包后 `_worker.js` 仅几百 KB，安全 |
-| **每请求子请求（fetch）上限** | **4 个** | ⚠️ 最严格。见下方 §4 专项说明 |
+| **每请求子请求（fetch）上限** | **32 个** | ⚠️ 且 Cache 操作与 fetch **共享**同一预算（详见 §4 与 §5） |
 | **内存规格** | **128 MB** | 与 CF Workers 同级；本项目峰值占用远低于此 |
 | 响应时间 | 120 s | 充裕（CF 免费版仅 10s，ESA 更宽松） |
 | 网关等待超时 | 10 s（超则返回 504） | 回源超时已默认 10s 内 |
 | 静态单文件 | ≤ 25 MB | `dist/public/assets/*` 远小于此 |
 | 静态文件总数 | ≤ 2000 | 本项目仅数个，安全 |
 | 原生 KV | **有（EdgeKV）** | `new EdgeKV({namespace})` 全局类；免费额度可能不含/单独计费，不含时降级 REDIS_URL，见 §3 |
-| `caches.default` | **无** | 边缘缓存走响应头委托（cache.js 已支持） |
+| `caches.default` | **无（但提供全局 `cache` 单实例）** | ESA 原生支持 Cache API（`cacheSingleInstance=true`），`cache.js` 已适配全局 `cache`；`put` key 须 http URL（`cacheKeyHttpOnly=true`） |
 | TCP socket（`engine='socket'`） | **无** | 自动降级 fetch 引擎（`caps.hasSocket=false`） |
 | R2 回源（`engine='r2'`） | **无** | 自动禁用（前端已按 `caps.hasR2` 灰掉） |
 
@@ -69,7 +69,7 @@ dist/public/      # 构建产物：管理面静态资源（被 ESA 静态托管�
 持久化**一律走外置 `REDIS_URL`**（你自建的 Webdis/Redis）。
 
 代码层面已落实该策略（`src/platform/kv.js` 的 `getKV`）：
-`getKV` 在 `CLOUD_PLATFORM=aliyun-esa` 时**直接跳过 EdgeKV 分支**，只剩
+`getKV` 在 `CLOUD_PLATFORM=esa` 时**直接跳过 EdgeKV 分支**，只剩
 **CDN_KV/KV（CF/EO）→ REDIS_URL → 无持久化** 的链路。ESA 运行时只要没设 REDIS_URL，
 `store.js` 的 `requireKV` 会明确报错提示「请用 REDIS_URL」而非悄悄去用收费的 EdgeKV。
 
@@ -79,13 +79,13 @@ dist/public/      # 构建产物：管理面静态资源（被 ESA 静态托管�
 
 1. 自建 Webdis 实例（https://github.com/nicolasff/webdis），前置带鉴权的反代 + TLS；
 2. ESA 控制台「函数和 Pages → 目标 → 环境变量」设置：
-   - `CLOUD_PLATFORM=aliyun-esa`（可选，薄壳 `esa/index.js` 会强制补，可不设）
+   - `CLOUD_PLATFORM=esa`（可选，薄壳 `esa/index.js` 会强制补，可不设）
    - `REDIS_URL=https://your-webdis.example.com`（**必填**，否则配置无法保存）
    - `REDIS_TOKEN=Bearer xxxx`（可选，作为 Authorization 头直传）
    - `REDIS_PREFIX=cg1:`（可选，多应用共享 Redis 时隔离）
 3. `getKV` 检测到 ESA 平台 → 跳过 EdgeKV → 命中 `REDIS_URL` → 用 Webdis 适配器。
 
-> 注意：REDIS_URL 每次 KV 读 = 1 个 fetch，受 §4 的 4 子请求限制约束。
+> 注意：REDIS_URL 每次 KV 读 = 1 个 fetch，受 §4 的 32 子请求共享预算约束（Cache 操作与 fetch 共享）。
 > 安全红线：Webdis 默认无鉴权且明文暴露，自建务必①仅内网/套 TLS ②前置带密钥反代
 > ③绝不公网裸露。详见 `docs/13-redis-kv.md`。
 
@@ -93,9 +93,9 @@ dist/public/      # 构建产物：管理面静态资源（被 ESA 静态托管�
 
 ---
 
-## 4. ⚠️ 4 个子请求上限专项
+## 4. ⚠️ 32 个子请求上限专项（Cache 与 fetch 共享）
 
-ESA 限制**每个请求最多发 4 个 fetch 子请求**。本项目在 ESA 上持久化走 **REDIS_URL**
+ESA 限制**每个请求最多发 32 个子请求**，且 **Cache 操作与 `fetch` 共享同一预算**（`cacheSubreqLimit=32`）。本项目在 ESA 上持久化走 **REDIS_URL**
 （每次 KV 读 = 1 个 fetch），子请求压力分析如下：
 
 ### 数据面（占比 99% 的请求）—— 安全
@@ -110,17 +110,18 @@ ESA 限制**每个请求最多发 4 个 fetch 子请求**。本项目在 ESA 上
 
 ### 增强路线（待实现，社区向）
 1. **Webdis MGET 批量**：`redis-kv.js` 扩展 `mget`，把 `listSites` 的 N 次读合并成 1 个 fetch。
-2. **`caps.maxSubRequests` 已暴露**（ESA=4）：`store.js` 的 `listSites` 据其切到 MGET。
+2. **`caps.maxSubRequests` 已暴露**（ESA=32，且 Cache 与 fetch 共享）：`store.js` 的 `listSites` 据其切到 MGET。
 3. 管理面改「先读索引（1 fetch）→ MGET 取全部站点（1 fetch）」两阶段，恒定 ≤2 fetch。
 
 ---
 
-## 5. 缓存（无 caches.default → 响应头委托）
+## 5. 缓存（全局 `cache` 单实例 → 已适配）
 
-`src/platform/cache.js` 已包含「EO 模式」：`hasEdgeCache=true` 但 `hasCacheApi=false`。
-ESA 探测为 `platform='aliyun-esa'` 时：
-- 写缓存不调用 Cache API，而是给响应加 `CDN-Cache-Control` / `Cache-Control` 头，委托 ESA 边缘按头缓存；
-- 单键 purge 无 Cache API 等价物，靠 `Cache-Tag` + ESA 平台 purge，或等待 `s-maxage` 自然过期（与 EO 行为一致）。
+`src/platform/cache.js` 已包含 ESA 适配分支（`caps.cacheSingleInstance=true`）：
+- ESA 原生支持 Cache API，但形态是**全局 `cache` 单实例**（无 `caches.default` / `open` 命名空间），`hasCacheApi=true`；
+- 写缓存调用 `cache.put` / 读调用 `cache.match`；`put` 的 key 必须为 **http URL**（`cacheKeyHttpOnly=true`，`cache.js` 写入时自动将 https 降为 http）；
+- Cache 操作与 `fetch` **共享 32 子请求硬上限**（`cacheSubreqLimit=32`），注意预留回源 fetch 预算；
+- 单键 purge 调用 `cache.delete`（仅作用于当前节点），存入条目仍须 TTL 到期才真正失效；大规模清除建议结合「缓存代次」使旧键整体失效（与 CF / EO 机制一致）。
 
 ---
 
@@ -165,7 +166,7 @@ esa-cli domain add <domain>   # 绑定域名（须 ESA 子域且已备案）
 ## 7. 验证
 
 部署后访问：
-- `https://<your-domain>/__health` → 返回 JSON，其中 `platform` 应为 `"aliyun-esa"`、`caps.maxSubRequests` 为 `4`、`caps.kvBackend` 为 `"native"`（用 EdgeKV）或 `"redis"`（用 REDIS_URL）。
+- `https://<your-domain>/__health` → 返回 JSON，其中 `platform` 应为 `"esa"`、`caps.maxSubRequests` 为 `32`、`caps.cacheSubreqLimit` 为 `32`、`caps.kvBackend` 为 `"native"`（用 EdgeKV）或 `"redis"`（用 REDIS_URL）。
 - `https://<your-domain>/<adminPath>/` → 管理面。
 - 数据面代理请求 → 正常回源。
 
@@ -219,7 +220,7 @@ ESA「即时日志」**只采集 `console.alert(...)` 输出**（映射到日志
 
 1. **env 注入方式**：ESA 文档示例 `fetch(request)` 只显式写 request 一个参数，但未说明是否支持 CF Workers 范式的 `fetch(request, env, ctx)` 第二/第三参数。本薄壳已做双重兜底（优先 fetch 第二参数、回退 process.env、强制 CLOUD_PLATFORM）。若实测 ESA 确实只传 request 且运行时变量在 `process.env`，当前方案已覆盖；若 ESA 走其它注入（如 `request` 上挂 bindings），需在 `esa/index.js` 的 `resolveEnv` 补对应提取。
 2. **导航请求兜底**：§2 所述 `notFoundStrategy` 取舍，需实测 ESA 默认行为后定稿（当前选择不配置 notFoundStrategy，让 `/__panel` 导航请求落到函数）。
-3. **运行时指纹**：`caps.js` 的 `detectAliyunEsaRuntime` 已用 `CLOUD_PLATFORM=aliyun-esa` 显式声明兜底（薄壳也会强制补）；若想免设环境变量自动探测，需在 ESA 控制台（用 `esa-cli dev` 或临时函数）跑
+3. **运行时指纹**：`caps.js` 的 `detectAliyunEsaRuntime` 已用 `CLOUD_PLATFORM=esa` 显式声明兜底（薄壳也会强制补）；若想免设环境变量自动探测，需在 ESA 控制台（用 `esa-cli dev` 或临时函数）跑
    `console.alert(navigator.userAgent, Object.keys(globalThis).filter(k=>/esa/i.test(k)))`
    把指纹补进 `detectAliyunEsaRuntime`（注意用 `console.alert` 才能进即时日志，见 §9.1）。
 4. **REDIS_URL 子请求预算**：ESA 每请求子请求上限 = 4，而 REDIS_URL 每次 KV 读占 1 个 fetch（§4）。

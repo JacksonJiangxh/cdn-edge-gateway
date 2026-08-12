@@ -155,12 +155,25 @@ function buildLimitations(ctx) {
       message:
         '当前平台不支持边缘缓存 API，缓存将完全依赖平台自身 CDN 与 Cache-Control 响应头',
     });
-  }
-  if (!caps.hasSocket) {
+  } else if (caps.cacheIsNodeLocal) {
     list.push({
-      key: 'socket',
+      key: 'edgeCache',
       message:
-        '当前平台不支持 TCP Socket，源站引擎 socket 不可用（回源到裸 IP/非标端口/自定义 Host 需要它），将自动降级为 fetch',
+        'EdgeOne 的 caches.default 仅当前边缘节点本地有效、不跨节点复制。命中率随请求分散到不同节点而降低，必要时可用「同站 fetch 委托节点缓存」(路径 A) 提升命中。',
+    });
+  } else if (caps.cacheSingleInstance) {
+    list.push({
+      key: 'edgeCache',
+      message:
+        '阿里云 ESA 提供全局 cache 单实例（非 caches.default）。Cache 操作与 fetch 共享 32 子请求硬上限，且 cache.put 的 key 必须为 http URL。',
+    });
+  }
+  if (!caps.hasRawIpFetch) {
+    list.push({
+      key: 'rawIpFetch',
+      message:
+        '当前平台不支持 fetch 直连裸 IP / 自定义端口 / 自定义 SNI（如 EdgeOne、ESA）。' +
+        '回源到裸 IP 源站须走平台侧源站组兜底；自定义回源 Host 头仍可用。',
     });
   }
   if (!caps.hasD1) {

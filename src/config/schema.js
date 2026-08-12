@@ -1029,18 +1029,23 @@ export function validatePool(input, caps) {
     c.errors.push('至少需要启用一个源站');
   }
 
-  // 平台能力联动：非 Cloudflare Workers 平台无法使用 socket 引擎（cloudflare:sockets 专有）
-  // caps 缺失（如离线校验、配置导入迁移）时跳过此限制，避免迁移受阻。
-  if (caps && caps.hasSocket === false) {
-    origins.forEach((o, i) => {
-      if (o.engine === 'socket') {
-        c.errors.push(
-          `源站[${i}] 使用了 socket 引擎，但当前平台（${caps.platform || 'unknown'}）不支持 TCP Socket；` +
-            `请改用 fetch 引擎`
-        );
-      }
-    });
-  }
+  // 引擎合法性：socket 已弃用，任何平台都不应使用（自定义 Host 由 fetch 原生支持，
+  // CF 上裸 IP+HTTPS+自定义 SNI 由 fetchEngine 内部自动走 socket 兜底）。
+  // caps 缺失（如离线校验、配置导入迁移）时不依赖 caps，直接按枚举值校验。
+  origins.forEach((o, i) => {
+    if (o.engine === 'socket') {
+      c.errors.push(
+        `源站[${i}] 使用了已弃用的 socket 引擎：自定义回源 Host 已由 fetch 原生支持，` +
+          `CF 上裸 IP+HTTPS+自定义 SNI 由 fetchEngine 自动走 cloudflare:sockets 兜底，` +
+          `请移除 origin/rule 配置中的 engine:'socket'，改用默认 fetch。`
+      );
+    }
+    if (o.engine === 'api') {
+      c.errors.push(
+        `源站[${i}] 使用了尚未实现的 api 引擎（cnb/github 等第三方 API 请求引擎待接入）。`
+      );
+    }
+  });
 
   if (c.errors.length) return { ok: false, errors: c.errors };
 

@@ -33,8 +33,8 @@ npm run dev
 [wrangler:inf] Ready on http://0.0.0.0:8799
 ```
 
-> 本地默认以 `CLOUD_PLATFORM=edgeone` 运行，模拟 EdgeOne 的能力降级，
-> 保证「本地行为 = 线上行为」。加 `--cf` 可切换为 Cloudflare 模式。
+> 本地默认以 `CLOUD_PLATFORM=eo` 运行，模拟 EdgeOne 的能力降级，
+> 保证「本地行为 = 线上行为」。加 `--cf` 可切换为 Cloudflare 模式（`CLOUD_PLATFORM=cf`）。
 
 常用参数：
 
@@ -57,7 +57,7 @@ npm run dev
 compatibility_flags = ["nodejs_compat"]
 ```
 
-`cloudflare:sockets` 是运行时动态加载的，**不需要**额外 flag。
+`cloudflare:sockets` 是运行时动态加载的，**不需要**额外 flag；但需以 `CLOUD_PLATFORM=cf` 运行才会启用（`fetchEngine` 在 CF 上遇「裸 IP + HTTPS + 自定义 SNI」时自动走它兜底）。
 </details>
 
 <details>
@@ -85,8 +85,8 @@ curl http://localhost:8799/__health
 **预期结果**：返回一段 JSON，`ok` 为 `true`，`hasKV` 也为 `true`：
 
 ```json
-{"ok":true,"platform":"edgeone","caps":{"platform":"edgeone","hasEdgeCache":true,
-"hasCacheApi":true,"eoEdgeCache":true,"hasSocket":false,"hasD1":false,
+{"ok":true,"platform":"eo","caps":{"platform":"eo","hasEdgeCache":true,
+"hasCacheApi":true,"cacheIsNodeLocal":true,"eoEdgeCache":true,"hasRawIpFetch":false,"hasSocket":false,"hasD1":false,
 "hasKV":true,"hasR2":false},"time":"..."}
 ```
 
@@ -96,8 +96,9 @@ curl http://localhost:8799/__health
 |---|---|---|
 | `ok` | `true` | 服务正常 |
 | `hasKV` | **`true`** | 配置存储可用。**若为 `false`，登录会 500** |
-| `platform` | `edgeone` | 本地默认模拟 EdgeOne 能力集 |
-| `hasSocket` | `false` | 本地无 TCP socket，**属正常**，自动降级用 fetch 回源 |
+| `platform` | `eo` | 本地默认模拟 EdgeOne 能力集（由 `CLOUD_PLATFORM=eo` 声明） |
+| `hasRawIpFetch` | `false` | 本地/EO 不支持 fetch 直连裸 IP（CF 才为 true） |
+| `hasSocket` | `false` | 本地/EO 无 cloudflare:sockets，**属正常** |
 | `hasD1` / `hasR2` | `false` | 本地未绑定，不影响主流程 |
 
 > 只需确认 `ok` 和 `hasKV` 都是 `true`。其余 `false` 都是本地环境的预期降级。

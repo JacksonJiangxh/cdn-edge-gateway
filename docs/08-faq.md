@@ -85,13 +85,14 @@ npm run dev -- --port 8080
 - **CF 上管理流量低频**：默认保持一体（不分体），因管理操作日均次数极少，对 300 万额度影响可忽略；如需隔离可手动拆分两个 Worker。
 
 **Q：为什么 EdgeOne 上管理 API 有时在 Node 运行时、有时在 Edge 运行时？**
-这是旧版 EdgeOne Pages（旧目录 `functions/`+`node-functions/`、`routes` 分流）的行为。本项目已迁移到新版 Makers：全部请求经 `edge-functions/[[default]].js` → `_worker.js` 单入口，`platform` 识别为 `edgeone`，KV 键编码与 `configCacheTtl` 下限等 EO 专属逻辑照常生效，无需 `routes` 分流配置。
+这是旧版 EdgeOne Pages（旧目录 `functions/`+`node-functions/`、`routes` 分流）的行为。本项目已迁移到新版 Makers：全部请求经 `edge-functions/[[default]].js` → `_worker.js` 单入口，`CLOUD_PLATFORM=eo` 时 EO 专属逻辑（KV 键编码、`configCacheTtl` 下限等）照常生效，无需 `routes` 分流配置。
 
-**Q：我点的是「部署 CF Workers」按钮，系统设置却显示「运行平台 pages」、TCP Socket 不可用？**
-这是**平台探测误判**，不是你部署错了路——你确实是 Workers 部署，socket 能力本应可用。
-原因：CF Workers 的【Static Assets】配置（`wrangler.toml` 里的 `assets = { binding = "ASSETS" }`）会给运行时注入 `env.ASSETS` 绑定；旧版探测逻辑把「存在 `ASSETS` 绑定」当成了 Pages 的标志，于是把开了静态资产层的真·Workers 误判成 `pages`，进而 `detectSocket()` 返回 `false`，丢掉 TCP 回源。
-修复：已改为「仅凭 `CF_PAGES` / `CF_PAGES_BRANCH` / `CONTEXT` 这类 Pages 专属构建变量区分 Workers 与 Pages，`ASSETS` 绑定不再作为判定依据」（见 `src/platform/caps.js`）。**重新部署一次最新代码**即可恢复正常：系统设置应显示「运行平台 workers」、TCP Socket 可用。
-临时绕开（不想等重部署）：去管理面把源站 `engine` 从 `socket` 改成 `fetch` 也能用，但裸 IP / 非标端口 / 自定义 Host 回源场景会受限，建议直接升级代码。
+**Q：部署平台识别还区分 Cloudflare Workers 和 Pages 吗？TCP Socket 还能用来自定义回源 Host 吗？**
+**不区分，也不需要。** 2026-08 起本项目做了认知修订（见 [07 EO 回源 Host](./07-eo-origin-host.md) §五）：
+- Cloudflare Workers 与 Pages Functions 同 `workerd` 运行时，`fetch` 行为完全一致，**不再区分二者**，运行平台统一标识为 `cf`（由 `CLOUD_PLATFORM=cf` 显式声明，不再靠运行时指纹猜测）。
+- **`fetch` 原生支持自定义 Host 头**（CF/EO/ESA 三平台均可），自定义回源 Host **不需要** SOCKS/TCP Socket。源站 `engine` 配置里的 `socket` 已弃用：裸 IP + HTTPS + 自定义 SNI 这一唯一需要底层 socket 的场景，由 `fetchEngine` 在 CF 上**内部自动**走 `cloudflare:sockets` 兜底，无需用户选择。
+- 因此「点 Workers 按钮却显示 pages、Socket 不可用」这类旧问题已不存在：平台识别改为强制读取 `CLOUD_PLATFORM`，且区分 workers/pages 对「自定义 Host」这个需求已无意义。
+若你仍看到旧的 `engine:'socket'` 配置，请改为默认 `fetch`（或省略 engine），否则配置校验会报错提示迁移。
 
 **Q：CF Pages 部署时「输出目录」填什么？**
 填 `.`（仓库根）。**不要填 `dist/public`**：该目录只有管理面的 HTML/JS/CSS，不含根目录的 `_worker.js`，填了会得到一个「管理面能打开、但数据面代理和 `/{ADMIN_PATH}/api/*` 全部 404」的站点（首次部署 KV 空时管理面路径用默认段 `__panel`）。
@@ -99,11 +100,12 @@ npm run dev -- --port 8080
 那静态资源还能省额度吗？能，且无需改输出目录。填 `.` 时 Pages 会把仓库根作为静态资源根一并上传（含 `dist/public/`），同时识别 `_worker.js` + `edge-functions/[[default]].js` 承载动态请求。管理面静态资源由 `_worker.js` 内的 `tryServePanelStatic` 以 `public, max-age=86400, immutable` 下发，**配合下方「开启 Fetch handler 缓存」开关后由边缘缓存直接返回，命中后不再进 Function**。省额度靠的是「长缓存响应头 + Pages Functions Cache 开关」，不是靠把输出目录改成 `dist/public`。
 
 **Q：EdgeOne 上缓存是怎么工作的 / 统计没数据？**
-EO 没有 `caches.default` API，但**边缘缓存能力真实存在且已启用**（`hasEdgeCache=true`）——只是走两条 EO 专属路径而非 CF 的 Cache API：
-- **路径 B（响应头委托）**：网关在响应上下发 `CDN-Cache-Control`，**由 EO 边缘按响应头缓存**（TTL 由策略 `edgeTtl` 决定）。这是所有 EO 请求都享受的缓存。
-- **路径 A（同站 fetch 委托节点缓存）**：对「无自定义回源 Host 的可缓存请求」，边缘函数内 `fetch(同站加速域名)`（HOST 与 host 头一致）会走 EO 节点缓存——**命中后零函数调用**，真正省额度；未命中则由 EO 按平台「源站组 + 回源 Host 重写」回源（详见 `docs/07-eo-origin-host.md`，需预先在 EO 控制台配好源站组）。有自定义回源 Host 的请求因无法用同站 fetch 表达，仍走项目多源站逻辑回源 + 路径 B 响应头缓存。
+EO **原生支持 `caches.default` API**（基于 Web Cache API，接口与 CF 一致，`hasCacheApi=true`），差异仅「缓存仅当前边缘节点本地有效、不跨节点复制」（`cacheIsNodeLocal=true`）。此外 EO 还有两条互补路径并存：
+- **路径 B（`caches.default` 写入/读取）**：与 CF 同构，走标准 Cache API。
+- **路径 A（同站 fetch 委托节点缓存）**：对「无自定义回源 Host 的可缓存请求」，边缘函数内 `fetch(同站加速域名)`（HOST 与 host 头一致）会走 EO 节点缓存——**命中后零函数调用**，真正省额度；未命中则由 EO 按平台「源站组 + 回源 Host 重写」回源（详见 `docs/07-eo-origin-host.md`，需预先在 EO 控制台配好源站组）。有自定义回源 Host 的请求因无法用同站 fetch 表达，仍走项目多源站逻辑回源 + 响应头委托缓存。
+- 响应头委托（`CDN-Cache-Control`）仍对所有 EO 请求生效，作兜底。
 
-区别：EO 下无法像 CF 那样「主动按键清除」（`cacheGen` 整站清除只作用于 `caches.default`），EO 缓存只能等 TTL 自然过期或用 `Cache-Tag` + 平台 purge。统计方面：EO 无 D1，统计回退 KV。确认 `CLOUD_PLATFORM=edgeone` 已设，管理面「系统信息」页 `hasEdgeCache` 应为 true、`hasCacheApi`（caches API）应为 false、`eoEdgeCache` 应为 true、`hasD1` 应为 false。
+统计方面：EO 无 D1，统计回退 KV。确认 `CLOUD_PLATFORM=eo` 已设，管理面「系统信息」页 `hasEdgeCache` 应为 true、`hasCacheApi` 应为 true、`cacheIsNodeLocal` 应为 true、`eoEdgeCache` 应为 true、`hasD1` 应为 false。
 
 **Q：响应头出现 `Server: EdgeGateway` / `Via: 1.1 EdgeGateway`，是我配错了吗？**
 不是，这是本项目的**品牌响应头**。本项目是独立 CDN 厂商，不会冒充上游平台。若想隐藏网关特征，可在「系统 → 全局配置」开启 `disguise`（把 Server 伪装成 nginx）。回传给源站的客户端 IP 头默认是 `X-EdgeGateway-Client-IP`（可在规则动作里改名字或关闭）。

@@ -1,55 +1,60 @@
 /**
- * socket 回源引擎（基于 cloudflare:sockets）
+ * socket 回源（基于 cloudflare:sockets）—— CF 专属内部兜底
  * ----------------------------------------------------------------------------
- * 用途：回源到「裸 IP + 非标端口 + 自定义 Host 头」的场景。
+ * 用途：仅用于 CF 上「裸 IP + HTTPS + 自定义 SNI」这一个 fetch 无法覆盖的场景。
  *
  * 为什么需要它？
- *   标准 fetch() 会强制把 Host 头设成 URL 的 hostname，无法覆盖。
- *   当源站是一台裸 IP 的机器，且需要靠 Host 头做虚拟主机路由时，
- *   fetch 就无能为力了，只能自己开 TCP 手写 HTTP/1.1。
+ *   CF 的 fetch() 会用 URL 中的主机名做 SNI 与 TLS 证书校验，而不是你设置的 Host 头。
+ *   当 originUrl 是 https://<裸IP> 且 Host 头需设成真实域名时，SNI 取的是裸 IP、
+ *   源站证书通常只签给域名 → TLS 握手失败。此时只能自己开 TCP、自行发送带正确
+ *   SNI/Host 的 HTTP/1.1 请求。
+ *
+ *   注意：自定义 Host 头本身【不需要】socket —— fetch 在 CF/EO/ESA 上都能通过
+ *   init.headers 设置 Host（见 fetchEngine.js 注释）。socket 的唯一不可替代价值是
+ *   在裸 IP + HTTPS 时把 SNI 设成域名而非 URL 里的 IP。
  *
  * 平台兼容性：
- *   cloudflare:sockets 只在 CF Workers 上存在。EdgeOne / Node 打包时，
+ *   cloudflare:sockets 只在 CF 上存在。EdgeOne / ESA / Node 打包时，
  *   静态的 import 语句会让构建器解析失败。因此这里用
  *       await import(`cloudflare${':'}sockets`)
  *   模板字符串拼接可以骗过打包器的静态分析，让它无法在构建期解析这个模块名，
- *   从而把解析推迟到运行时。非 CF 平台上这行会抛错，由上层降级到 fetchEngine。
+ *   从而把解析推迟到运行时。非 CF 平台上这行会抛错，由上层降级到 fetch。
+ *
+ * 该模块不再是可选 engine：fetchEngine 在命中「CF + HTTPS + 裸 IP」时自动调用
+ * rawTcpFetch()，用户无需、也不应在 origin/rule 里指定 engine:'socket'。
  */
 
 /** 读取响应头阶段的最大字节数，防止畸形响应把内存吃满 */
 const MAX_HEADER_BYTES = 64 * 1024;
 
 /**
- * 通过原始 TCP 套接字向源站发起 HTTP/1.1 请求。
+ * 通过原始 TCP 套接字向源站发起 HTTP/1.1 请求（CF 专属 SNI 兜底）。
  *
- * @param {import('../../contracts.js').Ctx} ctx 请求上下文
- * @param {Object} origin 源站配置
- * @param {URL|string} originUrl 回源 URL
- * @param {Headers} headers 回源请求头
- * @param {number} [timeoutMs] 超时毫秒数，默认 10000
+ * @param {URL|string} originUrl 回源 URL（其 hostname 为裸 IP）
+ * @param {Headers} headers 已构造好的回源请求头（已含自定义 Host 头）
+ * @param {number} timeoutMs 超时毫秒数
+ * @param {{followRedirect?:boolean, bodyBuf?:ArrayBuffer|null}} [opts] 附加选项
+ * @param {import('../../contracts.js').Ctx} [ctx] 请求上下文（用于 body 透传与方法判断）
  * @returns {Promise<Response>} 源站响应
- * @throws {Error} 平台不支持或连接失败时抛出，由上层降级
+ * @throws {Error} 平台不支持或连接失败时抛出
  */
-export async function socketFetch(ctx, origin, originUrl, headers, timeoutMs) {
-  if (!ctx.caps?.hasSocket) {
-    throw new Error('socket engine not supported on this platform');
-  }
-
+export async function rawTcpFetch(originUrl, headers, timeoutMs, opts, ctx) {
   const connect = await loadConnect();
-  const url = new URL(String(originUrl));
+  const url = typeof originUrl === 'string' ? new URL(originUrl) : originUrl;
   const timeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : 10000;
 
-  const port = Number(origin.port) || (url.protocol === 'https:' ? 443 : 80);
-  const hostname = origin.addr || url.hostname;
+  const port = Number(url.port) || (url.protocol === 'https:' ? 443 : 80);
+  const hostname = url.hostname; // 裸 IP
 
-  // TLS：https 需要 secureTransport:'on'，SNI 可单独指定
-  // （裸 IP 回源时 SNI 往往要设成真实域名，否则源站证书校验失败）
-  const secure = (origin.scheme || url.protocol.replace(':', '')) === 'https';
-  const options = secure
-    ? { secureTransport: 'on', allowHalfOpen: false }
-    : { allowHalfOpen: false };
-  if (secure && origin.sni) {
-    options.servername = origin.sni;
+  // TLS：SNI 必须设成 Host 头里的域名（而非 URL 里的裸 IP），否则证书校验失败。
+  const secure = url.protocol === 'https:';
+  const options = secure ? { secureTransport: 'on', allowHalfOpen: false } : { allowHalfOpen: false };
+  if (secure) {
+    const hostFromHeader = headers.get('Host');
+    // SNI 取 Host 头；若 Host 头是裸 IP 或缺失，说明没有自定义域名需求，回退用 URL hostname
+    if (hostFromHeader && !/^\d{1,3}(\.\d{1,3}){3}$/.test(hostFromHeader.split(':')[0])) {
+      options.servername = hostFromHeader.split(':')[0];
+    }
   }
 
   const socket = connect({ hostname, port }, options);
@@ -57,13 +62,17 @@ export async function socketFetch(ctx, origin, originUrl, headers, timeoutMs) {
 
   const writer = socket.writable.getWriter();
   try {
-    const requestBytes = buildRequestBytes(ctx, origin, url, headers);
+    const method = (ctx?.request?.method || 'GET').toUpperCase();
+    const requestBytes = buildRequestBytes(url, headers, method);
     await writer.write(requestBytes);
 
     // 带 body 的方法：把客户端 body 透传过去
-    const method = (ctx.request.method || 'GET').toUpperCase();
-    if (method !== 'GET' && method !== 'HEAD' && ctx.request.body) {
-      await pipeBody(ctx.request.body, writer);
+    if (method !== 'GET' && method !== 'HEAD') {
+      if (opts?.bodyBuf != null) {
+        await writer.write(new Uint8Array(opts.bodyBuf));
+      } else if (ctx?.request?.body) {
+        await pipeBody(ctx.request.body, writer);
+      }
     }
     writer.releaseLock();
 
@@ -107,32 +116,24 @@ async function loadConnect() {
 /**
  * 构造 HTTP/1.1 请求报文字节。
  *
- * 这里是 socket 引擎相对 fetch 的核心价值所在：Host 头完全由我们决定。
+ * Host 头完全取自传入的 headers（上层 fetchEngine 已按 hostHeader 配置设好），
+ * 这是相对 fetch 让 SNI/Host 可控的核心价值所在。
  *
- * hostHeader.mode 语义：
- *   inherit / origin → 用源站地址
- *   client           → 用客户端访问的域名
- *   custom           → 用 hostHeader.custom 指定的值
- *
- * @param {import('../../contracts.js').Ctx} ctx 请求上下文
- * @param {Object} origin 源站配置
  * @param {URL} url 回源 URL
  * @param {Headers} headers 回源请求头
+ * @param {string} method 请求方法
  * @returns {Uint8Array} 请求报文
  */
-function buildRequestBytes(ctx, origin, url, headers) {
-  const method = (ctx.request.method || 'GET').toUpperCase();
+function buildRequestBytes(url, headers, method) {
   // 请求行里用 origin-form：路径 + 查询串
   const target = `${url.pathname}${url.search}`;
 
-  const hostValue = resolveHostHeader(ctx, origin, url);
-
-  const lines = [`${method} ${target} HTTP/1.1`, `Host: ${hostValue}`];
+  const lines = [`${method} ${target} HTTP/1.1`];
 
   for (const [k, v] of headers) {
     const lower = k.toLowerCase();
-    // Host 已单独处理；连接管理类头由我们自己控制
-    if (lower === 'host' || lower === 'connection' || lower === 'transfer-encoding') continue;
+    // Host 已在 headers 中由上层设定；连接管理类头由我们自己控制
+    if (lower === 'connection' || lower === 'transfer-encoding') continue;
     lines.push(`${k}: ${v}`);
   }
 
@@ -141,28 +142,6 @@ function buildRequestBytes(ctx, origin, url, headers) {
   lines.push('', '');
 
   return new TextEncoder().encode(lines.join('\r\n'));
-}
-
-/**
- * 解析 hostHeader 配置，得出实际要发送的 Host 头。
- *
- * @param {import('../../contracts.js').Ctx} ctx 请求上下文
- * @param {Object} origin 源站配置
- * @param {URL} url 回源 URL
- * @returns {string} Host 头的值
- */
-function resolveHostHeader(ctx, origin, url) {
-  const mode = origin?.hostHeader?.mode || 'origin';
-  switch (mode) {
-    case 'client':
-      return ctx.url.host;
-    case 'custom':
-      return origin.hostHeader.custom || url.host;
-    case 'inherit':
-    case 'origin':
-    default:
-      return url.host;
-  }
 }
 
 /**

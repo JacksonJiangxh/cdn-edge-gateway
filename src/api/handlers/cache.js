@@ -1,11 +1,16 @@
 /**
  * 缓存管理 API handlers
  *
- * 重要说明：Cloudflare 的 caches.default 只提供按精确 URL 删除的能力，
+ * 三平台（CF / EO / ESA）的 Cache API 均只提供按精确 URL 删除的能力，
  * 没有「按前缀批量清除」的原生 API。因此：
  *   - 按 URL 清除：真实生效
  *   - 按前缀/整站清除：通过「缓存代次(generation)」间接实现 —— 递增站点的
  *     cacheGen 值，使新请求生成的缓存键全部变化，旧缓存自然失效并最终被 LRU 淘汰。
+ *
+ * 平台差异（详见 docs/11-architecture.md §4.1）：
+ *   - EO 的 caches.default 仅节点本地化、不跨节点复制，delete 仅删当前节点实例；
+ *   - ESA 的 cache.delete 同样仅作用当前节点，且存入条目仍须 TTL 到期才真正失效；
+ *     此外 ESA 的 Cache 操作与 fetch 共享 32 子请求硬上限。
  */
 
 import { ok, fail } from '../../utils/response.js';
@@ -28,6 +33,12 @@ export async function purge(ctx) {
       message:
         '当前平台不支持边缘缓存 API，无需清除。缓存由平台 CDN 依据 Cache-Control 管理。',
     });
+  }
+  // 三平台（CF/EO/ESA）均已原生支持 Cache API，purge 真实生效；
+  // ESA 受「32 子请求共享预算 + 节点本地化」约束，delete 仅清当前节点。
+  if (ctx.caps.cacheSingleInstance) {
+    // ESA：单实例 cache.delete 仅作用于当前节点，无法跨节点主动刷新。
+    // 大规模清除请结合「缓存代次」使旧键整体失效。
   }
 
   const results = { byUrl: 0, byGeneration: null, failed: [] };

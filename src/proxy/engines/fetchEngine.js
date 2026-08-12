@@ -1,12 +1,34 @@
 /**
- * fetch 回源引擎
+ * fetch 回源引擎（默认引擎）
  * ----------------------------------------------------------------------------
- * 标准回源方式，适用于「源站是域名」的绝大多数场景。
+ * 标准回源方式，适用于「源站是域名」或「源站是裸 IP（HTTP / CF 上 HTTPS）」的场景。
  *
- * 关键行为：fetch(originUrl) 发出的请求，Host 头由 originUrl.hostname 决定，
- * 且运行时会忽略手动设置的 Host。这正是我们要的效果 —— 源站只看到自己的域名，
- * 完全感知不到用户访问的加速域名。
+ * 认知基线（2026-08 澄清，见 docs/07-eo-origin-host.md §五）：
+ *   - fetch 可自定义 Host 头：CF / EO / ESA 三平台均支持。
+ *     通过在 init.headers 中设置 Host 头即可让源站看到指定域名，例如：
+ *       fetch(originUrl, { headers: { Host: 'bbb.example.com' } })
+ *     EO / ESA 仅改 HTTP 头、连接仍按 URL 域名 DNS；CF 在 HTTP 下连裸 IP 直接可用。
+ *   - 不再需要 SOCKS 才能自定义 Host：socket 不再是可选 engine，仅作为 CF 上
+ *     「裸 IP + HTTPS + 自定义 SNI」的内部自动兜底（见下方 SNI 分支与 socketEngine.js）。
+ *
+ * 关于 HTTPS + 裸 IP 的 SNI 限制（仅 CF 相关）：
+ *   CF 的 fetch() 会用 URL 中的主机名做 SNI 与 TLS 证书校验，而不是你设置的 Host 头。
+ *   因此当 originUrl 是 https://<裸IP> 且需把 Host 头设成真实域名时，SNI 会是裸 IP、
+ *   源站证书通常只签给域名 → TLS 握手失败。此时在 CF 上自动改走 cloudflare:sockets
+ *   自建 TCP 并自行发送带正确 SNI/Host 的 HTTP 请求（socketEngine.rawTcpFetch）。
  */
+
+/**
+ * 判断给定 URL 是否为裸 IP（而非域名）。用于决定是否需要 SNI 兜底。
+ * @param {URL|string} url
+ * @returns {boolean}
+ */
+function isBareIp(url) {
+  const host = (typeof url === 'string' ? new URL(url).hostname : url.hostname) || '';
+  // IPv6 包裹在 [] 中，去掉括号再判
+  const bare = host.startsWith('[') ? host.slice(1, -1) : host;
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(bare) || bare.includes(':');
+}
 
 /**
  * 向源站发起一次请求，带超时控制。
@@ -16,7 +38,7 @@
  * @param {URL|string} originUrl 回源 URL
  * @param {Headers} headers 已构造好的回源请求头
  * @param {number} [timeoutMs] 超时毫秒数，默认 10000
- * @param {{followRedirect?:boolean}} [opts] 附加选项
+ * @param {{followRedirect?:boolean, bodyBuf?:ArrayBuffer|null}} [opts] 附加选项
  * @returns {Promise<Response>} 源站响应
  * @throws {Error} 网络错误或超时时抛出，由上层 failover 处理换源
  */
@@ -27,6 +49,20 @@ export async function fetchOrigin(ctx, origin, originUrl, headers, timeoutMs, op
   // 上层 failover 捕获异常后换下一个源站
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
+
+  // CF + HTTPS + 裸 IP：fetch 的 SNI 会取 URL 里的 IP 导致证书校验失败，
+  // 自动改走 cloudflare:sockets 自建 TCP（自行发送正确的 SNI/Host）。
+  if (
+    ctx.caps &&
+    ctx.caps.platform === 'cf' &&
+    ctx.caps.hasSocket &&
+    String(originUrl).startsWith('https://') &&
+    isBareIp(originUrl)
+  ) {
+    clearTimeout(timer);
+    const { rawTcpFetch } = await import('./socketEngine.js');
+    return rawTcpFetch(originUrl, headers, timeout, opts, ctx);
+  }
 
   const method = (ctx.request.method || 'GET').toUpperCase();
 

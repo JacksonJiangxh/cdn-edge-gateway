@@ -16,12 +16,17 @@
 
 /**
  * @typedef {Object} Caps                 平台能力描述
- * @property {'workers'|'pages'|'edgeone'|'aliyun-esa'|'unknown'} platform  运行平台
- * @property {boolean} hasEdgeCache       是否支持「边缘缓存」（CF=caches.default API；EO/ESA=响应头委托边缘节点缓存，二者均真实生效）
- * @property {boolean} hasCacheApi        是否支持 caches.default API（仅 CF；EO/ESA 为 false，走响应头委托）
+ * @property {'cf'|'eo'|'esa'|'unknown'} platform  部署厂商（由 CLOUD_PLATFORM 环境变量显式声明：cf / eo / esa）
+ * @property {boolean} hasEdgeCache       是否支持「边缘缓存」（三平台均真实生效：CF/EO=caches.default API；ESA=全局 cache 单实例；响应头委托为任意平台的兜底通道）
+ * @property {boolean} hasCacheApi        是否支持 Cache API 读写（三平台均支持：cf=caches.default；eo=caches.default 节点本地化；esa=全局 cache 单实例）
  * @property {boolean} eoEdgeCache        是否支持 EO 同站 fetch 委托节点缓存（运行在 EO 边缘函数且站点已接入加速域名；命中后零函数调用）
- * @property {number}  maxSubRequests     每请求子请求（fetch）预算上限（ESA=4 硬限制；CF/EO=1000 宽松）
- * @property {boolean} hasSocket          是否支持 cloudflare:sockets
+ * @property {boolean} cacheIsNodeLocal    缓存仅当前边缘节点有效、不跨节点复制（eo=true；cf/esa=false）
+ * @property {boolean} cacheSingleInstance 平台仅提供单实例全局 cache、无 caches.default/open 命名空间（esa=true；cf/eo=false）
+ * @property {number}  cacheSubreqLimit    Cache 操作与 fetch 共享的子请求预算（esa=32 硬限；其余宽松）
+ * @property {boolean} cacheKeyHttpOnly    Cache API 的 put key 必须为 http(s) 协议 URL（esa 引擎不支持 https key，写入时强制降为 http）
+ * @property {number}  maxSubRequests     每请求子请求（fetch）预算上限（esa=32 硬限且与 Cache 共享；cf/eo=1000 宽松）
+ * @property {boolean} hasRawIpFetch      是否支持「fetch 直连裸 IP / 自定义端口 / 自定义 SNI」（仅 CF 支持；EO/ESA 的 fetch 仅支持域名，裸 IP 须走平台源站组兜底）
+ * @property {boolean} hasSocket          是否支持 cloudflare:sockets（仅 CF，用于裸 IP+HTTPS+自定义 SNI 的内部自动兜底）
  * @property {boolean} hasD1              是否绑定了 D1
  * @property {boolean} hasKV              是否绑定了 KV
  * @property {boolean} hasR2              是否绑定了 R2（仅 CF；用于 engine='r2' 回源到 R2 桶）
@@ -182,7 +187,10 @@
  * @property {boolean}  [followRedirect]  回源跟随 3xx 重定向
  * @property {number}   [originTimeoutMs] 覆盖回源超时
  * —— 以下三项为「回源连接参数」（对应 ⑨ Origin Rules）：规则级覆盖源站物理属性，未设则回退源站 ——
- * @property {'fetch'|'socket'|'r2'} [engine]  回源引擎（规则级优先；与源站 engine 同取值，未设回退源站 engine）
+ * @property {'fetch'|'r2'|'api'} [engine]  回源引擎（规则级优先；与源站 engine 同取值，未设回退源站 engine）。
+ *                                          socket 不再是可选 engine——CF 上「裸 IP + HTTPS + 自定义 SNI」
+ *                                          由 fetch 引擎内部自动走 cloudflare:sockets 兜底，无需用户指定。
+ *                                          未来可扩展 'api'（如 cnb / github api 请求引擎）。
  * @property {'http'|'https'}    [scheme]  回源协议（规则级优先；未设回退源站 scheme，默认 https）
  * @property {number}   [port]             回源端口（规则级优先；未设回退源站 port，默认按 scheme 取 443/80）
  *
@@ -293,7 +301,7 @@
  * @property {boolean} enabled
  * @property {number}  order              chain 策略排序，升序
  * @property {number}  weight             weighted 策略权重
- * @property {'fetch'|'socket'|'r2'} engine  socket 仅 CF Workers 可用；r2 仅 CF 可用，回源到 R2 桶绑定（不走公网）
+ * @property {'fetch'|'r2'|'api'} engine  fetch=默认公网回源（CF/EO/ESA 均支持，可自定义 Host 头）；r2 仅 CF 可用，回源到 R2 桶绑定（不走公网）；api=未来扩展（如 cnb/github api 引擎）。socket 不再是可选值。
  * @property {'http'|'https'} scheme
  * @property {string}  addr               域名或 IP（engine='r2' 时可留空）
  * @property {number}  port

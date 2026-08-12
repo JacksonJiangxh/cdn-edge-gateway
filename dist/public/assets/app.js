@@ -2243,8 +2243,8 @@ if (typeof window !== 'undefined') window.API = API;
       fScheme = select('f-scheme', [], 'https', [{ value: 'https', label: 'https' }, { value: 'http', label: 'http' }]);
       fScheme.className = 'input';
       fEngine = select('f-engine', [], 'fetch', [
-        { value: 'fetch', label: 'fetch（标准回源）' },
-        { value: 'socket', label: 'socket（裸 TCP，仅 Workers）', disabled: !(APP_DATA.info && APP_DATA.info.caps && APP_DATA.info.caps.hasSocket) },
+        { value: 'fetch', label: 'fetch（标准回源，支持自定义 Host）' },
+        { value: 'socket', label: 'socket（已弃用：自定义 Host 现由 fetch 支持，勿用）', disabled: true },
         { value: 'r2', label: 'r2（回源到 R2 桶，仅 CF）', disabled: !(APP_DATA.info && APP_DATA.info.caps && APP_DATA.info.caps.hasR2) },
       ]);
       fEngine.className = 'input';
@@ -2259,7 +2259,7 @@ if (typeof window !== 'undefined') window.API = API;
       const addrField = field('源站地址（域名 / IP）', fAddr, '你的真实服务器地址。r2 引擎不需要此字段。');
       const portField = field('端口', fPort, 'https 默认 443，http 默认 80。');
       const schemeField = field('回源协议', fScheme, '选择 https 则回源时走加密通道。');
-      const engineField = field('引擎', fEngine, 'fetch=标准回源（所有平台可用）；socket=裸 TCP（仅 Workers，可自定义 Host）；r2=回源 R2 桶（仅 CF）。');
+      const engineField = field('引擎', fEngine, 'fetch=标准回源（所有平台可用，支持自定义 Host 头）；socket=已弃用（自定义 Host 现由 fetch 原生支持）；r2=回源到 R2 桶（仅 CF）。');
       // R2 引擎必填的绑定名（与 wrangler.toml 的 [[r2_buckets]].binding 一致），仅在引擎选 r2 时显示
       fR2Binding = el('input', { class: 'input', id: 'f-r2-binding', value: '', placeholder: 'CDN_R2（必须与 wrangler.toml 的 R2 绑定名一致）' });
       const r2BindingField = field('R2 绑定名（r2Binding）', fR2Binding, 'wrangler.toml 里 [[r2_buckets]].binding 的值，如 CDN_R2。引擎选 r2 时必填，保存时自动创建「单一源站」。');
@@ -2433,8 +2433,8 @@ if (typeof window !== 'undefined') window.API = API;
     const addInlineOrigin = (o) => {
       o = o || { addr: '', port: 443, scheme: 'https', engine: 'fetch', weight: 1 };
       const engineSel = select('', [], o.engine || 'fetch', [
-        { value: 'fetch', label: 'fetch' },
-        { value: 'socket', label: 'socket（仅 Workers）', disabled: !(APP_DATA.info && APP_DATA.info.caps && APP_DATA.info.caps.hasSocket) },
+        { value: 'fetch', label: 'fetch（支持自定义 Host）' },
+        { value: 'socket', label: 'socket（已弃用）', disabled: true },
         { value: 'r2', label: 'r2（回源到 R2 桶，仅 CF）', disabled: !(APP_DATA.info && APP_DATA.info.caps && APP_DATA.info.caps.hasR2) },
       ]);
       engineSel.className = 'input o-engine';
@@ -2502,7 +2502,7 @@ if (typeof window !== 'undefined') window.API = API;
         field('路径前缀', el('input', { class: 'input o-pathprefix', value: o.pathPrefix || '', placeholder: '如 /api/v1（留空=用请求原路径）' }), '追加在请求路径前面的固定前缀，每个源站可不同。例如三台同服务源站分别填 /node1、/node2、/node3，请求 /img/x.png 会分别回源到 /node1/img/x.png 等。留空则不加。'),
         hostEnLabel,
         hostField,
-        field('引擎', engineSel, '回源方式：① fetch=标准回源，Host 头由「回源域名/地址」决定（源站只看到自己的域名，最通用，所有平台可用）；② socket=仅 CF Workers 支持，基于裸 TCP 手写 HTTP，可自定义 Host / 回源裸 IP / 非标端口（用于源站要靠 Host 做虚拟主机路由、或只暴露 IP 的场景）；③ r2=回源到 R2 桶（仅 CF，需先在 wrangler.toml 绑定）。'),
+        field('引擎', engineSel, '回源方式：① fetch=标准回源，支持自定义 Host 头（CF/EO/ESA 均可用，Host 由「回源域名/地址」或规则级 hostHeader 决定）；② socket=已弃用（自定义 Host 现由 fetch 原生支持，CF 上裸 IP+HTTPS+自定义 SNI 由 fetchEngine 内部自动走 socket 兜底）；③ r2=回源到 R2 桶（仅 CF，需先在 wrangler.toml 绑定）。'),
         r2Fields,
         weightField,
         // 单一源站恒为 1 行，无「移除」按钮：清空地址即视为未填写
@@ -3028,7 +3028,8 @@ if (typeof window !== 'undefined') window.API = API;
     // 类型一经创建不可随意切换：single→pool 允许（加源站即升级），pool→single 会丢数据故禁止
     const kind = forceKind || poolKind(pool);
     const isSingle = kind === 'single';
-    const socketDisabled = !(APP_DATA.info && APP_DATA.info.caps && APP_DATA.info.caps.hasSocket);
+    // socket 引擎已弃用，恒为 disabled；hasRawIpFetch 仅作语义占位（CF 上裸 IP+SNI 由 fetchEngine 自动兜底）
+    const socketDisabled = !(APP_DATA.info && APP_DATA.info.caps && APP_DATA.info.caps.hasRawIpFetch);
 
     const originList = el('div', { id: 'origin-list' });
     // 调度策略下拉需在 addOrigin 之前创建：源站行里的「权重」字段要按策略显隐
@@ -3051,8 +3052,8 @@ if (typeof window !== 'undefined') window.API = API;
       // 源站组只负责「地址 + 负载均衡」，回源 Host / 路径 / 请求头等一律在规则引擎里绑定
       o = o || { id: '', enabled: true, order: 0, weight: 1, engine: 'fetch', scheme: 'https', addr: '', port: 443 };
       const engineSel = select('', [], '', [
-        { value: 'fetch', label: 'fetch' },
-        { value: 'socket', label: 'socket（仅 Workers）', disabled: socketDisabled },
+        { value: 'fetch', label: 'fetch（支持自定义 Host）' },
+        { value: 'socket', label: 'socket（已弃用）', disabled: true },
         { value: 'r2', label: 'r2（回源到 R2 桶，仅 CF）', disabled: !(APP_DATA.info && APP_DATA.info.caps && APP_DATA.info.caps.hasR2) },
       ]);
       engineSel.value = o.engine || 'fetch';
@@ -3113,7 +3114,7 @@ if (typeof window !== 'undefined') window.API = API;
         field('路径前缀', el('input', { class: 'input o-pathprefix', value: o.pathPrefix || '', placeholder: '如 /api/v1（留空=用请求原路径）' }), '追加在请求路径前面的固定前缀，每个源站可不同。例如三台同服务源站分别填 /node1、/node2、/node3，请求 /img/x.png 会分别回源到 /node1/img/x.png 等。留空则不加。'),
         hostField,
         hostNote,
-        field('引擎', engineSel, '回源方式：① fetch=标准回源，Host 头由「回源域名/地址」决定（源站只看到自己的域名，最通用，所有平台可用）；② socket=仅 CF Workers 支持，基于裸 TCP 手写 HTTP，可自定义 Host / 回源裸 IP / 非标端口（用于源站要靠 Host 做虚拟主机路由、或只暴露 IP 的场景）；③ r2=回源到 R2 桶（仅 CF，需先在 wrangler.toml 绑定）。'),
+        field('引擎', engineSel, '回源方式：① fetch=标准回源，支持自定义 Host 头（CF/EO/ESA 均可用，Host 由「回源域名/地址」或规则级 hostHeader 决定）；② socket=已弃用（自定义 Host 现由 fetch 原生支持，CF 上裸 IP+HTTPS+自定义 SNI 由 fetchEngine 内部自动走 socket 兜底）；③ r2=回源到 R2 桶（仅 CF，需先在 wrangler.toml 绑定）。'),
         r2Fields,
         weightField,
         el('button', { class: 'btn btn-sm btn-danger', text: '移除源站', onclick: () => row.remove() }),

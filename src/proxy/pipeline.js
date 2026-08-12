@@ -253,12 +253,13 @@ async function runPipeline(ctx) {
     ctx.debug.cache = 'MISS';
   } else {
     // 区分「策略关了/请求不可缓存」与「平台不支持边缘缓存」
-    // 区分三种情况：
-    //  - 平台支持 caches.default（CF）：缓存由 caches API 托管
-    //  - 平台不支持 caches.default（EO 等）：响应头仍下发 CDN-Cache-Control，
-    //    由底层边缘按响应头缓存 —— 用 EDGE_HEADER 标明「靠响应头委托边缘缓存」
-    //  - 策略关闭或请求不可缓存：BYPASS
-    ctx.debug.cache = policy.enabled && !ctx.caps?.hasEdgeCache ? 'EDGE_HEADER' : 'BYPASS';
+    // 三平台均支持 Cache API（详见 docs/11-architecture.md §4.1）：
+    //  - CF / EO：caches.default 托管
+    //  - ESA：全局 cache 单实例托管
+    //  当任意平台均不提供 Cache API 句柄时，响应头仍下发 CDN-Cache-Control，
+    //  由底层边缘按响应头缓存 —— 用 EDGE_HEADER 标明「靠响应头委托边缘缓存」
+    //  策略关闭或请求不可缓存：BYPASS
+    ctx.debug.cache = (!ctx.caps?.hasEdgeCache && policy.enabled) ? 'EDGE_HEADER' : 'BYPASS';
   }
 
   // ---- 7. 回源（带故障转移 / 或委托 EO 边缘节点缓存）----

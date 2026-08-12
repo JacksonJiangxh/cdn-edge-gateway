@@ -104,18 +104,15 @@ export function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) {
   }
 
   // ---- 关于 Host 头 ----
-  // 这里【故意】不设置 Host。Cloudflare Workers 的 fetch() 会忽略（静默丢弃）
-  // 手动设置的 Host 头，实际发出的 Host 永远等于回源 URL 的 hostname。
-  // 这恰好是我们要的效果：源站只看到 storage.example.net，完全不知道加速域名的存在。
-  // 自定义回源 Host 的注入分两条路径（跨平台统一，见 balancer/failover.js dispatch）：
-  //   1) socket 路径（仅 CF Workers 的 cloudflare:sockets）：由 socketEngine 手写
-  //      HTTP/1.1 请求行与 Host 头，完全可控，支持「裸 IP + 自定义 Host + 自定义端口/SNI」。
-  //   2) fetch 路径：在 dispatch() 中，当解析出的自定义 Host 与 originUrl.hostname
-  //      不一致时显式 out.set('Host', ...)。对允许手动 Host 的平台（如 EdgeOne 边缘
-  //      函数 fetch 向外部源站）生效，实现「域名源站 + 自定义 Host」；强制跟随 URL
-  //      hostname 的平台（CF Workers fetch / CF Pages）自动无效但无害。
-  // 切勿在这里无条件 out.set('Host', ...)，那样在 CF 上无效且误导维护者；注入逻辑
-  // 统一收敛到 dispatch()，按平台能力决定是否生效。
+  // 这里【故意】不设置 Host。CF/EO/ESA 的 fetch 均允许通过 init.headers 设置自定义
+  // Host 头（见 docs/07-eo-origin-host.md §五），但本函数专注于「构造通用回源头」，
+  // 把自定义 Host 的注入统一收敛到 dispatch()（按规则/源站级 hostHeader 解析后写入），
+  // 避免重复逻辑与平台差异散落。
+  // 自定义回源 Host 的注入（跨平台统一，见 balancer/failover.js dispatch）：
+  //   当解析出的自定义 Host 与 originUrl.hostname 不一致时，在 dispatch() 中
+  //   headers.set('Host', ...) 即可，三平台 fetch 均生效，实现「域名/裸IP 源站 + 自定义 Host」。
+  //   CF 上「裸 IP + HTTPS + 自定义 SNI」由 fetchEngine 内部自动走 cloudflare:sockets 兜底，
+  //   该兜底同样使用 dispatch() 已设好的 Host 头作为 SNI/Host 来源。
 
   return out;
 }

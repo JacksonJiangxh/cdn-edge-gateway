@@ -173,7 +173,7 @@
          → __gen(代次) → new Request(keyUrl,{method:'GET'})
    ▼
 ⑦ 查边缘缓存 cacheMatch(ctx, cacheKey)
-   ├─ cacheKey空/平台无caches.default → DISABLED/MISS → 继续
+   ├─ cacheKey空/平台无Cache API句柄 → DISABLED/MISS → 继续
    └─ hit = cache.match(cacheKey)
          ├─ HIT → actualOrigin=命中记录originId对应源站
          │     mergedResp = actualOrigin.respHeaders < 规则级respHeaders
@@ -229,15 +229,16 @@
                │           4)规则reqHeaders 5)stripForbidden 6)clientIpHeader
                │
                ├─ ⑧.4 选择引擎并发起 dispatch(oX)
-               │     ├─ socket 引擎 (engine=socket 且 caps.hasSocket)：
-               │     │     ★ 仅 CF Workers 可用 (cloudflare:sockets connect())，支持
-               │     │       「裸 IP + 自定义 Host + 自定义端口/SNI」完整自定义回源。
-               │     └─ fetch 引擎 (其余平台 / engine=auto)：
+               │     ├─ r2 引擎 (engine=r2)：CF 上回源到 R2 桶绑定，不走公网。
+               │     ├─ api 引擎 (engine=api)：未来扩展，第三方 API 请求（cnb/github 等），未实现。
+               │     └─ fetch 引擎 (默认，三平台均支持)：
                │           当解析出的自定义 Host 与 originUrl.hostname 不一致时，
-               │           在请求头显式注入 Host（EdgeOne 边缘函数 fetch 向外部源站生效，
-               │           实现「域名源站 + 自定义 Host」；CF Workers/CF Pages 静默忽略但无害）。
-               │           裸 IP + 自定义 Host + SNI 的语义在 EO 上由平台级「源站组回源 Host
-               │           重写」兜底（见 configuration.md 回源 Host 章节）。
+               │           在请求头显式注入 Host（CF/EO/ESA 的 fetch 均支持自定义 Host 头，
+               │           实现「域名/裸IP 源站 + 自定义 Host」）。
+               │           CF 上「裸 IP + HTTPS + 自定义 SNI」由 fetchEngine 内部自动走
+               │           cloudflare:sockets 兜底（socket 不再是可选 engine）。
+               │           裸 IP + 自定义 Host + SNI 在 EO/ESA 上由平台级「源站组回源 Host
+               │           重写」兜底（见 07 文档）。
                │     recordStart(ctx, oX)
                │
                └─ ⑧.5 处理响应/异常

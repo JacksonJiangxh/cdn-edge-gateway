@@ -138,16 +138,23 @@
 
 ## 五、与本项目的对接关系
 
+> **认知修订（2026-08）**：早期文档曾断言「fetch 不能自定义回源 Host，必须靠 TCP SOCKS（仅 CF Workers 有、Pages 无），因此 EO 也不具备该能力」。经 CF 官方文档 + 实测 + 阿里云 ESA 官方 Fetch API 文档查证，**该结论已推翻**：
+> - `fetch` 原生支持自定义 Host 头：CF / EO / ESA 三平台均可（`init.headers` 设置 Host）。
+> - CF Workers 与 Pages Functions 同 `workerd` 运行时，`fetch` 行为完全一致，**不再区分二者**。
+> - SOCKS / `cloudflare:sockets` 不再是「自定义 Host」的必要手段，仅在 CF 上「裸 IP + HTTPS + 自定义 SNI」场景作为 `fetchEngine` 内部自动兜底。
+> - **必须设置环境变量 `CLOUD_PLATFORM=cf|eo|esa`** 声明部署厂商，程序不再靠运行时指纹猜测（见 `src/platform/caps.js`）。
+
 | 项目部署形态 | 自定义回源 Host 实现方式 |
 |---|---|
-| **CF Workers**（`wrangler deploy`，有 sockets） | 代码层 `socketEngine` 全功能（含裸 IP + 自定义 Host + SNI），无需平台配置 |
-| **CF Pages** | 仅「域名源站自动 Host」，无自定义 Host（已知限制） |
-| **EO Makers**（本文档） | 代码层 `fetch` 即可实现「域名源站 + 自定义 Host」（Host 头随请求带）；「裸 IP + 自定义 Host + SNI」无法用代码层 sockets 实现，由本文档的 **EO 源站组 + 回源 HOST 头 / 规则引擎 Host Header 重写** 兜底 |
+| **CF（`CLOUD_PLATFORM=cf`，含 Workers 与 Pages）** | 代码层 `fetch` 即可「域名/裸IP 源站 + 自定义 Host」；HTTPS + 裸 IP + 自定义 SNI 由 `fetchEngine` 内部自动走 `cloudflare:sockets` 兜底，无需平台配置 |
+| **EO Makers（`CLOUD_PLATFORM=eo`，本文档）** | 代码层 `fetch` 即可「域名源站 + 自定义 Host」（Host 头随请求带）；EO `fetch` 不支持裸 IP，故「裸 IP + 自定义 Host + SNI」由本文档的 **EO 源站组 + 回源 HOST 头 / 规则引擎 Host Header 重写** 兜底 |
+| **阿里云 ESA（`CLOUD_PLATFORM=esa`）** | 代码层 `fetch` 支持自定义 Host 头（仅改 HTTP 头，连接仍按 URL 域名 DNS）；ESA `fetch` 明确不支持 IP/自定义端口，裸 IP 场景须走平台侧源站组兜底 |
 
 **对接要点**：
 1. 在 EO 上按本文档配好源站组与回源 HOST 头（或规则引擎）。
 2. 本项目的 `src/config/*` 里源站配置仍填 **EO 源站组对应的加速域名 / EO 回源地址**；真正的「真实 Host」由 EO 平台注入，网关代码无需再手写 Host。
 3. 若同时开了网关自身的 `hostHeader=custom`，EO 平台层注入的 Host 优先级高于边缘函数 fetch 的 Host 头——以平台配置为准，二者保持一致即可。
+4. `engine` 配置：源站/规则级 `engine` 仅支持 `fetch`（默认）、`r2`（CF 直读 R2）、`api`（未来 cnb/github 扩展）。**`socket` 已弃用**，自定义 Host 由 fetch 原生支持，勿再配置。
 
 ---
 

@@ -209,15 +209,21 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
 /**
  * 根据 origin.engine 分发到对应的回源引擎。
  *
- * socket 引擎在不支持的平台会抛错，这里捕获后降级到 fetch，
- * 保证配置了 socket 的源站在 Pages / EdgeOne 上依然能工作。
+ * engine 取值（见 contracts.js）：
+ *   - 'fetch'（默认）：标准回源，CF/EO/ESA 均支持自定义 Host 头；
+ *                       CF 上「裸 IP + HTTPS + 自定义 SNI」由 fetchEngine 内部自动走 socket 兜底。
+ *   - 'r2'：R2 直读回源，仅 Cloudflare 平台的 R2 绑定可用，不走公网。
+ *   - 'api'：（未来扩展）第三方 API 请求引擎，如 cnb / github api，尚未实现。
+ *
+ * 'socket' 已不再是可选 engine：自定义 Host 不需要 socket，SNI 兜底由 fetchEngine 自动处理。
+ * 配置中若出现 engine:'socket' 会明确报错，提示迁移。
  *
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
  * @param {Object} origin 源站
  * @param {URL} originUrl 回源 URL
  * @param {Headers} headers 回源请求头
  * @param {number} timeoutMs 超时
- * @param {{followRedirect?:boolean}} [opts] 附加选项
+ * @param {{followRedirect?:boolean, hostHeader?:Object}} [opts] 附加选项
  * @returns {Promise<Response>} 源站响应
  */
 async function dispatch(ctx, origin, originUrl, headers, timeoutMs, opts) {
@@ -227,22 +233,24 @@ async function dispatch(ctx, origin, originUrl, headers, timeoutMs, opts) {
     return r2FetchOrigin(ctx, origin, originUrl, headers, timeoutMs, opts);
   }
 
-  if (origin.engine === 'socket' && ctx.caps?.hasSocket) {
-    try {
-      const { socketFetch } = await import('../proxy/engines/socketEngine.js');
-      return await socketFetch(ctx, origin, originUrl, headers, timeoutMs, opts);
-    } catch (err) {
-      // socket 不可用时降级为 fetch，并记录原因便于排查
-      if (!Array.isArray(ctx.debug.notes)) ctx.debug.notes = [];
-      ctx.debug.notes.push(`socket-fallback:${err?.message || err}`);
-    }
+  if (origin.engine === 'api') {
+    // 未来扩展：cnb / github api 请求引擎。尚未实现，先明确报错避免静默失败。
+    throw new Error("engine 'api' 尚未实现：第三方 API 请求引擎（cnb/github）待接入");
+  }
+
+  if (origin.engine === 'socket') {
+    // socket 已不再是可选 engine，自定义 Host 无需它，SNI 兜底由 fetchEngine 自动处理。
+    throw new Error(
+      "engine 'socket' 已弃用：自定义回源 Host 已由 fetch 原生支持；" +
+      "CF 上裸 IP + HTTPS + 自定义 SNI 由 fetchEngine 内部自动走 cloudflare:sockets 兜底，" +
+      "请移除 origin/rule 配置中的 engine:'socket'。"
+    );
   }
 
   // fetch 路径：注入自定义回源 Host（跨平台统一）。
-  // 平台允许手动 Host 时（如 EdgeOne 边缘函数 fetch 向外部源站）生效，实现
-  // 「域名源站 + 自定义 Host」语义；强制跟随 URL hostname 的平台（CF Workers fetch /
-  // CF Pages）自动无效但无害。裸 IP + 自定义 Host 的 SNI 部分依赖平台级回源 Host 兜底。
-  // accel 模式同理：回源 Host 用加速域名（ctx.url.hostname），需显式覆盖默认 addr。
+  // CF / EO / ESA 的 fetch 均允许通过 init.headers 设置 Host 头（见 docs/07-eo-origin-host.md §五），
+  // 实现「域名/裸IP 源站 + 自定义 Host」语义，无需依赖 socket。
+  // accel 模式同理：回源 Host 用加速域名（ctx.url.hostname），覆盖默认 addr。
   const hh = opts?.hostHeader;
   const custom = hh?.custom;
   if (custom && String(custom).trim() && String(custom).trim() !== String(originUrl.hostname)) {
