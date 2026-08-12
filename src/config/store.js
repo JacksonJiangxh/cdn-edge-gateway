@@ -86,7 +86,18 @@ const MIN_MEM_TTL_MS = 1_000;
  */
 const EO_MIN_CONFIG_TTL_MS = 120_000;
 
-function memGet(key) {
+/**
+ * 读 L1 内存缓存。
+ *
+ * 管理面（`ctx.mgmt` 为真）请求会**跳过 L1 读缓存**直读 KV：
+ * 管理面全是人工低频操作，单次多几十毫秒完全可接受；而 L1 缓存在
+ * 多 isolate 间不共享，写入只清当前 isolate，会导致「刚新建的站点在
+ * 列表里看不到、刷新也读不到、必须等 TTL 过期（或退出重登恰好命中写入
+ * isolate）才出现」的一致性问题。让管理面读绕过 L1 即可让写后立刻读
+ * 到最新 KV 值。数据面（CDN 请求）仍走完整 L1 缓存以保性能。
+ */
+function memGet(ctx, key) {
+  if (ctx && ctx.mgmt) return undefined;
   const hit = _mem.get(key);
   if (!hit) return undefined;
   if (Date.now() > hit.expireAt) {
@@ -178,7 +189,7 @@ async function writeJson(ctx, key, value) {
  * @returns {Promise<import('../contracts.js').GlobalConfig>}
  */
 export async function getGlobal(ctx) {
-  const cached = memGet(K_GLOBAL);
+  const cached = memGet(ctx, K_GLOBAL);
   if (cached) return cached;
 
   const raw = await readJson(ctx, K_GLOBAL);
@@ -249,7 +260,7 @@ export async function putGlobal(ctx, global) {
 // ----------------------------------------------------------------------------
 
 async function getSiteIndex(ctx) {
-  const cached = memGet(K_SITE_INDEX);
+  const cached = memGet(ctx, K_SITE_INDEX);
   if (cached) return cached;
 
   const raw = await readJson(ctx, K_SITE_INDEX);
@@ -303,7 +314,7 @@ export async function getSite(ctx, host, options = {}) {
   const h = host.toLowerCase();
   const memKey = `${kSite(h)}${options.exact ? '#e' : ''}`;
 
-  const cached = memGet(memKey);
+  const cached = memGet(ctx, memKey);
   if (cached !== undefined) return cached;
 
   // ---- 1. 精确匹配 ----
@@ -474,7 +485,7 @@ export async function listAllSites(ctx) {
 // ----------------------------------------------------------------------------
 
 async function getPoolIndex(ctx) {
-  const cached = memGet(K_POOL_INDEX);
+  const cached = memGet(ctx, K_POOL_INDEX);
   if (cached) return cached;
   const raw = await readJson(ctx, K_POOL_INDEX);
   const idx =
@@ -501,7 +512,7 @@ export async function getPool(ctx, poolId) {
   if (!poolId || typeof poolId !== 'string') return null;
   const key = kPool(poolId);
 
-  const cached = memGet(key);
+  const cached = memGet(ctx, key);
   if (cached !== undefined) return cached;
 
   let pool = (await readJson(ctx, key)) || null;

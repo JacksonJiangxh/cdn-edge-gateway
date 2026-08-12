@@ -80,10 +80,23 @@ const BASE_PARAMS = Object.freeze({
 // 场景模板定义
 // ----------------------------------------------------------------------------
 
-/** 常见静态资源扩展名——各模板按需取子集，避免每个模板重复一长串。 */
-const EXT_ASSET = Object.freeze(['css', 'js', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'woff', 'woff2']);
-const EXT_MEDIA = Object.freeze(['mp4', 'm4s', 'ts', 'm3u8', 'mpd', 'flv', 'mp3', 'aac', 'webm']);
-const EXT_DOWNLOAD = Object.freeze(['zip', 'rar', '7z', 'gz', 'tar', 'apk', 'ipa', 'exe', 'dmg', 'pkg', 'iso', 'bin']);
+/**
+ * 常见静态资源扩展名——各模板按需取子集，避免每个模板重复一长串。
+ * 清单对齐 EO「网站加速」模板的静态后缀全集（约 65 种），比旧版 11 种覆盖更全，
+ * 让「静态资源长缓存」规则能兜住文档/音视频/字体/压缩包等更多类型。
+ */
+const EXT_ASSET = Object.freeze([
+  '7z', 'avi', 'avif', 'apk', 'bin', 'bmp', 'bz2', 'class', 'css', 'csv',
+  'doc', 'docx', 'dmg', 'ejs', 'eot', 'eps', 'exe', 'flac', 'gif', 'gz',
+  'ico', 'iso', 'jar', 'jpg', 'jpeg', 'js', 'mid', 'midi', 'mkv', 'mp3',
+  'mp4', 'ogg', 'otf', 'pdf', 'pict', 'pls', 'png', 'ppt', 'pptx', 'ps',
+  'rar', 'svg', 'svgz', 'swf', 'tar', 'tif', 'tiff', 'ttf', 'webm', 'webp',
+  'woff', 'woff2', 'xls', 'xlsx', 'zip', 'zst',
+]);
+const EXT_MEDIA = Object.freeze(['mp4', 'm4s', 'ts', 'm3u8', 'mpd', 'flv', 'mp3', 'aac', 'webm', 'avi', 'mkv', 'mid', 'midi', 'ogg', 'wma', 'wmv', 'mov']);
+const EXT_DOWNLOAD = Object.freeze(['zip', 'rar', '7z', 'gz', 'tar', 'apk', 'ipa', 'exe', 'dmg', 'pkg', 'iso', 'bin', 'bz2', 'zst', 'jar', 'deb', 'rpm']);
+/** 动态语言/脚本扩展名——永远不该被缓存（EO「网站加速 / WordPress」均显式 NoCache）。 */
+const EXT_DYNAMIC = Object.freeze(['php', 'jsp', 'asp', 'aspx', 'do', 'dwr', 'cgi', 'fcgi', 'action', 'ashx', 'axd']);
 
 /**
  * 站点场景模板。
@@ -122,7 +135,7 @@ export const SITE_TEMPLATES = Object.freeze([
     build: (p) => [
       {
         name: '静态资源长缓存',
-        note: '带版本号/哈希的 css、js、图片、字体。这类文件内容一变文件名就变，所以可以放心长缓存。',
+        note: '带版本号/哈希的 css、js、图片、字体等。内容一变文件名就变，可放心长缓存。',
         match: { conditions: [[extCond(EXT_ASSET)]] },
         cache: {
           enabled: true,
@@ -130,7 +143,9 @@ export const SITE_TEMPLATES = Object.freeze([
           edgeTtl: p.edgeTtl,
           browserTtl: p.browserTtl,
           staleWhileRevalidate: p.staleWhileRevalidate,
-          ignoreQuery: false,
+          // 借鉴 EO「网站加速」CacheKey：忽略查询串，避免 ?t=1 / ?v=2 之类产生无意义的缓存碎片。
+          // 带指纹的资源文件名本身已区分版本，忽略查询串不会命中错误内容。
+          ignoreQuery: true,
           statusTtl: statusTtlOf(p),
         },
       },
@@ -144,6 +159,14 @@ export const SITE_TEMPLATES = Object.freeze([
         name: 'API 路径不缓存',
         note: '/api/ 下通常是动态数据、且常带登录态，缓存会导致串号等严重问题。路径前缀按你的实际情况改。',
         match: { conditions: [[prefixCond('/api/')]] },
+        cache: { enabled: false, mode: 'noCache' },
+      },
+      {
+        // 借鉴 EO「网站加速」子规则：php/jsp/asp/aspx 等动态脚本一律不缓存，
+        // 避免把带登录态的渲染结果误当成静态资源缓存住。
+        name: '动态脚本不缓存',
+        note: 'php/jsp/asp/aspx 等后端脚本输出的是实时渲染结果（常含用户态），缓存会串号或暴露他人数据。',
+        match: { conditions: [[extCond(EXT_DYNAMIC)]] },
         cache: { enabled: false, mode: 'noCache' },
       },
     ],
@@ -165,6 +188,8 @@ export const SITE_TEMPLATES = Object.freeze([
         cache: { enabled: false, mode: 'noCache', statusTtl: statusTtlOf(p) },
       },
     ],
+    // EO 同款模板还开了 SmartRouting（智能路由/Argo），就近选最优回源链路降低延迟。
+    // 本项目 RuleAction 契约目前无该字段，待扩契约后可在规则动作里加 smartRouting 开关。
   },
 
   {
@@ -206,6 +231,14 @@ export const SITE_TEMPLATES = Object.freeze([
           ignoreQuery: false,
         },
       },
+      {
+        // 借鉴 EO「音视频直播」的兜底分支：除上述分片/清单外的其它请求，
+        // 统一「跟随源站」缓存策略，避免在模板里漏掉不该缓存的动态请求。
+        name: '其余请求跟随源站',
+        note: '未匹配到具体媒体扩展名的请求，按源站返回的 Cache-Control 决定缓存，不强行套用模板时间。',
+        match: {},
+        cache: { enabled: true, mode: 'origin' },
+      },
     ],
   },
 
@@ -235,6 +268,69 @@ export const SITE_TEMPLATES = Object.freeze([
           statusTtl: statusTtlOf(p),
         },
       },
+      {
+        // 借鉴 EO「大文件下载」把 php/jsp/asp/aspx 显式 NoCache：即便套用了下载模板，
+        // 动态脚本也绝不能被当成可缓存的静态文件。
+        name: '动态脚本不缓存',
+        note: 'php/jsp/asp/aspx 等后端脚本实时渲染，缓存会串号。',
+        match: { conditions: [[extCond(EXT_DYNAMIC)]] },
+        cache: { enabled: false, mode: 'noCache' },
+      },
+    ],
+    // EO 同款模板还有 RangeOriginPull（分片回源），用于大文件断点续传时只回源缺失分片、
+    // 而非整文件拉取。本项目的 CachePolicy 契约目前无该字段，运行时已天然支持 Range 透传
+    // （见 FORWARD_HEADER_WHITELIST 含 range），但「仅回源缺失分片」的优化待扩契约后落地。
+  },
+
+  {
+    // 对齐 EO「WordPress 建站」模板：
+    //   - 静态类扩展名长缓存（图片/样式/脚本/字体/压缩包等）
+    //   - 首页 /wp-admin/ 动态后缀一律不缓存（后台与登录态不能缓存）
+    id: 'wordpress',
+    name: 'WordPress 建站',
+    desc: 'WP 站点。静态资源长缓存省带宽，后台、首页与动态脚本不缓存，避免登录态串号与发版看不到更新。',
+    params: {
+      edgeTtl: 5184000,      // 60 天：WP 静态资源多带 ?ver= 查询，较长也安全
+      browserTtl: 604800,    // 7 天
+      staleWhileRevalidate: 300,
+      errorTtl: 10,
+    },
+    tuning: ['edgeTtl', 'browserTtl', 'staleWhileRevalidate', 'errorTtl'],
+    build: (p) => [
+      {
+        name: '静态资源长缓存',
+        note: 'WP 上传的图片、主题样式/脚本、字体、压缩包等。内容发布后基本不变，适合长缓存。',
+        // 复用全局静态后缀全集（与 website 模板一致，覆盖文档/音视频/字体等更多类型）
+        match: { conditions: [[extCond(EXT_ASSET)]] },
+        cache: {
+          enabled: true,
+          mode: 'ttl',
+          edgeTtl: p.edgeTtl,
+          browserTtl: p.browserTtl,
+          staleWhileRevalidate: p.staleWhileRevalidate,
+          // 同 website：忽略查询串，避免无意义的缓存碎片
+          ignoreQuery: true,
+          statusTtl: statusTtlOf(p),
+        },
+      },
+      {
+        name: '首页不缓存',
+        note: 'WP 首页是聚合动态内容，发新文章后需要尽快更新，缓存会延迟展示。',
+        match: { conditions: [[{ target: 'path', op: 'equal', ignoreCase: true, values: ['/'] }]] },
+        cache: { enabled: false, mode: 'noCache' },
+      },
+      {
+        name: '后台不缓存',
+        note: '/wp-admin/ 是管理后台，含登录态与实时操作，缓存会串号或卡在旧页面。',
+        match: { conditions: [[prefixCond('/wp-admin/')]] },
+        cache: { enabled: false, mode: 'noCache' },
+      },
+      {
+        name: '动态脚本不缓存',
+        note: 'php/asp/jsp 等后端脚本实时渲染，缓存会串号或暴露他人数据。',
+        match: { conditions: [[extCond(EXT_DYNAMIC)]] },
+        cache: { enabled: false, mode: 'noCache' },
+      },
     ],
   },
 ]);
@@ -259,7 +355,11 @@ function prefixCond(p) {
 }
 
 /**
- * 由「错误页缓存时间」参数生成 statusTtl 映射，覆盖 400-599 常见状态码。
+ * 由「错误页缓存时间」参数生成 statusTtl 映射，覆盖常见 4xx/5xx 状态码。
+ * 枚举采用生产环境最常用子集（见 HTTP 4xx~5xx 状态码清单）：
+ *   400 401 403 404 405 406 408 409 410 412 413 415 422 429 500 502 503 504
+ * 这些码代表「客户端非法 / 鉴权失败 / 资源缺失 / 服务端故障」，可短时缓存以挡住对源站的重复穿透。
+ *
  * 值为 0 的项直接不写入——0 在 statusTtl 里语义含糊（缓存 0 秒 ≈ 不缓存），
  * 省略掉可让最终配置更干净，也更贴合「克制」原则。
  * @param {Object} p 最终参数
@@ -268,9 +368,14 @@ function prefixCond(p) {
 function statusTtlOf(p) {
   const ttl = Number(p?.errorTtl) || 0;
   if (ttl <= 0) return {};
+  /** 生产最常用错误码子集（仅枚举纳入，缓存时长一律由 errorTtl 参数决定，不采用外部时长建议）。 */
+  const ERROR_CODES = Object.freeze([
+    400, 401, 403, 404, 405, 406, 408, 409, 410, 412, 413, 415, 422, 429,
+    500, 502, 503, 504,
+  ]);
   /** @type {Record<string, number>} */
   const out = {};
-  for (const c of [400, 401, 403, 404, 405, 500, 502, 503, 504]) out[String(c)] = ttl;
+  for (const c of ERROR_CODES) out[String(c)] = ttl;
   return out;
 }
 

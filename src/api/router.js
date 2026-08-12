@@ -111,6 +111,11 @@ export async function handleApi(ctx, subPath, global) {
   const method = ctx.request.method.toUpperCase();
   const reqId = ctx.reqId;
 
+  // 标记这是「管理面」请求：store 层据此让读路径绕过 L1 内存缓存，
+  // 直接读 KV，确保「新建/删除/修改后立刻列表可见」，不被跨 isolate
+  // 的 L1 陈旧缓存误导（数据面仍走完整 L1 缓存以保性能）。
+  ctx.mgmt = true;
+
   // CORS 预检：管理面与 API 同源，理论上不会触发，保险起见处理
   if (method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: corsHeaders() });

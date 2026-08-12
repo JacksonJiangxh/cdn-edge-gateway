@@ -2061,7 +2061,7 @@ if (typeof window !== 'undefined') window.API = API;
 
     // ── ② 默认源站（仅新建时出现）────────────────────────────────────
     // 新建站点时必须绑定一个源站；可选「填写域名/IP」（自动创建单一源站）或「选择已有源站」
-    let fOriginMode, fPoolSel, fAddr, fPort, fScheme, fEngine, fHostMode, fHostCustom;
+    let fOriginMode, fPoolSel, fAddr, fPort, fScheme, fEngine, fR2Binding, fHostMode, fHostCustom;
     if (!editing) {
       const poolOptions = buildPoolOptions();
       fOriginMode = select('f-origin-mode', [
@@ -2098,11 +2098,14 @@ if (typeof window !== 'undefined') window.API = API;
       const portField = field('端口', fPort, 'https 默认 443，http 默认 80。');
       const schemeField = field('回源协议', fScheme, '选择 https 则回源时走加密通道。');
       const engineField = field('引擎', fEngine, 'fetch=标准回源（所有平台可用）；socket=裸 TCP（仅 Workers，可自定义 Host）；r2=回源 R2 桶（仅 CF）。');
+      // R2 引擎必填的绑定名（与 wrangler.toml 的 [[r2_buckets]].binding 一致），仅在引擎选 r2 时显示
+      fR2Binding = el('input', { class: 'input', id: 'f-r2-binding', value: '', placeholder: 'CDN_R2（必须与 wrangler.toml 的 R2 绑定名一致）' });
+      const r2BindingField = field('R2 绑定名（r2Binding）', fR2Binding, 'wrangler.toml 里 [[r2_buckets]].binding 的值，如 CDN_R2。引擎选 r2 时必填，保存时自动创建「单一源站」。');
       const hostModeField = field('回源 Host', fHostMode, '源站响应请求时看到的 Host 头。选「自定义域名」时需填下方输入框。');
       const hostCustomField = field('回源 Host 自定义值', fHostCustom, '仅用于回源请求的 Host 头，与站点配置的「加速域名」无关。');
 
       const inlineFields = el('div', { id: 'origin-inline-fields' }, [
-        addrField, portField, schemeField, engineField, hostModeField, hostCustomField,
+        addrField, portField, schemeField, engineField, r2BindingField, hostModeField, hostCustomField,
       ]);
 
       const syncEngine = () => {
@@ -2111,6 +2114,7 @@ if (typeof window !== 'undefined') window.API = API;
         addrField.style.display = isR2 ? 'none' : '';
         portField.style.display = isR2 ? 'none' : '';
         schemeField.style.display = isR2 ? 'none' : '';
+        r2BindingField.style.display = isR2 ? '' : 'none';
       };
       const syncHostCustom = () => { hostCustomField.style.display = fHostMode.value === 'custom' ? '' : 'none'; };
       const syncOriginMode = () => {
@@ -2220,13 +2224,16 @@ if (typeof window !== 'undefined') window.API = API;
           // 「填写域名/IP」：构建 origin 对象，后端 ensureSingleOrigin 自动查重/创建并回填 poolId
           const eng = fEngine.value;
           if (eng !== 'r2' && !fAddr.value.trim()) throw new Error('请填写源站地址');
+          if (eng === 'r2' && !(fR2Binding && fR2Binding.value.trim())) {
+            throw new Error('引擎为 r2 时必须填写 R2 绑定名（如 CDN_R2）');
+          }
           const o = {
             addr: eng === 'r2' ? '' : fAddr.value.trim(),
             port: eng === 'r2' ? null : (Number(fPort.value) || 443),
             scheme: eng === 'r2' ? 'https' : fScheme.value,
             engine: eng,
           };
-          if (eng === 'r2') o.r2Binding = '';
+          if (eng === 'r2') o.r2Binding = (fR2Binding && fR2Binding.value.trim()) || '';
           basics.origins = [o];
           basics.defaultHostHeader = {
             mode: fHostMode.value,
