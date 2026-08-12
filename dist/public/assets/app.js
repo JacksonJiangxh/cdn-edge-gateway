@@ -1478,7 +1478,7 @@ if (typeof window !== 'undefined') window.API = API;
         },
       });
       return chip;
-    });
+    }));
     const preRefresh = el('input', { type: 'checkbox', checked: !!c.preRefresh });
     const preP = el('input', { class: 'input', type: 'number', value: c.preRefreshPercent || 80, placeholder: '%' });
     const offline = el('input', { type: 'checkbox', checked: !!c.offlineCache });
