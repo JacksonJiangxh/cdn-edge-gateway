@@ -65,8 +65,11 @@
 $:
   # ---- vscode 事件：专供页面中启动远程开发用 ----
   vscode:
-    - docker:
-        image: docker.cnb.cool/xzydm/mirrors/debian:13-all
+    - runner:
+        <<: *runner4
+      docker:
+        <<: *docker-image
+      imports: *secret-envs
       services:
         - docker
         - name: vscode
