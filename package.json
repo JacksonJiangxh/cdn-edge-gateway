@@ -6,9 +6,13 @@
   "main": "_worker.js",
   "scripts": {
     "build": "node build.mjs",
+    "test": "node build.mjs",
+    "postinstall": "node scripts/ensure-playwright-browsers.mjs",
     "check": "node scripts/check.mjs",
     "gen": "node scripts/gen-entries.mjs",
     "test:e2e": "node scripts/e2e-test.mjs",
+    "test:frontend:dom": "node scripts/test-frontend-dom.mjs",
+    "test:frontend:browser": "node scripts/e2e-browser.mjs",
     "dev": "node scripts/dev.mjs",
     "dev:clean": "node scripts/dev.mjs --clean",
     "dev:cf": "node scripts/dev.mjs --cf",
@@ -36,7 +40,9 @@
   "devDependencies": {
     "esa-cli": "^1.0.0",
     "esbuild": "^0.28.1",
+    "jsdom": "^24.1.3",
     "mcp-server-esa": "^1.1.0",
+    "playwright": "^1.48.0",
     "wrangler": "4.122.0"
   }
 }

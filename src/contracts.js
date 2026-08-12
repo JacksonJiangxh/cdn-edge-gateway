@@ -16,7 +16,7 @@
 
 /**
  * @typedef {Object} Caps                 平台能力描述
- * @property {'cf'|'eo'|'esa'|'unknown'} platform  部署厂商（由 CLOUD_PLATFORM 环境变量显式声明：cf / eo / esa）
+ * @property {'cf'|'eo'|'esa'} platform  部署厂商（由 CLOUD_PLATFORM 环境变量显式声明：cf / eo / esa；未声明时 caps.readPlatform 直接抛错，不会产出 unknown）
  * @property {boolean} hasEdgeCache       是否支持「边缘缓存」（三平台均真实生效：CF/EO=caches.default API；ESA=全局 cache 单实例；响应头委托为任意平台的兜底通道）
  * @property {boolean} hasCacheApi        是否支持 Cache API 读写（三平台均支持：cf=caches.default；eo=caches.default 节点本地化；esa=全局 cache 单实例）
  * @property {boolean} eoEdgeCache        是否支持 EO 同站 fetch 委托节点缓存（运行在 EO 边缘函数且站点已接入加速域名；命中后零函数调用）

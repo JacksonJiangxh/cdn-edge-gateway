@@ -23,5 +23,7 @@
 // 参考：Tencent Cloud EdgeOne Makers 文档（Functions > 概览 / Cloud Functions > Node.js）
 
 // 复用同一打包产物：CF Workers / EO Edge Function 共用。
-// _worker.js 已原生 export async function onRequest(context)，故直接透传。
-export { onRequest } from '../_worker.js';
+// _worker.js（由 src/entry.js 打包）同时 export default { fetch }（CF Workers 范式）
+// 与 export async function onRequest(context)（Pages/EO 范式）。为与 esa/index.js
+// 薄壳保持对称、避免将来入口约定变化时 EO 链路断裂，这里同时转发两者。
+export { default, onRequest } from '../_worker.js';

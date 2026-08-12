@@ -21,6 +21,9 @@
 // 构建期生成：与后端 src/config/stages.js 逐字同源（见 build.mjs）。
 // eslint-disable-next-line import/no-unresolved
 import { STAGE_ORDER, STAGE_OPS, STAGE_ALIASES, normalizeStage } from './_stage.gen.js';
+// 安全 DOM / 模板工具层（单一真相源；禁止在本文件写 innerHTML 拼接）。
+// 所有节点构造统一走 dom.js 的 el/clear/$/escapeHtml，根绝 <> 标签丢失与注入。
+import { el, clear, $ } from './dom.js';
 
 (function () {
   'use strict';
@@ -28,37 +31,7 @@ import { STAGE_ORDER, STAGE_OPS, STAGE_ALIASES, normalizeStage } from './_stage.
   const API = window.API;
   const PLATFORM = window.__PLATFORM__ || 'unknown';
 
-  // 小工具 ----------------------------------------------------------------
-  // 单参: document.getElementById(id)
-  // 双参: 在 root 内按 CSS 选择器查找（$('.o-addr', row)）
-  const $ = (sel, root) => {
-    if (root) return root.querySelector(sel);
-    return typeof sel === 'string' ? document.getElementById(sel) : sel;
-  };
   const APP_DATA = { global: null, sites: [], pools: [], stats: null, info: null };
-
-  function el(tag, attrs, children) {
-    const n = document.createElement(tag);
-    if (attrs) {
-      for (const k in attrs) {
-        const v = attrs[k];
-        if (v == null || v === false) continue;
-        if (k === 'class') n.className = v;
-        else if (k === 'text') n.textContent = v;
-        else if (k === 'html') n.innerHTML = v;
-        else if (k.startsWith('on') && typeof v === 'function') n.addEventListener(k.slice(2), v);
-        else n.setAttribute(k, v === true ? '' : String(v));
-      }
-    }
-    if (children != null) {
-      (Array.isArray(children) ? children : [children]).forEach((c) => {
-        if (c == null) return;
-        n.appendChild(typeof c === 'string' || typeof c === 'number' ? document.createTextNode(String(c)) : c);
-      });
-    }
-    return n;
-  }
-  const clear = (node) => { while (node && node.firstChild) node.removeChild(node.firstChild); };
 
   function fmtNum(n) {
     n = Number(n) || 0;
@@ -1395,7 +1368,7 @@ import { STAGE_ORDER, STAGE_OPS, STAGE_ALIASES, normalizeStage } from './_stage.
     function renderFields() {
       const t = typeSel.value;
       desc.textContent = TYPES[t].desc;
-      fieldsBox.innerHTML = '';
+      clear(fieldsBox);
       if (t === 'prefix' || t === 'strip') {
         fieldsBox.appendChild(field(t === 'prefix' ? '要添加 / 去除的路径前缀' : '要去除的开头前缀', valueInput));
         fieldsBox.appendChild(el('div', { class: 'rw-example muted', text: t === 'prefix'
@@ -2091,7 +2064,7 @@ import { STAGE_ORDER, STAGE_OPS, STAGE_ALIASES, normalizeStage } from './_stage.
       // 异步拉取模板清单（含固定的 rules），失败则静默降级为「空白」，不阻塞建站
       API.sites.templates().then((d) => {
         tplState.list = (d && d.templates) || [];
-        tplSel.innerHTML = '';
+        clear(tplSel);
         for (const t of tplState.list) {
           const o = el('option', { value: t.id }, t.name);
           if (t.id === 'website') o.selected = true; // 最常见场景作默认
@@ -2099,7 +2072,7 @@ import { STAGE_ORDER, STAGE_OPS, STAGE_ALIASES, normalizeStage } from './_stage.
         }
         syncTpl();
       }).catch(() => {
-        tplSel.innerHTML = '';
+        clear(tplSel);
         tplSel.appendChild(el('option', { value: 'blank' }, '空白（模板加载失败）'));
       });
     }

@@ -74,6 +74,11 @@ cdn-edge-gateway/
 │   │   └── cache.js        # 运行时缓存抽象
 │   └── utils/              # ip/net/normalize/reqid 等
 ├── web/                    # 管理面前端（原生 JS 单页/抽屉式界面，构建时产出静态 + 内联兜底）
+│   ├── dom.js              # ★ 安全 DOM/模板工具层（单一真相源）：el()/clear()/$()/escapeHtml()；杜绝原始 innerHTML 拼接
+│   ├── app.js              # 业务前台：登录 + 抽屉式管理（视图渲染全部经 dom.js 的 el/textContent，无 innerHTML 拼接）
+│   ├── api.js              # 后端契约门面（window.API / window.__BASE__，零改动）
+│   ├── index.html          # 预置根 DOM 骨架（#view-app/#content/#login-* 等），含 BUILD:STYLE/SCRIPT 注入标记
+│   └── style.css
 ├── edge-functions/         # EO Makers Edge Function 目录
 │   └── [[default]].js       # Catch-all 薄壳（加载 _worker.js，承载全部动态请求）
 ├── dist/public/            # 构建产出的管理面静态资源（HTML + assets），供 Pages 静态托管
@@ -297,6 +302,19 @@ const originResp = await requestWithFailover(ctx, [pick], rule, effectiveHostHea
 
 ---
 
+## 8.1 前端健壮化改造（根因治理：build 后登录进不去后台）
+
+历史上最频发的故障：**build 成功部署后，登录界面输入正确密码却进不去管理后台，控制台报语法定位错误**。根因是前端用字符串拼接 + `innerHTML` 构造 DOM，内联/转义/`<>` 标签丢失类问题只在浏览器运行时才暴露，构建期语法校验查不出。本项目已彻底消除该脆弱链：
+
+1. **`web/dom.js` 安全 DOM 工具层（单一真相源）**
+   - 所有节点构造统一走 `el(tag, attrs, children)`：文本走 `textContent`（**永不解析 HTML，天然防 `<>` 标签丢失与注入**），事件走 `addEventListener`（不写内联 `onclick`），属性走 `setAttribute`。
+   - **移除 `el` 的 `html` 原始 innerHTML 分支**：历史代码即使传 `html` 也按纯文本安全渲染，不再执行 `innerHTML`。
+   - `clear(node)` 取代 `node.innerHTML = ''`；`$` 选择器封装；`escapeHtml` 供「只读展示 HTML 源码片段」使用。
+   - 约定：任何业务文件**禁止写 `innerHTML =` 或手动拼接 HTML 字符串**，grep `innerHTML` 即可审计。
+2. **`web/app.js` 重写**：从 `dom.js` 引入 `el`/`clear`/`$`，消除全部 `innerHTML` 残留，渲染路径统一规范。功能（登录、站点/源站池/缓存/规则/统计/系统/KV 调试等）100% 保留，`web/api.js` 契约与 `window.__BASE__`/`window.API` 注入机制零改动。
+
+---
+
 ## 9. 构建与运行
 
 - `build.mjs` 五步构建：
@@ -306,6 +324,7 @@ const originResp = await requestWithFailover(ctx, [pick], rule, effectiveHostHea
   4. 用 esbuild 把 `src/` 打包成单文件 `_worker.js`；
   5. 产物自检（文件完整性 + `_worker.js` 可加载 + 导出面）+ 专项语法校验 + **端到端测试**。
 - **端到端测试（`scripts/e2e-test.mjs`）**：build 默认内置执行，用内存 KV mock 跑通「健康检查 → 打开管理面（内联/静态两形态）→ 登录 → `/auth/me` → `/sites`」完整链路，并在 Node 沙箱执行产物前端 JS 断言 `window.API` 挂载；`--skip-verify` 可一并跳过。也可单独 `npm run test:e2e` 或 `node scripts/e2e-test.mjs --all`（cf+eo 两能力集）。这拦截「构建成功但登录后进不去后台」这类运行时问题。
+- **前端整链双轨测试（拦截「构建成功但产物不可用」）**：`build.mjs` 步骤 5 在端到端之后追加两道闸：① `scripts/test-frontend-dom.mjs`（**jsdom**，纯 JS 本地秒级）——用 esbuild 把 `web/app.js` 打包成 IIFE，在**真实 DOM** 中模拟「登录 → `enterApp()` → 渲染后台」，断言无 `pageerror`/`console.error`、关键节点（`#view-app`/`#content`）存在、后台可见；② `scripts/e2e-browser.mjs`（**Playwright 无头 Chromium**，CI 真实解析）——加载 build 内联产物 `src/ui.gen.js.UI_HTML`，由真实浏览器引擎执行内联 `<script>`，捕获 `pageerror`/`console.error`，真实点击登录 → 进后台（缺浏览器二进制时优雅跳过）。二者均加载真实 `web/index.html` 的 DOM 骨架（app.js 依赖其中预置根节点），确保测试形态与 build 产物一致；缺依赖不阻断 build。npm 脚本：`npm run test:frontend:dom`、`npm run test:frontend:browser`。
 - **EdgeOne 单目录收口**：`edge-functions/`（Edge Function 目录，`[[default]].js` Catch-all 薄壳加载 `_worker.js`，承载数据面 + 管理面 HTML/静态 + `/__panel/api/*` 全部动态请求）、`dist/public/`（静态托管）。全部共用同一份 `_worker.js` 与 KV 命名空间。新版 Makers 下 `edgeone.json` 不写 `routes`，静态与函数冲突时静态优先。
 - **Cloudflare 单 runtime**：`_worker.js` 一体运行（数据面 + 管理面），`dist/public` 由 CF Pages 静态托管时管理 UI 走边缘缓存零函数次；直接粘贴 Worker 时自动回退内联 HTML。
 - **改任何源码后必须重跑 `npm run build`**，否则线上/本地跑的还是旧产物。

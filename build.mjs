@@ -34,6 +34,8 @@ import * as esbuild from 'esbuild';
 import { generateEntries } from './scripts/gen-entries.mjs';
 import { runChecks } from './scripts/check.mjs';
 import { runE2E } from './scripts/e2e-test.mjs';
+import { runFrontendDomTest } from './scripts/test-frontend-dom.mjs';
+import { runFrontendBrowserTest } from './scripts/e2e-browser.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const WEB = join(ROOT, 'web');
@@ -44,8 +46,10 @@ const args = process.argv.slice(2);
 // 默认开启压缩构建（产物体积小、启动快，远离 Cloudflare 免费版 1MB 上限）。
 const MINIFY = args.includes('--no-minify') ? false : true;
 const WATCH = args.includes('--watch');
-// 自检默认开启；--skip-verify 仅用于特殊调试场景
-const SKIP_VERIFY = args.includes('--skip-verify');
+// 自检默认开启；--skip-verify 仅用于本地特殊调试场景。
+// 关键护栏：CI 环境（process.env.CI 为真）下忽略 --skip-verify，强制跑全部测试，
+// 杜绝「绕过测试带病部署」。本地调试可用 --skip-verify 加速，但部署链路不应使用。
+const SKIP_VERIFY = args.includes('--skip-verify') && !process.env.CI;
 
 // ---------------------------------------------------------------------------
 // 工具
@@ -596,6 +600,49 @@ async function verify() {
   console.log(`  ✓ 入口导出可用: ${exports}`);
 }
 
+/**
+ * 测试护栏收口：统一检查各子测试返回的 { ok, skipped }，把「构建质量闸门」真正落地。
+ *
+ * 设计目标（对齐「测试必须植入构建、绝不能带病部署」）：
+ *   - 子测试在 build 流程中以「导出函数」形式被 await，它们失败时只返回
+ *     { ok:false } 或 { skipped:true } 而不会抛错；若此处不检查，build 会带着
+ *     失败的测试结果以「成功」退出，部署后才发现不可用。
+ *   - 因此这里显式检查：失败 → throw（build 非零退出，阻断部署）；
+ *   - skipped 默认视为「本环境依赖应当可用却缺失」→ 默认 throw（硬失败），
+ *     仅当 allowSkip=true（如显式 ALLOW_SKIP_BROWSER_TEST=1）时才放行并警告。
+ *
+ * @param {string} label  测试名称（用于报错信息）
+ * @param {() => Promise<{ok?:boolean, skipped?:boolean, failures?:number}>} fn
+ * @param {{ allowSkip?: boolean }} [opts]
+ */
+export async function runGuard(label, fn, opts = {}) {
+  let res;
+  try {
+    res = await fn();
+  } catch (e) {
+    // 子测试自身抛错（如断言异常、环境错误）→ 直接阻断构建
+    throw new Error(`✗ ${label} 执行异常，构建中止（禁止带病部署）：${e && (e.stack || e.message)}`);
+  }
+  if (res && res.skipped) {
+    if (opts.allowSkip) {
+      console.log(`  ⚠ ${label} 已跳过（依赖不可用，已显式允许放行）`);
+      return;
+    }
+    // 默认：依赖应当可用却缺失 → 硬失败，避免漏测带病部署
+    throw new Error(
+      `✗ ${label} 被跳过：依赖不可用，但本环境应当已安装（jsdom/playwright 均为 devDependency，且 postinstall 会准备浏览器二进制）。\n` +
+      `  请先执行 \`npm install\` 安装依赖后重试构建；若确属受限环境，可设 ALLOW_SKIP_BROWSER_TEST=1 显式放行。`
+    );
+  }
+  if (!res || res.ok === false) {
+    throw new Error(
+      `✗ ${label} 未通过（失败 ${res?.failures ?? '?'} 项断言），构建中止，禁止带病部署。\n` +
+      `  请修复前端/产物问题后重新构建。`
+    );
+  }
+  console.log(`  ✓ ${label} 通过`);
+}
+
 // ---------------------------------------------------------------------------
 // 主流程
 // ---------------------------------------------------------------------------
@@ -625,13 +672,25 @@ async function main() {
   // 步骤 4：打包 worker
   await buildWorker();
 
-  // 步骤 5：专项语法校验 + 产物自检 + 端到端测试
+  // 步骤 5：专项语法校验 + 产物自检 + 端到端测试（构建质量闸门）
   await syntaxChecks(inlineHtml, frontendJs);
   if (!SKIP_VERIFY) {
+    // 产物自检：文件完整性 / 入口导出可用 / 平台口径一致性（失败直接 throw）
     await verify();
     // 端到端：用真实产物 _worker.js 跑通「健康检查→管理面→登录→鉴权→后台」，
-    // 并在 Node 沙箱执行前端 JS 验证 window.API 挂载。--skip-verify 一并跳过。
-    await runE2E();
+    // 并在 Node 沙箱执行前端 JS 验证 window.API 挂载。runGuard 确保失败即阻断部署。
+    await runGuard('端到端 e2e（HTTP 全流程 + 前端可执行性）', runE2E);
+    // 前端整链双轨测试：用「构建结果代码」跑真实 DOM，拦截「构建成功但登录后
+    // 进不去后台、控制台报语法定位」这类回归（jsdom 本地秒级 + Playwright 真实
+    // 浏览器解析，分别覆盖模拟 DOM 与真实引擎）。二选一缺依赖即硬失败，杜绝漏测。
+    await runGuard('前端整链 jsdom（登录 → 进后台）', runFrontendDomTest);
+    // Playwright 默认硬测（postinstall 已装浏览器）；仅 ALLOW_SKIP_BROWSER_TEST=1
+    // 时允许跳过，作为受限环境的显式逃生舱，绝不默认静默放行。
+    await runGuard(
+      '前端整链 Playwright 真实浏览器（登录 → 进后台）',
+      runFrontendBrowserTest,
+      { allowSkip: !!process.env.ALLOW_SKIP_BROWSER_TEST }
+    );
   }
 
   console.log(`\n构建完成，耗时 ${Date.now() - t0}ms`);

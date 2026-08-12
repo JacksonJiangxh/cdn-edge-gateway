@@ -85,6 +85,37 @@ const ESA_KV_NAMESPACE = (process && process.env && process.env.ESA_KV_NAMESPACE
 const _adapterCache = new WeakMap();
 
 /**
+ * 并发读取合并（in-flight coalescing）。
+ *
+ * 目的：进一步压低 KV / Redis 读触达。当同一 isolate 在极短窗口内对【同一物理键】
+ * 发出多次并发 get（典型场景：冷启动后第一批并发请求、或一个请求内多模块并发读同一
+ * 配置），若不加合并，每次都会穿透到后端存储。这里把「同一物理键 + 进行中」的读取
+ * 合并为一次实际后端调用，其余等待同一 Promise。
+ *
+ * 安全性（绝不跨请求长串联）：
+ *   - 每个 inflight 条目在 Promise settle（无论成功/失败）后立即删除，不存在长驻缓存。
+ *   - 合并窗口本质上是「并发」，不是「跨时间缓存」：只有真正同时进行的 get 才会合并；
+ *     一个已完成、稍后才来的 get 不会命中、会重新走后端（其后由 store.js 的 L1 内存
+ *     缓存承接，TTL 30s/120s）。
+ *   - 失败时也要删除条目并放行重试，避免「一次失败永久阻塞后续读」。
+ */
+const _inflight = new Map();
+
+function coalesceGet(physKey, doRead) {
+  const existing = _inflight.get(physKey);
+  if (existing) return existing;
+  const p = (async () => {
+    try {
+      return await doRead();
+    } finally {
+      _inflight.delete(physKey);
+    }
+  })();
+  _inflight.set(physKey, p);
+  return p;
+}
+
+/**
  * 鸭子类型判断：是否是一个可用的 KV 命名空间。
  * @param {any} b 待检测对象
  * @returns {boolean} 是否像 KV
@@ -163,18 +194,28 @@ function wrap(raw) {
         // 键本身非法（超长等）→ 当作无数据，由上层降级
         return null;
       }
+      // 并发读取合并：同一物理键在极短窗口内的并发 get 共享一次后端调用，
+      // 进一步压低 KV/Redis 读触达（冷启动并发、单请求多模块并发读同一配置）。
+      // 仅合并「实际后端读」这一步；编码/解码/解析均在合并外层按各自调用独立进行，
+      // 因此不同调用方拿到的类型/解析结果不会互相干扰。
       let rawVal;
       try {
-        // 先尝试标准 CF 签名 get(key, 'text')
-        rawVal = await raw.get(physKey, 'text');
+        rawVal = await coalesceGet(physKey, async () => {
+          try {
+            // 先尝试标准 CF 签名 get(key, 'text')
+            return await raw.get(physKey, 'text');
+          } catch {
+            try {
+              // EdgeOne 部分版本只接受单参数
+              return await raw.get(physKey);
+            } catch {
+              // 读失败（网络/权限/键不存在抛错）一律当作「无数据」，由上层降级
+              return null;
+            }
+          }
+        });
       } catch {
-        try {
-          // EdgeOne 部分版本只接受单参数
-          rawVal = await raw.get(physKey);
-        } catch {
-          // 读失败（网络/权限/键不存在抛错）一律当作「无数据」，由上层降级
-          return null;
-        }
+        return null;
       }
       if (rawVal == null) return null;
 
@@ -430,13 +471,20 @@ function createEdgeKVAdapter(env) {
       } catch {
         return null;
       }
+      // 并发读取合并（与 wrap 一致），减少重复后端读。
       let rawVal;
       try {
-        // EdgeKV.get(key, { type }) 返回对应类型（text/json）。
-        // 统一先取 text 再自行 JSON.parse，避免依赖底层 type 支持程度。
-        rawVal = await store.get(physKey, { type: 'text' });
+        rawVal = await coalesceGet(physKey, async () => {
+          try {
+            // EdgeKV.get(physKey, { type }) 返回对应类型（text/json）。
+            // 统一先取 text 再自行 JSON.parse，避免依赖底层 type 支持程度。
+            return await store.get(physKey, { type: 'text' });
+          } catch {
+            return null; // 读失败降级默认值
+          }
+        });
       } catch {
-        return null; // 读失败降级默认值
+        return null;
       }
       if (rawVal == null) return null;
       let text;

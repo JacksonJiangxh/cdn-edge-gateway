@@ -284,6 +284,35 @@ async function runPipeline(ctx) {
     originResp = await requestWithFailover(ctx, pool, rule, effectiveHostHeader);
   }
 
+  // ---- 7.5 serve-stale-on-error（SWR 行为兜底）----
+  // 回源拿到 5xx/502（全源站失败）时，若边缘缓存里仍有【刚过期、但平台尚保留】的
+  // 旧响应，则改返回该 stale 响应（带 X-Cache: STALE 与 stale-while-revalidate 头），
+  // 而非把 502 直接暴露给用户。这把「源站抖动」对用户的影响降到最低，并减少对源站的
+  // 无效重试触达（与 circuit.js 的熔断/自愈互补：熔断避免反复打挂源站，stale 避免用户
+  // 看到错误）。
+  // 注：Cache API 过期条目通常会被平台剔除，因此仅当平台仍保留过期条目（或 SWR 窗口内）
+  // 时才生效；取不到则保持原 502，不影响任何既有行为。
+  if (originResp && originResp.status >= 500 && cacheKey) {
+    try {
+      const stale = await cacheMatch(ctx, cacheKey);
+      if (stale) {
+        ctx.debug.cache = 'STALE';
+        // stale 分支只用 policy 构造客户端头（mergedRespHeaders 在下方步骤 9 才计算，
+        // 此处不依赖它，避免时序耦合；stale 响应本身已含源站级响应头）。
+        const headers = buildClientHeaders(ctx, stale, policy, undefined);
+        headers.set('X-Cache', 'STALE');
+        recordSafely(ctx, { status: stale.status, cacheHit: 'STALE' });
+        return new Response(stale.body, {
+          status: stale.status,
+          statusText: stale.statusText,
+          headers,
+        });
+      }
+    } catch {
+      // 取 stale 失败则照常走 502，不影响主流程
+    }
+  }
+
   // ---- 8. 先 clone 原始响应 ----
   // 关键修复：必须在「基于 originResp.body 构造新响应」之前 clone。
   // 旧版是先构造出最终响应再 clone 它，此时 body 已经开始被客户端消费，
