@@ -61,6 +61,7 @@
 | 10 | [API 参考](./docs/10-api-reference.md) | 用 curl / 脚本批量管理配置 |
 | 11 | [系统架构](./docs/11-architecture.md) | 代码分层、模块职责、平台能力降级 |
 | 12 | [请求处理流程](./docs/12-request-flow.md) | 一个请求从进到出的完整链路 |
+| 13 | [Redis/Webdis KV 兜底](./docs/13-redis-kv.md) | 无原生 KV 的平台（EO Pages/ESA）用自部署 Redis 持久化 |
 
 ---
 
@@ -81,7 +82,7 @@ src/
 ├── api/                  # 管理面后端（/__panel/api/*）+ 静态页优先服务(adminPage)
 │   ├── handlers/         # sites / pools / rules / stats / auth / config / cache / system
 │   └── router.js         # 路由表
-├── platform/             # 平台能力探测（caps: 缓存/D1/Socket/KV/EO Node 运行时）+ cache 封装
+├── platform/             # 平台能力探测（caps: 缓存/D1/Socket/KV/EO Node 运行时）+ cache 封装 + Redis(Webdis) KV 兜底后端
 ├── ui.gen.js             # 自动生成的管理面 UI（内联兜底，勿手改）
 └── utils/                # 通用工具（reqid、ip、net、normalize…）
 web/                      # 管理面前端（原生 JS 单页，构建时产出静态 + 内联兜底）

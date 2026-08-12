@@ -3020,6 +3020,54 @@
     }
     wrap.appendChild(table(['项目', '状态'], rows));
 
+    // ---- KV 后端 / Redis(Webdis) 状态与连通性测试 ----
+    // 面向「无原生 KV 平台」（EO Pages / ESA 等）的自部署 Redis 兜底存储。
+    const kvBackend = (info && info.kvBackend) || (caps.hasKV ? 'native' : 'none');
+    const redisConfigured = !!(info && info.redisConfigured);
+    const kvStateText =
+      kvBackend === 'redis'
+        ? '自部署 Redis（Webdis）✅'
+        : kvBackend === 'native'
+          ? '平台 KV（CDN_KV / KV）✅'
+          : '无（配置无法持久化）❌';
+    const kvCard = el('div', { class: 'card-block' }, [
+      el('h4', {}, 'KV 存储后端'),
+      el('div', { class: 'form-stack' }, [
+        field('当前后端', el('span', {}, kvStateText)),
+        field('REDIS_URL 已配置', el('span', {}, redisConfigured ? '是' : '否（使用平台 KV 或默认配置）')),
+      ]),
+      el('div', { class: 'section-head' }, [
+        el('button', {
+          class: 'btn', text: '测试连通性（读写回环）',
+          onclick: async (ev) => {
+            const btn = ev.target;
+            btn.disabled = true; btn.textContent = '测试中…';
+            const out = document.getElementById('kv-ping-out');
+            if (out) { out.textContent = '请求中…'; out.className = 'muted'; }
+            try {
+              const r = await API.kv.ping();
+              const okk = r && r.ok;
+              if (out) {
+                out.className = okk ? 'ok-text' : 'err-text';
+                out.textContent = okk
+                  ? `✅ 后端=${r.backend} 延迟=${r.latencyMs}ms 读写回环一致`
+                  : `❌ 后端=${r.backend || '?'} 错误=${r.error || '未知'}`;
+              }
+            } catch (e) {
+              if (out) { out.className = 'err-text'; out.textContent = '请求失败: ' + e.message; }
+            } finally {
+              btn.disabled = false; btn.textContent = '测试连通性（读写回环）';
+            }
+          },
+        }),
+        el('span', { id: 'kv-ping-out', class: 'muted' }, '点击测试自部署 Redis 是否可读可写'),
+      ]),
+      el('p', { class: 'muted small' },
+        '无原生 KV 的平台（如 EdgeOne Pages / ESA）可自部署 Webdis（HTTP↔Redis 网关），' +
+        '并在环境变量配置 REDIS_URL 指向它，本项目即可获得与平台 KV 完全同构的持久化能力，配置 / 统计自动落到您的 Redis。'),
+    ]);
+    wrap.appendChild(kvCard);
+
     // 全局配置卡片（导航无独立 global 项，合并到系统页）
     //
     // 关键：这里必须持有各输入框的「节点引用」，不能靠 $('g-xxx') 按 id 全局查找。

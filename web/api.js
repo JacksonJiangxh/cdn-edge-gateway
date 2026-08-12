@@ -198,6 +198,19 @@ const API = {
     save: (payload) => put('/config/global', payload),
   },
 
+  kv: {
+    ping: () => get('/kv/ping'),
+    list: (prefix) => get('/kv' + (prefix ? '?prefix=' + encodeURIComponent(prefix) : '')),
+    get: (key) => get('/kv/' + encodeURIComponent(key)),
+    put: (key, value, ttl) =>
+      request('/kv/' + encodeURIComponent(key) + (ttl ? '?ttl=' + encodeURIComponent(ttl) : ''), {
+        method: 'PUT',
+        headers: { 'content-type': 'text/plain' },
+        body: value,
+      }),
+    del: (key) => request('/kv/' + encodeURIComponent(key), { method: 'DELETE' }),
+  },
+
   rules: {
     /** 全站通用规则（兜底），对所有站点生效、优先级最低 */
     global: () => get('/rules/global'),

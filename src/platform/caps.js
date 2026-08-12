@@ -228,6 +228,17 @@ function looksLikeKV(binding) {
 }
 
 /**
+ * 是否配置了自部署 Webdis/Redis 后端（REDIS_URL）。
+ * 仅当未提供原生 KV 绑定时，才作为 KV 后端的替代来源。
+ * @param {Object} env 环境对象
+ * @returns {boolean} 是否可用 Redis 后端
+ */
+function hasRedisBackend(env) {
+  const url = env && (env.REDIS_URL || env.REDIS_URL_KV);
+  return typeof url === 'string' && url.trim() !== '';
+}
+
+/**
  * 判断 env 上某个绑定是否为「有效的 D1 绑定」。
  * D1 的标志是 prepare 方法。
  * @param {any} binding 待检测对象
@@ -295,6 +306,7 @@ export function detectCaps(env) {
     platform = 'unknown';
   }
 
+  const hasNativeKV = looksLikeKV(e.CDN_KV) || looksLikeKV(e.KV);
   const caps = Object.freeze({
     platform,
     hasEdgeCache,
@@ -302,7 +314,9 @@ export function detectCaps(env) {
     eoEdgeCache,
     hasSocket: detectSocket(isCf, platform),
     hasD1: looksLikeD1(e.CDN_DB) || looksLikeD1(e.DB) || looksLikeD1(e.D1),
-    hasKV: looksLikeKV(e.CDN_KV) || looksLikeKV(e.KV),
+    hasKV: hasNativeKV || hasRedisBackend(e),
+    // KV 实际后端类型：native（平台 KV）/ redis（自部署 Webdis）/ none
+    kvBackend: hasNativeKV ? 'native' : hasRedisBackend(e) ? 'redis' : 'none',
     // R2 直读回源：仅在 CF 运行时可用，检测常见绑定名
     hasR2:
       (platform === 'workers' || platform === 'pages') &&

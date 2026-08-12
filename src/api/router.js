@@ -33,6 +33,7 @@ import * as statsH from './handlers/stats.js';
 import * as systemH from './handlers/system.js';
 import * as configH from './handlers/config.js';
 import * as rulesH from './handlers/rules.js';
+import * as kvH from './handlers/kv.js';
 
 /**
  * 路由表。
@@ -98,6 +99,14 @@ const ROUTES = Object.freeze([
   // ---------- config ----------
   { method: 'GET', path: '/config/global', handler: (ctx) => configH.get(ctx) },
   { method: 'PUT', path: '/config/global', handler: (ctx) => configH.put(ctx) },
+
+  // ---------- KV 直读直写 + Redis/Webdis 连通性探测（无原生 KV 平台兜底）----------
+  // 注意顺序：/kv/ping 必须在 /kv/:key 之前，否则 'ping' 会被当成 key 匹配
+  { method: 'GET', path: '/kv/ping', handler: (ctx) => kvH.ping(ctx) },
+  { method: 'GET', path: '/kv', handler: (ctx) => kvH.listKeys(ctx) },
+  { method: 'GET', path: /^\/kv\/([^/]+)$/, paramName: 'key', handler: (ctx, g, key) => kvH.getKey(ctx, key) },
+  { method: 'PUT', path: /^\/kv\/([^/]+)$/, paramName: 'key', handler: (ctx, g, key) => kvH.putKey(ctx, key) },
+  { method: 'DELETE', path: /^\/kv\/([^/]+)$/, paramName: 'key', handler: (ctx, g, key) => kvH.delKey(ctx, key) },
 ]);
 
 /**

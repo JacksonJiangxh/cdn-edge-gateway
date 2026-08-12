@@ -165,6 +165,23 @@ KV 中管理面保存的值  >  内置默认 __panel
 
 > `CLOUD_PLATFORM` 是「平台识别」变量，**不是认证凭据**，也不进流水线。
 
+### 无原生 KV 的平台（EO Pages / ESA 等）：用自部署 Redis 兜底
+
+部分平台（如 EdgeOne Pages、ESA 等）**不提供 KV 绑定**，此时配置无法持久化。本项目支持通过 [Webdis](https://webd.is)（HTTP↔Redis 网关）读写你**自己部署的 Redis**，从而获得与平台 KV **完全同构**的持久化能力——配置、统计、缓存代次全部自动落到你的 Redis，上层代码无感。
+
+在「环境变量」里加一组即可（无需 KV 绑定）：
+
+| 变量 | 类型 | 说明 |
+|---|---|---|
+| `REDIS_URL` | 明文 | 你的 Webdis 基址，如 `https://redis.your-domain.com` 或 `http://127.0.0.1:7379` |
+| `REDIS_TOKEN` | **Secret / 密钥**（可选） | Webdis 前置鉴权时的 Bearer Token；**强烈建议配置**，否则你的 Redis 会被公网任意读写 |
+| `REDIS_PREFIX` | 明文（可选） | 键统一前缀，多应用共享一个 Redis 实例时用于隔离 |
+| `REDIS_TIMEOUT_MS` | 明文（可选） | 单次请求超时，默认 5000ms |
+
+> 生效逻辑：`getKV(env)` 优先用平台 `CDN_KV`/`KV` 绑定；**没有原生 KV 但检测到 `REDIS_URL` 时，自动切到 Webdis 后端**；两者都没有才降级为「无持久化（默认配置）」。系统信息页会显示当前 `kvBackend` 是 `native` / `redis` / `none`，并提供「测试连通性」按钮做读写回环验证。
+>
+> ⚠️ **安全红线**：Webdis 默认无鉴权且把 Redis 明文暴露到公网。自部署务必：① 仅监听内网或套 TLS；② 前置一层带密钥的反向代理（`REDIS_TOKEN` 即为此设）；③ 绝不把 `REDIS_URL` 指向裸露公网的 Webdis。详见 [13 · Redis/Webdis KV 兜底](./13-redis-kv.md)。
+
 ---
 
 ## 第 5 步：开启缓存开关（省额度）

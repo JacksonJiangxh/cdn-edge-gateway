@@ -43,6 +43,7 @@
  */
 
 import { encodeKey, decodeKey, encodePrefix } from './keyCodec.js';
+import { hasRedisConfig, createRedisKV } from './redis-kv.js';
 
 /**
  * @typedef {Object} KVListKey
@@ -383,7 +384,14 @@ function wrap(raw) {
  */
 export function getKV(env) {
   const raw = pickRawBinding(env);
-  return raw ? wrap(raw) : null;
+  if (raw) return wrap(raw);
+  // 平台未提供原生 KV 绑定时，降级到自部署的 Webdis/Redis 后端
+  // （EO Pages / ESA 等不具备 KV 的平台，可通过 REDIS_URL 指向自建 Redis）。
+  // 该后端与 KVLike 完全同构，store.js 无需任何改动即可获得持久化能力。
+  if (hasRedisConfig(env)) {
+    return createRedisKV(env);
+  }
+  return null;
 }
 
 /**

@@ -24,6 +24,8 @@ export async function info(ctx, global) {
     version: CONFIG_VERSION,
     platform: ctx.caps.platform,
     caps: ctx.caps,
+    kvBackend: ctx.caps.kvBackend || 'none',
+    redisConfigured: !!(ctx.env && (ctx.env.REDIS_URL || ctx.env.REDIS_URL_KV)),
     statsDriver: g?.statsDriver || 'none',
     statsEnabled: !!g?.statsEnabled,
     // 边缘缓存命中率。注意：仅统计当前 isolate，实例回收后归零，
@@ -172,6 +174,14 @@ function buildLimitations(ctx) {
       key: 'kv',
       message:
         '未检测到 KV 绑定，配置将无法持久化，当前运行在默认配置下。请先创建并绑定 KV Namespace',
+    });
+  }
+  // 后端为自部署 Redis（Webdis）时，给出明确的部署形态说明，避免用户误以为缺失。
+  if (caps.kvBackend === 'redis') {
+    list.push({
+      key: 'kvRedis',
+      message:
+        '当前使用自部署 Redis（Webdis）作为 KV 后端：未依赖平台 KV 绑定，配置持久化在您自己的 Redis 实例中。请在「系统信息 → Redis 存储」中测试连通性。',
     });
   }
   // JWT 密钥降级告警：未配置独立 JWT_SECRET 时，鉴权签名密钥将从 passwordHash 派生，
