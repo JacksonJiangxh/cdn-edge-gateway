@@ -80,7 +80,11 @@ export function applyRewrite(pathname, rewrite) {
       // 用户可配置的正则，必须容错：非法正则时保持原路径不变
       try {
         const re = new RegExp(rewrite.regexFrom || '', 'g');
-        out = out.replace(re, rewrite.regexTo ?? '');
+        // 注意：regexTo 是用户可配置字符串，作为 replace 第二参时其中的
+        // $& $1 $' $$ 等会被当作替换模式展开（内容注入/路径操纵风险）。
+        // 用函数形式回调，让替换文本按字面量处理，杜绝 $ 语义。
+        const to = rewrite.regexTo ?? '';
+        out = out.replace(re, () => to);
       } catch {
         out = pathname;
       }

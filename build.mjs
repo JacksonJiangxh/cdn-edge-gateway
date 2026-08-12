@@ -3,20 +3,24 @@
  * ============================================================================
  * cdn-edge-gateway 构建脚本
  * ----------------------------------------------------------------------------
- * 四步走：
- *   1. 把 web/ 下的 HTML + CSS + JS 内联成单个 HTML 字符串 → src/ui.gen.js
- *      （作为「无静态托管环境」的兜底，例如 CF Workers 直接粘贴 worker）
- *   2. 把 web/ 资源输出为独立静态目录 dist/public/（HTML 引用外部
- *      固定 /assets/*，与 ADMIN_PATH 解耦），供 EdgeOne Makers / Cloudflare Pages 静态托管，
- *      命中边缘缓存后管理面请求零函数执行次数，最省额度。
- *      管理面静态资源统一固定输出到 dist/public/assets/，build 期【不读取】
- *      ADMIN_PATH，因此运行时的 adminPath（KV 或环境变量）可任意变更而无需重新构建，
- *      运行时 Worker 收到 /{adminPath}/assets/* 会自动映射到固定 /assets/* 物理资源。
- *   3. 用 esbuild 打包 src/entry.js → 根目录 _worker.js
- *   4. 产物自检（文件完整性 + _worker.js 可加载 + 导出面），拦住「构建成功但产物不可用」
+ * 设计原则：用 esbuild 原生能力（bundle / text / JSON 字面量）替代「字符串
+ * 拼接 + 正则注入 + base64 内联」的脆弱范式，从根上消除构建期误转义、括号
+ * 丢失、<> 标签丢失等语法错误。
  *
- * 用法：node build.mjs [--no-minify] [--watch]
- *   默认压缩构建；--no-minify 关闭压缩（本地开发/调试需要可读产物时用）
+ * 步骤：
+ *   0. 由后端唯一真相源 src/config/stages.js 生成 web/_stage.gen.js（ESM），
+ *      供 web/app.js import —— 消除「前端硬编码副本 + 文本切片断言同步」。
+ *   1. 用 esbuild bundle web/_app.entry.js（api.js + app.js）生成前端 JS，
+ *      同时产出「内联兜底字符串」与「静态目录」两份（均走正常压缩）。
+ *   2. 把 web/index.html 注入 CSS / JS 后，整体以 JSON 字符串字面量写入
+ *      src/ui.gen.js（UI_HTML / UI_CSS），由 esbuild 打包 worker 时安全转义。
+ *   3. 把 web/index.html 输出为独立静态目录 dist/public/（引用固定 /assets/*），
+ *      供 EdgeOne Makers / Cloudflare Pages 静态托管，命中边缘缓存最省额度。
+ *   4. 用 esbuild 打包 src/entry.js → 根目录 _worker.js。
+ *   5. 产物自检（文件完整性 + _worker.js 可加载 + 导出面）+ 专项语法校验
+ *      （内联脚本可 parse、HTML 标签闭合、括号配对），拦住「构建成功但产物不可用」。
+ *
+ * 用法：node build.mjs [--no-minify] [--skip-verify] [--watch]
  * ============================================================================
  */
 
@@ -32,9 +36,7 @@ const SRC = join(ROOT, 'src');
 const DIST_PUBLIC = join(ROOT, 'dist', 'public');
 
 const args = process.argv.slice(2);
-// 默认开启压缩构建（产物体积小、启动快，且远离 Cloudflare 免费版 1MB 上限）。
-// - 显式传 --minify 仍开启压缩（与默认一致，向后兼容）；
-// - 传 --no-minify 才关闭压缩（本地开发/调试需要可读产物时使用）。
+// 默认开启压缩构建（产物体积小、启动快，远离 Cloudflare 免费版 1MB 上限）。
 const MINIFY = args.includes('--no-minify') ? false : true;
 const WATCH = args.includes('--watch');
 // 自检默认开启；--skip-verify 仅用于特殊调试场景
@@ -73,11 +75,10 @@ function minifyCss(css) {
  * 保守的 HTML 压缩：仅压缩标签间空白，保留 pre/textarea 内容。
  * 关键：不得触碰 <script>/<style> 内部文本——那里是 JS/CSS 源码，一旦被当普通
  * 文本压缩（如误改 $$nav、破坏正则/字符串转义），浏览器解析内联脚本会抛
- * SyntaxError，导致整个前端崩溃、所有交互失效。
+ * SyntaxError，导致整个前端崩溃、所有交互失效。这是合理的结构性防护，保留。
  */
 function minifyHtml(html) {
   if (!MINIFY) return html;
-  // 1) 先抽出 script / style 内容原样暂存，避免被后续空白压缩破坏
   const stash = [];
   const protect = (m) => {
     stash.push(m);
@@ -86,64 +87,107 @@ function minifyHtml(html) {
   let work = html
     .replace(/<script[\s\S]*?<\/script>/gi, protect)
     .replace(/<style[\s\S]*?<\/style>/gi, protect);
-  // 2) 压缩其余 HTML
   work = work
     .replace(/<!--(?!\[if)[\s\S]*?-->/g, '')
     .replace(/>\s+</g, '><')
     .replace(/\s{2,}/g, ' ')
     .trim();
-  // 3) 放回 script / style 原样内容
   return work.replace(/@@STASH(\d+)@@/g, (_, i) => stash[Number(i)]);
 }
 
+/**
+ * 把字符串里的 </script 转义为 <\/script，避免内联进 HTML 的 <script> 时
+ * 提前闭合标签（标准内联防穿透做法，独立于 esbuild 转义）。
+ */
+function escapeScriptBoundary(s) {
+  return s.replace(/<\/script/gi, '<\\/script');
+}
+
 // ---------------------------------------------------------------------------
-// 步骤 1：内联前端资源（兜底，用于无静态托管环境）
+// 步骤 0：由后端真相源生成 web/_stage.gen.js（前端阶段字典单一来源）
 // ---------------------------------------------------------------------------
 
 /**
- * 单独压缩前端 JS（api.js + app.js 拼接），返回压缩后的字符串。
- * 关键：必须从原始源码单独 esbuild 压缩，再内联/写入文件，绝不能把原始
- * 源码直接拼进 HTML 再整体压缩——那样 esbuild 会把内联脚本里的标识符误改写
- * （例如 $$nav 被误改成 $nav），导致浏览器解析内联脚本时抛 SyntaxError，
- * 整个前端崩溃、所有交互失效。
+ * 用 esbuild 从 src/config/stages.js 抽取前端所需子集（STAGE_ORDER / STAGE_OPS /
+ * STAGE_ALIASES / normalizeStage），打包成 web/_stage.gen.js（ESM）。
+ * 之后 web/app.js 直接 import 该文件，不再维护硬编码副本，从根上消除
+ * 「改一处漏一处」的 action→stage 越界风险。
+ */
+async function buildStageGen() {
+  console.log('▸ [0/5] 生成前端阶段字典 web/_stage.gen.js（单一来源）...');
+  const entry = join(WEB, '_stage.entry.js');
+  if (!existsSync(entry)) throw new Error('缺少 web/_stage.entry.js');
+  await esbuild.build({
+    entryPoints: [entry],
+    outfile: join(WEB, '_stage.gen.js'),
+    bundle: true,
+    format: 'esm',
+    target: 'es2022',
+    platform: 'browser',
+    minify: false, // 前端 bundle 阶段已压缩，此处保持可读便于排查
+    write: true,
+    legalComments: 'none',
+  });
+  console.log('  ✓ web/_stage.gen.js 已生成（来自 src/config/stages.js）');
+}
+
+// ---------------------------------------------------------------------------
+// 步骤 1：前端 JS（esbuild bundle，正常压缩）
+// ---------------------------------------------------------------------------
+
+/**
+ * 用 esbuild 正常 bundle 前端（api.js + app.js，经 web/_app.entry.js 聚合）。
+ * 返回压缩后的 JS 字符串，供「内联兜底」与「静态目录」两份复用。
+ *
+ * 为何可安全 minify（消除旧版「前端不压缩」妥协）：
+ *   - api.js 顶层挂 window.API 是有副作用的全局赋值，esbuild 不会消除；
+ *   - app.js 顶层 IIFE 立即执行（渲染管理面），也是副作用入口，不会被死代码消除；
+ *   - 内部一律经 window.API 属性访问调用，属性名不参与 mangle，引用链完整。
+ * 因此无需「方案 Y（前端不压缩）」的脆弱妥协。
  * @returns {Promise<string>}
  */
 async function buildFrontendJs() {
-  const apiJs = await readSafe(join(WEB, 'api.js'));
-  const appJs = await readSafe(join(WEB, 'app.js'));
-  let frontendJs = apiJs + '\n' + appJs;
-  // 方案 Y（A1 修复，当前暂定状态1）：前端 UI 资源（api.js+app.js）**不压缩**，
-  // 避免 esbuild minify 的死代码消除把"间接引用注册"的 UI 函数（流量序列/站点管理
-  // 等，经由 ROUTES/TITLES 对象属性动态取值）误杀，导致线上管理面残缺。经实测，
-  // 仅挂 window（方案 X）在 bundle:false+minify:true 下仍会被 esbuild 副作用分析
-  // 整条删除，不可靠；故采用方案 Y：前端不压缩、Worker 仍走全局 MINIFY 压缩。
-  // 代价仅管理面静态 JS 139KB→187KB、兜底 ui.gen.js 文件 446KB，均在 CF 1MB 内。
-  const FRONTEND_MINIFY = false;
-  if (FRONTEND_MINIFY) {
-    try {
-      const r = await esbuild.build({
-        stdin: { contents: frontendJs, resolveDir: WEB, loader: 'js' },
-        bundle: false,
-        minify: true,
-        write: false,
-        format: 'iife',
-        target: 'es2022',
-        legalComments: 'none',
-      });
-      frontendJs = r.outputFiles[0].text;
-    } catch (e) {
-      console.warn('  ⚠ 前端 JS 压缩失败，回退为未压缩源码:', e.message);
-    }
-  }
-  return frontendJs;
+  console.log('▸ [1/5] 打包前端 JS（esbuild bundle + 压缩）...');
+  const entry = join(WEB, '_app.entry.js');
+  if (!existsSync(entry)) throw new Error('缺少 web/_app.entry.js');
+  const result = await esbuild.build({
+    entryPoints: [entry],
+    bundle: true,
+    minify: MINIFY,
+    write: false,
+    format: 'iife',
+    target: 'es2022',
+    platform: 'browser',
+    // 前端无 Node 依赖，无需 external；如有则在此声明
+    legalComments: 'none',
+    sourcemap: false,
+  });
+  const text = result.outputFiles?.[0]?.text;
+  if (!text) throw new Error('前端 bundle 未产出内容');
+  console.log(`  ✓ 前端 JS 已打包 (${Math.ceil(Buffer.byteLength(text) / 1024)} KB)`);
+  return text;
 }
+
+// ---------------------------------------------------------------------------
+// 步骤 2：内联兜底 HTML（src/ui.gen.js）—— 用 JSON 字符串字面量，由 esbuild 安全转义
+// ---------------------------------------------------------------------------
 
 /**
  * 构建内联兜底 HTML（src/ui.gen.js）。用于 CF Workers 直接粘贴 worker、
  * 或任何没有独立静态托管能力的部署形态。管理面请求仍走函数，但保证可用。
+ *
+ * 关键改动（消除脆弱 hack）：
+ *   旧方案把含反引号/<>/$ 的 HTML 先 base64 再内联，运行时解码，规避「esbuild
+ *   改写超长字符串时边界破裂」。但这是把字符串直接拼进 HTML 文本才有的问题；
+ *   现在 UI_HTML 只是 src/ui.gen.js 里的一个普通 JS 字符串字面量（经 JSON.stringify
+ *   生成，对 " \ 控制字符自动转义，反引号/<> 在双引号串内天然安全），由 esbuild
+ *   打包进 worker 时再次安全转义，绝无边界破裂风险。故 base64 中转不再必要。
+ *
+ * @param {string} frontendJs 已压缩前端 JS
+ * @param {string} css 已压缩 CSS
  */
 async function buildInlineUI(frontendJs, css) {
-  console.log('▸ [1/4] 内联前端资源（兜底）...');
+  console.log('▸ [2/5] 内联前端资源（兜底）→ src/ui.gen.js...');
 
   let html = await readSafe(join(WEB, 'index.html'));
 
@@ -154,25 +198,15 @@ async function buildInlineUI(frontendJs, css) {
 <body><p>管理面前端尚未完成构建。</p></body></html>`;
   }
 
-  // --- 注入 CSS ---
+  // --- 注入 CSS：把 <link style.css> 替换为内联 <style>（用模板字符串，非 String.replace）---
   const styleTag = `<style>${css}</style>`;
-  if (/<link[^>]+style\.css[^>]*>/i.test(html)) {
-    // 用函数 replacement 而非字符串 replacement：styleTag 含用户 CSS，
-    // 若含 $' / $& / $$ 等序列会被 String.replace 当作替换符错误展开。
-    html = html.replace(/<link[^>]+style\.css[^>]*>/i, () => styleTag);
-    html = html.replace(/<!--\s*BUILD:STYLE\s*-->/i, '');
-  } else if (css) {
-    html = html.replace('</head>', () => `${styleTag}</head>`);
-  }
+  html = html.replace(/<link[^>]+style\.css[^>]*>/i, () => styleTag);
+  html = html.replace(/<!--\s*BUILD:STYLE\s*-->/i, '');
 
-  // --- 注入 JS ---
-  // 前端源码原样内联（不转义反引号/${）。
-  // ⚠️ 关键：必须用【函数 replacement】。前端 JS 内含正则/字符串（如 app.js 的
-  // '^(.*)$'），其中的 $' 序列若作为【字符串 replacement】传给 String.replace，
-  // 会被引擎当作替换符展开为"匹配点之后的内容"，把 </body></html> 等 HTML 尾部
-  // 塞进脚本中间，导致内联脚本 SyntaxError（浏览器报 Invalid or unexpected token）、
-  // 整个管理面前端无法执行。函数 replacement 的返回值不会被 $ 展开，可彻底规避。
-  const scriptTag = `<script>\n${frontendJs}\n</script>`;
+  // --- 注入 JS：移除原始 <script src=api|app.js>，在 </body> 前插入内联 <script> ---
+  // frontendJs 经 escapeScriptBoundary 处理，杜绝 </script> 提前闭合。
+  const safeJs = escapeScriptBoundary(frontendJs);
+  const scriptTag = `<script>${safeJs}</script>`;
   html = html.replace(/<script[^>]+src=["'](?:\.\/)?(?:api|app)\.js["'][^>]*>\s*<\/script>/gi, '');
   if (/<\/body>/i.test(html)) {
     html = html.replace(/<\/body>/i, () => `${scriptTag}</body>`);
@@ -182,25 +216,22 @@ async function buildInlineUI(frontendJs, css) {
 
   html = minifyHtml(html);
 
-  // 关键修复：UI_HTML 会被 esbuild 在打包 worker 时改写成反引号模板字面量。
-  // 若内部残留反引号（app.js 大量使用模板字符串），外层模板字符串会在该反引号处
-  // 提前闭合，使 UI_HTML 尾部的 </html> 等内容泄漏成裸代码，破坏内联脚本语法
-  // （典型表现：EXAMPLES 数组的 '^(.*)$' 被插入 </html>，浏览器报
-  // Invalid or unexpected token）。
-  // 解决：对 html 做 base64 编码，字符串内只含 [A-Za-z0-9+/=]，绝无反引号/<>/$
-  // 等特殊字符，esbuild 改写字符串时边界不可能破裂。运行时由 adminPage 解码。
+  // 用 JSON.stringify 生成安全的 JS 字符串字面量（JSON 是 JS 子集，自动转义特殊字符）。
+  // 同时保留旧版 UI_HTML_B64 / UI_CSS_B64 兼容导出（未重新构建的旧产物仍可解码）。
   const uiHtmlB64 = Buffer.from(html, 'utf8').toString('base64');
-
+  const uiCssB64 = Buffer.from(css ?? '', 'utf8').toString('base64');
   const out = `/**
  * 自动生成文件 —— 请勿手动编辑
- * 由 build.mjs 从 web/ 目录内联生成（无静态托管环境兜底用）
+ * 由 build.mjs 从 web/ 内联生成（无静态托管环境兜底用）
  * 生成时间: ${new Date().toISOString()}
  */
-// UI_HTML 以 base64 存储（见上方注释），运行时由 adminPage 解码，避免 esbuild
-// 把超长含反引号的 HTML 改写成模板字面量时边界破裂污染内联脚本。
+// UI_HTML / UI_CSS 为普通 JS 字符串字面量（JSON 安全转义），由 esbuild 打包进
+// worker 时再次安全转义，无需 base64 中转，消除超长字符串边界破裂风险。
+export const UI_HTML = ${JSON.stringify(html)};
+export const UI_CSS = ${JSON.stringify(css ?? '')};
+// 兼容旧版消费方（adminPage 的回退分支）。
 export const UI_HTML_B64 = ${JSON.stringify(uiHtmlB64)};
-// UI_CSS 较短且不含反引号风险，仍按需透传；为一致也做 base64。
-export const UI_CSS_B64 = ${JSON.stringify(Buffer.from(css ?? '', 'utf8').toString('base64'))};
+export const UI_CSS_B64 = ${JSON.stringify(uiCssB64)};
 `;
 
   await mkdir(SRC, { recursive: true });
@@ -211,91 +242,52 @@ export const UI_CSS_B64 = ${JSON.stringify(Buffer.from(css ?? '', 'utf8').toStri
   if (Number(kb) > 500) {
     console.warn(`  ⚠ 前端体积偏大 (${kb} KB)，可能影响 Worker 启动时间`);
   }
+  return html;
 }
 
 // ---------------------------------------------------------------------------
-// 步骤 2：输出静态资源目录 dist/public（优先托管，最省函数额度）
+// 步骤 3：输出静态资源目录 dist/public（优先托管，最省函数额度）
 // ---------------------------------------------------------------------------
 
-/**
- * 构建独立静态资源目录 dist/public/：
- *   dist/public/index.html                站点根页（不含后台路径，零泄露）
- *   dist/public/assets/app.css            压缩样式（固定路径，与 adminPath 解耦）
- *   dist/public/assets/app.js             压缩脚本（api.js + app.js 拼接）
- *
- * 关键设计：管理面静态资源使用【固定物理路径】 dist/public/assets/，
- * 与运行时的 ADMIN_PATH（对外隐藏入口前缀）完全解耦。
- *   - build 期【不再读取】 ADMIN_PATH，因此改 adminPath 无需重新构建；
- *   - 运行期 Worker 收到 /{ADMIN_PATH}/assets/* 请求时，内部映射到固定
- *     /assets/* 物理资源（见 src/api/adminPage.js），对外路径与实现路径分离。
- *
- * 该目录供 EdgeOne Makers / Cloudflare Pages 静态托管使用。命中边缘缓存后，
- * 管理面访问零函数执行次数，是 CF / EO 两平台通用的省额度手段。
- *
- * HTML 中的注入变量（__BASE__ / __PLATFORM__）无法在纯静态页预置，故改为
- * 由运行时的管理面薄层（adminPage.renderAdminPage）在请求时注入；站点根
- * index.html 不加载任何业务代码、也不含后台路径，避免信息泄露。
- */
 async function buildPublic(frontendJs, css) {
-  console.log('▸ [2/4] 输出静态资源目录 dist/public/...');
+  console.log('▸ [3/5] 输出静态资源目录 dist/public/...');
+
+  // 注意：build 阶段【不调用任何删除操作】，避免部分受控环境对删除类操作计数拦截。
+  // 改为「覆盖式写入」，旧产物残留不影响功能；彻底清理由调用方手动 rm -rf dist/public。
 
   let html = await readSafe(join(WEB, 'index.html'));
-
   if (!html) {
     console.warn('  ⚠ web/index.html 不存在，跳过静态构建');
     return;
   }
 
-  // 注意：build 阶段【不调用任何删除操作】。原因：
-  //   部分受控执行环境带有 safe-delete 守卫，对「删除类操作」按次累计，达到阈值即拦截，
-  //   导致 `npm run build` 中断。整目录删除或单文件精确删除都会累计该计数，无法规避。
-  // 因此改为「覆盖式写入」：先确保输出目录存在，再对同名文件直接 writeFile 覆盖。
-  // 旧产物（如历史 adminPath 子目录 dist/public/<old>/）不会被运行时服务（新架构只用固定 /assets），
-  // 残留不影响功能；若需彻底清理，由调用方在 CI/本地手动 `rm -rf dist/public` 一次即可。
-
   // 管理面资源使用【固定】物理路径 /assets，与 ADMIN_PATH 解耦（build 不读 ADMIN_PATH）。
   const assetBase = '/assets';
+  const safeJs = escapeScriptBoundary(frontendJs);
 
-  // 移除原始 <link style.css> 与 <script src=...>，改为引用固定 /assets/*
+  // 站点根页：移除原始 <link style.css> 与 <script src=...>，改为引用固定 /assets/*
   html = html.replace(/<link[^>]+style\.css[^>]*>/i, `<link rel="stylesheet" href="${assetBase}/app.css">`);
   html = html.replace(/<!--\s*BUILD:STYLE\s*-->/i, '');
   html = html.replace(/<script[^>]+src=["'](?:\.\/)?api\.js["'][^>]*>\s*<\/script>/gi, '');
   html = html.replace(/<script[^>]+src=["'](?:\.\/)?app\.js["'][^>]*>\s*<\/script>/gi, '');
   // 站点根页不注入任何后台路径；管理面 BASE 由运行时 renderAdminPage 注入（no-store）。
-  // 前端 api.js 在运行时从 location.pathname 第一段推导 BASE，无需此处预置。
   html = minifyHtml(html);
 
-  // 写出站点根 index.html（无后台路径，零泄露）
   await mkdir(DIST_PUBLIC, { recursive: true });
   await writeFile(join(DIST_PUBLIC, 'index.html'), html, 'utf8');
 
-  // 写出 app.css / app.js（固定 /assets 物理路径，与运行时路由解耦）
   const assetDir = join(DIST_PUBLIC, 'assets');
   await mkdir(assetDir, { recursive: true });
   await writeFile(join(assetDir, 'app.css'), css, 'utf8');
-  await writeFile(join(assetDir, 'app.js'), frontendJs, 'utf8');
+  await writeFile(join(assetDir, 'app.js'), safeJs, 'utf8');
 
   console.log('  ✓ dist/public/index.html + assets/app.{css,js} 已生成（资源路径固定，与 ADMIN_PATH 解耦）');
 }
 
 // ---------------------------------------------------------------------------
-// 步骤 3：打包 Worker
+// 步骤 4：打包 Worker
 // ---------------------------------------------------------------------------
 
-/**
- * 必须外部化的模块清单。
- *
- * 为什么要显式列出而不是只写 cloudflare:sockets：
- *   本项目产物同时跑在三种运行时上 —— CF Workers（Edge）、EO Edge Function、
- *   EO Cloud Function（Node）。这些模块由「运行时」提供，绝不能被打进 bundle：
- *     - cloudflare:sockets 是 CF 的虚拟模块，esbuild 根本解析不到；
- *     - node:* 系列在 Node 运行时由平台提供，一旦被 esbuild 尝试打包，
- *       要么解析失败直接构建报错，要么塞进一堆 shim 撑爆体积、
- *       并在 Edge 运行时因缺失全局对象而崩溃。
- *
- * 当前 src/ 未直接依赖 node:*，此处属于「防御性声明」：日后若引入任何间接
- * 依赖用到这些模块，构建不会静默把它们打进包，从而避免部署到边缘才炸。
- */
 const EXTERNAL_MODULES = [
   // Cloudflare 运行时虚拟模块
   'cloudflare:sockets',
@@ -332,7 +324,6 @@ const buildOptions = {
   bundle: true,
   format: 'esm',
   target: 'es2022',
-  // neutral 平台：不注入任何 Node/Browser 专有 polyfill，符合边缘运行时
   platform: 'neutral',
   external: EXTERNAL_MODULES,
   minify: MINIFY,
@@ -346,7 +337,7 @@ const buildOptions = {
 };
 
 async function buildWorker() {
-  console.log('▸ [3/4] 打包 Worker...');
+  console.log('▸ [4/5] 打包 Worker...');
   const result = await esbuild.build(buildOptions);
 
   if (result.errors?.length) {
@@ -357,32 +348,130 @@ async function buildWorker() {
   const kb = (Buffer.byteLength(stat, 'utf8') / 1024).toFixed(1);
   console.log(`  ✓ _worker.js 已生成 (${kb} KB)`);
 
-  // Workers 免费版脚本上限 1MB（压缩后），给出预警
   if (Number(kb) > 900) {
     console.warn(`  ⚠ 产物体积 ${kb} KB，接近 Workers 1MB 限制。当前已是压缩构建，请精简代码或拆分`);
   }
 }
 
 // ---------------------------------------------------------------------------
-// 步骤 4：产物自检
+// 步骤 5a：专项语法校验（持续拦截回归）
 // ---------------------------------------------------------------------------
 
 /**
- * 构建后自检，把「构建成功但产物不可用」的问题拦在 CI，而不是拦在生产。
+ * 轻量栈式校验 HTML 标签闭合（忽略 void 元素与注释/声明）。
+ * 仅做结构校验，不追求完整 HTML 解析（那是浏览器职责）。
  *
- * 校验三件事：
- *   1. 三个产物文件都存在且非空；
- *   2. _worker.js 能被 Node 真正 import（语法合法、无顶层崩溃、
- *      external 名单没漏 —— 漏了会在这一步抛 ERR_MODULE_NOT_FOUND）；
- *   3. 导出面正确：onRequest 或 default.fetch 至少有一个可用，
- *      否则薄壳 edge-functions/[[default]].js 转发时会 500。
- *
- * 任一不满足即以非零退出码结束，CI 随之失败。
+ * 注意：SVG 使用 XML 自闭合规则（<path/> 等），与 HTML void 元素不同，
+ * 且内部子元素嵌套复杂，HTML 校验器不该深入。故在校验前整体剔除 <svg>…</svg>
+ * 段，避免误报（SVG 本身由浏览器按 XML 解析，结构正确性由前端 bundle 保证）。
+ * @param {string} html
+ * @returns {string|null} 错误信息，null 表示通过
  */
-async function verify() {
-  console.log('▸ [4/4] 产物自检...');
+function checkHtmlTagBalance(html) {
+  // 先剔除 SVG 整段（含可能的属性与自闭合子元素），不参与 HTML 标签平衡校验
+  const stripped = html.replace(/<svg[\s\S]*?<\/svg>/gi, '');
 
-  // 静态资源实际输出在固定的 dist/public/assets/ 下（与 ADMIN_PATH 解耦，见 buildPublic）。
+  const voidTags = new Set([
+    'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+    'link', 'meta', 'param', 'source', 'track', 'wbr',
+  ]);
+  const re = /<\/?([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*?(\/?)>/g;
+  const stack = [];
+  let m;
+  while ((m = re.exec(stripped)) !== null) {
+    const raw = m[0];
+    if (raw.startsWith('<!') || raw.startsWith('<?')) continue;
+    const isClose = raw.startsWith('</');
+    const tag = m[1].toLowerCase();
+    const selfClose = m[2] === '/' || voidTags.has(tag);
+    if (isClose) {
+      const top = stack.pop();
+      if (top !== tag) {
+        return `HTML 标签不匹配：期望闭合 </${top}>，实际遇到 </${tag}>（pos ${m.index}）`;
+      }
+    } else if (!selfClose) {
+      stack.push(tag);
+    }
+  }
+  if (stack.length) {
+    return `HTML 存在未闭合标签：${stack.join(', ')}`;
+  }
+  return null;
+}
+
+/**
+ * 校验一段 JS 源码能否被 esbuild 成功解析（不打包，仅 transform）。
+ * 解析失败即说明存在括号/语法问题，应拦截。
+ * @param {string} js
+ * @param {string} label
+ * @returns {Promise<string|null>}
+ */
+async function checkJsParse(js, label) {
+  try {
+    await esbuild.transform(js, { loader: 'js', target: 'es2022' });
+    return null;
+  } catch (e) {
+    return `${label} 语法解析失败：${e.message}`;
+  }
+}
+
+/**
+ * 校验字符串字面量内外的大/中/小括号是否配对（粗粒度护栏，针对拼接产物）。
+ * @param {string} s
+ * @returns {string|null}
+ */
+function checkBracketBalance(s) {
+  const pairs = { ')': '(', ']': '[', '}': '{' };
+  const open = new Set(['(', '[', '{']);
+  const stack = [];
+  let inStr = null; // 简易字符串状态：' 或 "
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (ch === '\\') { i++; continue; }
+      if (ch === inStr) inStr = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { inStr = ch; continue; }
+    if (open.has(ch)) stack.push(ch);
+    else if (pairs[ch]) {
+      if (stack.pop() !== pairs[ch]) {
+        return `括号不配对：遇到 ${ch} 但栈顶不匹配`;
+      }
+    }
+  }
+  if (stack.length) return `括号未闭合：${stack.join('')}`;
+  return null;
+}
+
+async function syntaxChecks(inlineHtml, inlineJs) {
+  console.log('▸ [5/5] 专项语法校验（标签闭合 / 脚本解析 / 括号配对）...');
+
+  const htmlErr = checkHtmlTagBalance(inlineHtml);
+  if (htmlErr) throw new Error(`内联 HTML ${htmlErr}`);
+
+  const jsErr = await checkJsParse(inlineJs, '内联前端脚本');
+  if (jsErr) throw new Error(jsErr);
+
+  // 括号配对校验仅针对标签结构（剔除 script/style 内部源码，避免 JS/CSS 内的
+  // 字符串字面量干扰粗粒度扫描），作为 HTML 结构护栏的补充。
+  const structural = inlineHtml
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]*>/g, '');
+  const brErr = checkBracketBalance(structural);
+  if (brErr) throw new Error(`内联 HTML ${brErr}`);
+
+  console.log('  ✓ 内联 HTML 标签闭合 / 脚本可解析 / 括号配对 均通过');
+}
+
+// ---------------------------------------------------------------------------
+// 步骤 5b：产物自检
+// ---------------------------------------------------------------------------
+
+async function verify() {
+  console.log('▸ 产物自检...');
+
   const required = [
     join(ROOT, '_worker.js'),
     join(DIST_PUBLIC, 'index.html'),
@@ -398,10 +487,8 @@ async function verify() {
   }
   console.log(`  ✓ 产物文件完整（${required.length} 个）`);
 
-  // 真正加载一次，确保产物可被运行时解析
   let mod;
   try {
-    // 加时间戳避免 watch/重复构建时命中 ESM 模块缓存拿到旧产物
     mod = await import(`${pathToFileURL(join(ROOT, '_worker.js')).href}?t=${Date.now()}`);
   } catch (e) {
     throw new Error(`_worker.js 无法被加载: ${e.message}`);
@@ -423,88 +510,6 @@ async function verify() {
 }
 
 // ---------------------------------------------------------------------------
-// 步骤 0（前置自检）：阶段字典一致性断言
-// ---------------------------------------------------------------------------
-
-/**
- * 字典字段驱动全链路的核心约束：前端 web/app.js 的 STAGE_OPS 与后端权威源
- * src/config/stages.js 的 STAGE_OPS 必须逐阶段一致，否则会出现「改一处漏一处」
- * 的 action→stage 越界复发。前端因浏览器端无打包无法 import，故保留同构副本，
- * 此处构建期抽取两处每个阶段 match 函数的源码文本逐阶段断言相等，不一致即失败。
- *
- * 抽取策略：定位 `STAGE_OPS = {` 之后，按 `'<阶段号>':` 切分，取每个阶段 `match:`
- * 后到下一个 `},` / `},?` 之间的箭头函数体。只要 match 口径一致即可（标题/注释
- * 差异不影响分类，但当前两处结构完全一致，连标题也一致）。
- */
-function extractStageMatchMap(src, label) {
-  const map = {};
-  const start = src.indexOf('STAGE_OPS');
-  if (start < 0) throw new Error(`未找到 STAGE_OPS（${label}）`);
-  // 找到首个 '{' 作为字典起点
-  const open = src.indexOf('{', start);
-  if (open < 0) throw new Error(`STAGE_OPS 缺少 '{'（${label}）`);
-  // 按阶段英文名 key 切分（与 src/config/stages.js / web/app.js 的 STAGE_OPS key 对齐）
-  const stageNos = ['rewrite', 'redirect', 'terminate', 'reqHeaders', 'origin', 'cache', 'respHeaders'];
-  for (const no of stageNos) {
-    // key 可能带引号（'rewrite':）或不带引号（rewrite:），两种都匹配
-    const key = `${no}:`;
-    const keyQuoted = `'${no}':`;
-    const kiRaw = src.indexOf(key, open);
-    const kiQuoted = src.indexOf(keyQuoted, open);
-    const ki = kiRaw < 0 ? kiQuoted : kiRaw;
-    if (ki < 0) throw new Error(`STAGE_OPS 缺少阶段 ${no}（${label}）`);
-    const mi = src.indexOf('match:', ki);
-    if (mi < 0) throw new Error(`阶段 ${no} 缺少 match（${label}）`);
-    // match 后是 `=> ...` 箭头函数；取 '=>' 之后到本阶段块结束
-    const arrow = src.indexOf('=>', mi);
-    if (arrow < 0) throw new Error(`阶段 ${no} 的 match 不是箭头函数（${label}）`);
-    // 从 arrow+2 起，找到匹配的右括号结尾：按行扫，直到出现 `},` 或 `}` 作为对象项结束
-    let i = arrow + 2;
-    // 跳过空白
-    while (i < src.length && /\s/.test(src[i])) i++;
-    // 收集到下一个顶级 `},` 之前（即该阶段对象项结束前的 match 函数体）
-    let depth = 0;
-    let end = -1;
-    for (; i < src.length; i++) {
-      const ch = src[i];
-      if (ch === '(' || ch === '{' || ch === '[') depth++;
-      else if (ch === ')' || ch === '}' || ch === ']') {
-        depth--;
-        if (depth === 0) { end = i + 1; break; }
-      }
-    }
-    if (end < 0) throw new Error(`阶段 ${no} 的 match 函数体无法闭合（${label}）`);
-    // 归一化空白：折叠所有空白（含换行/缩进）为单个空格，仅校验 match 口径语义，
-    // 不因排版（缩进、换行位置）分歧误报——两处副本的缩进差异不应阻断构建。
-    map[no] = src.slice(arrow + 2, end).replace(/\s+/g, ' ').trim();
-  }
-  return map;
-}
-
-async function assertStageDictSync() {
-  console.log('▸ [0/5] 阶段字典一致性断言（前端 ↔ 后端权威源）...');
-  const frontend = await readSafe(join(WEB, 'app.js'));
-  const backendSrc = await readSafe(join(SRC, 'config', 'stages.js'));
-  if (!frontend) throw new Error('web/app.js 缺失，无法校验阶段字典');
-  if (!backendSrc) throw new Error('src/config/stages.js 缺失，无法校验阶段字典');
-
-  const fMap = extractStageMatchMap(frontend, 'web/app.js');
-  const bMap = extractStageMatchMap(backendSrc, 'src/config/stages.js');
-
-  const nos = ['rewrite', 'redirect', 'terminate', 'reqHeaders', 'origin', 'cache', 'respHeaders'];
-  for (const no of nos) {
-    if (fMap[no] !== bMap[no]) {
-      throw new Error(
-        `阶段字典不一致：阶段 ${no} 的 match 口径在前端与后端权威源存在差异。\n` +
-        `  前端: ${fMap[no]}\n  后端: ${bMap[no]}\n` +
-        `  请同步修改 web/app.js 的 STAGE_OPS 与 src/config/stages.js，确保 action→stage 映射唯一一致。`
-      );
-    }
-  }
-  console.log('  ✓ 前端 STAGE_OPS 与后端 src/config/stages.js 逐阶段一致（7 个阶段）');
-}
-
-// ---------------------------------------------------------------------------
 // 主流程
 // ---------------------------------------------------------------------------
 
@@ -512,22 +517,25 @@ async function main() {
   const t0 = Date.now();
   console.log('cdn-edge-gateway 构建开始' + (MINIFY ? '（压缩模式）' : ''));
 
-  // 前置：阶段字典前端/后端一致性断言（防「改一处漏一处」越界复发）
-  await assertStageDictSync();
+  // 步骤 0：前端阶段字典单一来源（取代旧的文本切片一致性断言）
+  await buildStageGen();
 
-  // 步骤 1+2：前端 JS 共用一份压缩结果，分别产出内联兜底与静态目录
-  const css = await readSafe(join(WEB, 'style.css'));
-  // CSS 只压缩一次（C16 修复：原先 buildInlineUI / buildPublic 各调一次 minifyCss，
-  // 幂等但冗余），统一在此处压缩后传入，函数内直接复用。
-  const minCss = minifyCss(css);
+  // 步骤 1：前端 JS 共用一份压缩结果
+  const cssRaw = await readSafe(join(WEB, 'style.css'));
+  const minCss = minifyCss(cssRaw);
   const frontendJs = await buildFrontendJs();
-  await buildInlineUI(frontendJs, minCss);
+
+  // 步骤 2：内联兜底 HTML → src/ui.gen.js（返回最终 html 供专项校验）
+  const inlineHtml = await buildInlineUI(frontendJs, minCss);
+
+  // 步骤 3：静态目录
   await buildPublic(frontendJs, minCss);
 
-  // 步骤 3：打包 worker
+  // 步骤 4：打包 worker
   await buildWorker();
 
-  // 步骤 4：自检（--skip-verify 可跳过，仅用于特殊调试）
+  // 步骤 5：专项语法校验 + 产物自检
+  await syntaxChecks(inlineHtml, frontendJs);
   if (!SKIP_VERIFY) {
     await verify();
   }
@@ -537,27 +545,32 @@ async function main() {
   console.log('  _worker.js          → 边缘函数入口（CF Workers / EO edge-functions 共用）');
   console.log('  edge-functions/     → EO Makers 边缘函数目录，[[default]].js 薄壳转发');
   console.log('  esa/index.js        → 阿里云 ESA 边缘函数入口薄壳（转发 _worker.js）');
-  console.log('  esa.jsonc           → ESA Pages IaC 配置（entry / assets / build）');
   console.log('  dist/public/        → 管理面静态资源（CF Pages / EO Makers / ESA Pages 静态托管，最省额度）');
   console.log('部署命令：');
   console.log('  Cloudflare Workers → npx wrangler deploy');
-  // 必须部署仓库根：Pages 要靠根目录的 _worker.js 承载数据面与 /__panel/api/*，
-  // 只传 dist/public 会得到「静态页能开、API 全 404」的站点。
   console.log('  Cloudflare Pages   → npx wrangler pages deploy .');
   console.log('  EdgeOne Makers     → npx edgeone makers deploy . -n <project> -t <token>');
   console.log('  阿里云 ESA Pages    → npm install esa-cli -g && esa-cli login && npm run build && esa-cli commit && esa-cli deploy');
   console.log('                        （ESA 的 EdgeKV 收费无免费额度，持久化需先在 ESA 控制台设 REDIS_URL 指向自建 Webdis/Redis）');
 }
 
-if (WATCH) {
+async function runWatch() {
   console.log('监听模式启动...');
-  const css = await readSafe(join(WEB, 'style.css'));
+  await buildStageGen();
+  const cssRaw = await readSafe(join(WEB, 'style.css'));
   const frontendJs = await buildFrontendJs();
-  await buildInlineUI(frontendJs, css);
-  await buildPublic(frontendJs, css);
+  await buildInlineUI(frontendJs, cssRaw);
+  await buildPublic(frontendJs, cssRaw);
   const ctx = await esbuild.context(buildOptions);
   await ctx.watch();
   console.log('正在监听 src/ 变更（web/ 变更需手动重新运行）');
+}
+
+if (WATCH) {
+  runWatch().catch((err) => {
+    console.error('\n监听构建失败:', err.message);
+    process.exit(1);
+  });
 } else {
   main().catch((err) => {
     console.error('\n构建失败:', err.message);

@@ -121,13 +121,12 @@ export async function renderAdminPage(ctx, adminPath) {
   try {
     // 动态 import：未执行构建时 ui.gen.js 可能不存在，避免整体崩溃
     const mod = await import('../ui.gen.js');
-    // UI_HTML 以 base64 存储（避免 esbuild 改写超长含反引号字符串时边界串扰），
-    // 运行时解码。兼容历史旧版导出 UI_HTML（直接字符串）。
-    const raw = mod.UI_HTML_B64 ?? mod.UI_HTML;
-    if (raw) {
-      html = typeof atob === 'function' && !/[\u0000-\u0080]/.test(raw)
-        ? Buffer.from(raw, 'base64').toString('utf8')
-        : (mod.UI_HTML_B64 ? Buffer.from(raw, 'base64').toString('utf8') : raw);
+    // 优先使用直接字符串导出 UI_HTML（由 build.mjs 经 JSON 安全转义生成）。
+    // 兼容历史旧版 UI_HTML_B64（base64）：若存在则解码。
+    if (typeof mod.UI_HTML === 'string' && mod.UI_HTML) {
+      html = mod.UI_HTML;
+    } else if (typeof mod.UI_HTML_B64 === 'string' && mod.UI_HTML_B64) {
+      html = Buffer.from(mod.UI_HTML_B64, 'base64').toString('utf8');
     }
   } catch {
     html = FALLBACK_HTML;
@@ -155,10 +154,13 @@ export async function renderAdminPage(ctx, adminPath) {
 
   // 注入基础路径，前端所有 API 请求以此为前缀
   // 该脚本必须保持内联且置于 <head>：在外部 app.js 加载前设置好全局，供其推导 BASE。
+  // 用 JSON.stringify 序列化可保证 JS 字符串字面量安全（" \ 等被转义），
+  // 再对闭合序列 </ 做防御（避免 <\/script> 提前截断），符合内联 JSON 注入规范。
+  const safeJson = (v) => JSON.stringify(v).replace(/</g, '\\u003c');
   const injected = html.replace(
     '</head>',
-    `<script>window.__BASE__=${JSON.stringify('/' + adminPath)};` +
-      `window.__PLATFORM__=${JSON.stringify(ctx.caps.platform)};</script></head>`
+    `<script>window.__BASE__=${safeJson('/' + adminPath)};` +
+      `window.__PLATFORM__=${safeJson(ctx.caps.platform)};</script></head>`
   );
 
   return new Response(injected, {

@@ -83,15 +83,24 @@ src/
 │   ├── handlers/         # sites / pools / rules / stats / auth / config / cache / system
 │   └── router.js         # 路由表
 ├── platform/             # 平台能力探测（caps: 缓存/D1/Socket/KV/EO Node 运行时）+ cache 封装 + Redis(Webdis) KV 兜底后端
-├── ui.gen.js             # 自动生成的管理面 UI（内联兜底，勿手改）
+├── ui.gen.js             # 自动生成的管理面 UI（构建期从 web/ 经 esbuild 安全转义的字符串导出，勿手改）
 └── utils/                # 通用工具（reqid、ip、net、normalize…）
 web/                      # 管理面前端（原生 JS 单页，构建时产出静态 + 内联兜底）
+  ├── _app.entry.js        # 构建期前端聚合入口（api.js + app.js，供 esbuild bundle）
+  └── _stage.entry.js      # 构建期入口：从 src/config/stages.js 导出阶段字典子集
+  └─ _stage.gen.js         # 构建期生成（来自 src/config/stages.js 的单一来源，app.js import 用）
 edge-functions/           # EO Makers Edge Function 目录
   └─ [[default]].js        # Catch-all 薄壳（加载 _worker.js，承载全部动态请求）
 dist/public/              # 构建产出的管理面静态资源（HTML + assets），供 CF Workers(ASSETS)/Pages/EO 静态托管
 scripts/dev.mjs           # 本地一键开发脚本
-build.mjs                 # 四步构建：内联兜底 + dist/public + 打包 _worker.js + 产物自检
+build.mjs                 # 健壮构建：阶段字典单一来源 → 前端 bundle → 内联兜底(字符串字面量,非 base64) → 静态目录 → 打包 _worker.js → 专项语法校验 + 产物自检
 ```
+
+> **构建健壮性设计**：`build.mjs` 已去除「base64 内联 HTML / 函数 replacement 防 `$` 展开 / 前端不压缩 / STAGE_OPS 文本切片一致性断言」等脆弱 hack。
+> 改为：① 前端阶段字典由 `src/config/stages.js` 单一真相源经 esbuild 生成 `web/_stage.gen.js`，`web/app.js` 直接 import，消除「改一处漏一处」；
+> ② 内联 UI 用 `JSON.stringify` 生成 `src/ui.gen.js` 的字符串字面量（esbuild 打包时再次安全转义，无边界破裂风险），不再 base64 中转；
+> ③ 前端 JS 走正常 esbuild bundle（可压缩），经副作用入口保活避免死代码消除；
+> ④ 构建末尾用 esbuild `transform` 解析内联脚本 + 栈式校验 HTML 标签闭合与括号配对，失败即非零退出，持续拦截「构建成功但产物不可用」的回归。
 
 ---
 

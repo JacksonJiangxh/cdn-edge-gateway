@@ -11,8 +11,16 @@
  *
  * 本文件只负责「交互 + 视图渲染」，一切数据走 window.API。
  * 约定：元素显隐统一使用 [hidden] 属性（标准 HTML 语义）。
+ *
+ * 阶段字典（STAGE_ORDER / STAGE_OPS / STAGE_ALIASES / normalizeStage）由构建期
+ * 从后端唯一真相源 src/config/stages.js 生成 web/_stage.gen.js 注入，本文件
+ * 不再维护副本（消除「改一处漏一处」）。部署前必须经 build 生成该文件。
  * ============================================================================
  */
+
+// 构建期生成：与后端 src/config/stages.js 逐字同源（见 build.mjs）。
+// eslint-disable-next-line import/no-unresolved
+import { STAGE_ORDER, STAGE_OPS, STAGE_ALIASES, normalizeStage } from './_stage.gen.js';
 
 (function () {
   'use strict';
@@ -379,38 +387,9 @@
   //      就唯一确定了。规则落库时必带 r.stage，渲染/筛选/合并均以 r.stage 为准。
   //      反推（按 STAGE_ORDER 顺序猜）不可控（曾致 ⑪ 抢 ⑯ 越界），已彻底弃用。
   // ─────────────────────────────────────────────────────────────────────────
-  const STAGE_ORDER = ['rewrite', 'redirect', 'terminate', 'reqHeaders', 'origin', 'cache', 'respHeaders'];
-  const STAGE_OPS = {
-    rewrite: { title: 'URL 重写', en: 'rewrite', owner: '路由规则抽屉 · URL 重写', icon: '✂️', order: 1, allowedOps: ['rewrite'], hideTargetPool: true,
-      match: (a) => !!(a.rewrite && a.rewrite.type && a.rewrite.type !== 'none') },
-    redirect: { title: '重定向规则', en: 'redirect', owner: '路由规则抽屉 · 重定向', icon: '↪️', order: 2, allowedOps: ['redirect'], hideTargetPool: true,
-      match: (a) => !!(a.redirect && a.redirect.enabled) },
-    terminate: { title: '强制 HTTPS / 直接响应（终止型）', en: 'terminate', owner: '路由规则抽屉 · 强制HTTPS / 直接响应', icon: '🔒', order: 3, allowedOps: ['forceHttps', 'directResponse'], hideTargetPool: true,
-      match: (a) => !!(a.forceHttps || (a.directResponse && a.directResponse.enabled)) },
-    reqHeaders: { title: '修改请求头', en: 'reqHeaders', owner: '路由规则抽屉 · 修改请求头', icon: '📤', order: 4, allowedOps: ['reqHeaders'], hideTargetPool: true,
-      match: (a) => { const h = a.reqHeaders || {}; return !!(h.set && Object.keys(h.set).length) || !!(h.remove && h.remove.length); } },
-    origin: { title: 'Origin Rules（回源规则）', en: 'origin', owner: '路由规则抽屉 · Origin Rules', icon: '🔀', order: 5, allowedOps: ['hostHeader', 'originConn', 'targetPool'], hideTargetPool: false,
-      // inherit 是「不改动回源 Host」的默认值，schema 给每条规则都补 inherit，
-      // 绝不能算 Origin Rules —— 否则每条规则都会被误判进 origin 越界。
-      match: (a) => !!(a.poolId || (a.inlineOrigins || []).length
-        || (a.hostHeader && a.hostHeader.mode && a.hostHeader.mode !== 'accel' && a.hostHeader.mode !== 'inherit')
-        || a.engine || a.scheme || Number(a.port) > 0) },
-    cache: { title: 'Cache Rules（缓存规则）', en: 'cache', owner: '路由规则抽屉 · Cache Rules（缓存策略）', icon: '📥', order: 6, allowedOps: ['cache'], hideTargetPool: true,
-      match: (a) => !!(a.cache && (a.cache.enabled || a.cache.mode === 'noCache')) },
-    respHeaders: { title: '改写响应头 / Response Cache Rule', en: 'respHeaders', owner: '路由规则抽屉 · 改写响应头 / Response Cache Rule', icon: '📝', order: 7, allowedOps: ['respHeaders'], hideTargetPool: true,
-      match: (a) => { const h = a.respHeaders || {}; return !!(h.set && Object.keys(h.set).length) || !!(h.remove && h.remove.length); } },
-  };
-  // 旧版「带圈数字」阶段标识 → 新版英文名 的兼容映射（老数据 rule.stage 可能是 '⑪' 等）
-  const STAGE_ALIASES = {
-    '⑤': 'rewrite', '⑥': 'redirect', '⑦': 'terminate', '⑧': 'reqHeaders',
-    '⑨': 'origin', '⑪': 'cache', '⑯': 'respHeaders',
-  };
-  function normalizeStage(s) {
-    if (!s) return null;
-    if (STAGE_OPS[s]) return s;
-    if (STAGE_ALIASES[s]) return STAGE_ALIASES[s];
-    return null;
-  }
+  // 阶段字典（STAGE_ORDER / STAGE_OPS / STAGE_ALIASES / normalizeStage）已由
+  // 文件顶层 import 自构建期生成的 web/_stage.gen.js（单一来源自 src/config/stages.js）。
+  // 此处不再保留副本。
   // 规则阶段索引：只认落库的 r.stage 字段，绝不反推。
   // 反推（stageForAction）曾因 STAGE_ORDER 顺序不可控（origin 抢 respHeaders）导致规则越界/不渲染，
   // 现已彻底弃用。正常数据在建/改时必由受限抽屉写入 stage；读取时经 normalizeStage 兼容老数据的旧带圈数字，

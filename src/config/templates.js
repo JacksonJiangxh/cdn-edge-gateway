@@ -392,13 +392,13 @@ function statusTtlOf(p) {
   const ttl = Number(p?.errorTtl) || 0;
   if (ttl <= 0) return {};
   /** 生产最常用错误码子集（仅枚举纳入，缓存时长一律由 errorTtl 参数决定，不采用外部时长建议）。 */
-  const ERROR_CODES = Object.freeze([
+  const CACHEABLE_ERROR_STATUSES = Object.freeze([
     400, 401, 403, 404, 405, 406, 408, 409, 410, 412, 413, 415, 422, 429,
     500, 502, 503, 504,
   ]);
   /** @type {Record<string, number>} */
   const out = {};
-  for (const c of ERROR_CODES) out[String(c)] = ttl;
+  for (const c of CACHEABLE_ERROR_STATUSES) out[String(c)] = ttl;
   return out;
 }
 
