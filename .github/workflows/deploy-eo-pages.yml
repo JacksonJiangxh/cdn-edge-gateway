@@ -77,8 +77,22 @@ jobs:
           node-version: '22'
           cache: npm
 
+      - name: 缓存 Playwright 浏览器
+        # 避免每次流水线重复下载 ~300MB 浏览器二进制；按 lock 文件哈希失效
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: playwright-${{ runner.os }}-
+
       - name: 安装依赖
+        # postinstall 会确保 chromium 二进制就绪（缓存命中时秒过）
         run: npm ci
+
+      - name: 安装浏览器系统依赖
+        # build.mjs 的质量闸门含 Playwright 真实浏览器测试，必须保证可启动。
+        # 该命令幂等，缺库时补齐，避免 "libglib-2.0.so.0: cannot open shared object file"。
+        run: npx playwright install --with-deps chromium
 
       - name: 静态一致性检查
         run: npm run check

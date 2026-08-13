@@ -59,6 +59,62 @@ function assert(cond, label, detail) {
  *
  * 注意：脚本正文内不得出现 `</script` 字面量（会截断内联 HTML）。
  */
+/** Linux + root 才有能力通过 apt-get 安装系统共享库 */
+function canInstallSystemDeps() {
+  if (process.platform !== 'linux') return false;
+  try {
+    return typeof process.getuid === 'function' && process.getuid() === 0;
+  } catch {
+    return false;
+  }
+}
+
+function sh(cmd, args) {
+  return spawnSync(cmd, args, { cwd: ROOT, stdio: 'inherit', env: process.env });
+}
+
+/**
+ * 判断启动失败是否属于「缺少系统共享库」。
+ * 典型报错：chrome-headless-shell: error while loading shared libraries:
+ *          libglib-2.0.so.0: cannot open shared object file
+ * 这类失败可以通过 `playwright install-deps chromium` 自愈，属于环境问题而非产物问题。
+ */
+function isMissingSharedLibrary(err) {
+  const msg = String((err && (err.message || err)) || '');
+  return /error while loading shared libraries|cannot open shared object file|libnss3|libglib|libgobject|Host system is missing dependencies/i.test(msg);
+}
+
+/**
+ * 尝试补装 chromium 运行所需的系统共享库。
+ * 优先用 playwright 官方 install-deps（内部按发行版调 apt-get 装准确的包集合）；
+ * 失败时回退为直接 apt-get 安装最小必需集，兼容 playwright 尚未适配的新发行版
+ * （如 Debian 13 trixie，官方 install-deps 可能因版本判定而拒绝执行）。
+ */
+function installSystemDeps() {
+  console.log('  ! 检测到缺少系统共享库，尝试自动补装（playwright install-deps chromium）...');
+  if (sh('npx', ['playwright', 'install-deps', 'chromium']).status === 0) return true;
+
+  console.log('  ! install-deps 失败，回退为直接 apt-get 安装最小依赖集...');
+  if (spawnSync('sh', ['-c', 'command -v apt-get'], { stdio: 'ignore' }).status !== 0) {
+    console.log('  ! 当前系统无 apt-get，无法自动补装依赖。');
+    return false;
+  }
+  // Playwright 官方 chromium 运行时最小依赖集（Debian/Ubuntu 通用名）
+  const pkgs = [
+    'libglib2.0-0', 'libnss3', 'libnspr4', 'libdbus-1-3', 'libatk1.0-0',
+    'libatk-bridge2.0-0', 'libcups2', 'libdrm2', 'libxkbcommon0', 'libatspi2.0-0',
+    'libx11-6', 'libxcomposite1', 'libxdamage1', 'libxext6', 'libxfixes3',
+    'libxrandr2', 'libgbm1', 'libpango-1.0-0', 'libcairo2', 'libasound2',
+    'libudev1', 'fonts-liberation', 'ca-certificates',
+  ];
+  // Debian 13 起部分包改名（libasound2 → libasound2t64 等），逐包安装避免整批失败
+  const script =
+    'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq || true; ' +
+    pkgs.map((p) => `apt-get install -y --no-install-recommends ${p} >/dev/null 2>&1 || apt-get install -y --no-install-recommends ${p}t64 >/dev/null 2>&1 || true`).join('; ');
+  sh('sh', ['-c', script]);
+  return true;
+}
+
 function apiStubScript() {
   return [
     '<script>',
@@ -71,6 +127,106 @@ function apiStubScript() {
     '})();',
     '</script>',
   ].join('');
+}
+
+/**
+ * 启动 chromium，失败时按「原因分类」自愈后重试。
+ *
+ * 重试链（每步都幂等、可在 CI 反复执行）：
+ *   1) 直接启动
+ *   2) 缺共享库 → install-deps / apt-get 补装 → 重试
+ *   3) 缺二进制 → playwright install chromium → 重试
+ *   4) 仍失败且能装系统依赖 → playwright install --with-deps chromium → 重试
+ *   5) 全部失败 → 抛错阻断构建（仅 ALLOW_SKIP_BROWSER_TEST=1 时返回跳过标记）
+ *
+ * @returns {Promise<import('playwright').Browser | {__skipped:true}>}
+ */
+async function launchWithSelfHeal(chromium) {
+  const attempts = [];
+  // 容器内以 root 运行时必须关闭 sandbox；/dev/shm 常被限制为 64MB，
+  // 需 --disable-dev-shm-usage 否则页面会随机崩溃。本地非 root 不加这些参数。
+  const launchOpts = canInstallSystemDeps()
+    ? { args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] }
+    : {};
+  const tryLaunch = async () => {
+    try {
+      return await chromium.launch(launchOpts);
+    } catch (e) {
+      attempts.push(e);
+      return null;
+    }
+  };
+
+  let browser = await tryLaunch();
+  if (browser) return browser;
+
+  const first = attempts[0];
+
+  // 阶段 A：缺系统共享库（最常见于 debian-slim / CNB 镜像）
+  if (isMissingSharedLibrary(first) && canInstallSystemDeps()) {
+    if (installSystemDeps()) {
+      browser = await tryLaunch();
+      if (browser) {
+        console.log('  ✓ 系统共享库已补装，chromium 启动成功');
+        return browser;
+      }
+    }
+  }
+
+  // 阶段 B：缺浏览器二进制
+  console.log('  ! chromium 启动失败，尝试安装浏览器二进制...');
+  const withDeps = canInstallSystemDeps();
+  const installArgs = withDeps
+    ? ['playwright', 'install', '--with-deps', 'chromium']
+    : ['playwright', 'install', 'chromium'];
+  const installRes = sh('npx', installArgs);
+
+  if (installRes.status === 0) {
+    browser = await tryLaunch();
+    if (browser) {
+      console.log('  ✓ chromium 安装完成并启动成功');
+      return browser;
+    }
+  } else if (withDeps) {
+    // --with-deps 在新发行版上可能因版本判定失败：退回「仅二进制 + 手动补库」
+    console.log('  ! --with-deps 安装失败，回退为「二进制 + 手动补库」...');
+    if (sh('npx', ['playwright', 'install', 'chromium']).status === 0) {
+      installSystemDeps();
+      browser = await tryLaunch();
+      if (browser) {
+        console.log('  ✓ chromium 安装完成并启动成功');
+        return browser;
+      }
+    }
+  }
+
+  // 阶段 C：安装后仍启动失败，且报错仍指向共享库 → 再补一次库
+  const last = attempts[attempts.length - 1];
+  if (isMissingSharedLibrary(last) && canInstallSystemDeps()) {
+    if (installSystemDeps()) {
+      browser = await tryLaunch();
+      if (browser) {
+        console.log('  ✓ 系统共享库已补装，chromium 启动成功');
+        return browser;
+      }
+    }
+  }
+
+  const detail = (last && (last.message || String(last))) || '未知错误';
+  if (process.env.ALLOW_SKIP_BROWSER_TEST) {
+    console.log('  ! chromium 自愈后仍无法启动，已按 ALLOW_SKIP_BROWSER_TEST=1 跳过（不阻断 build）。');
+    console.log('    错误：' + detail);
+    return { __skipped: true };
+  }
+  throw new Error(
+    'Playwright chromium 无法启动（已自动尝试安装二进制与系统依赖）：' + detail + '\n' +
+    (isMissingSharedLibrary(last)
+      ? '  仍缺少系统共享库。请在 CI 镜像中预装依赖，例如：\n' +
+        '    npx playwright install --with-deps chromium\n' +
+        '  或在 root 环境执行 `npx playwright install-deps chromium`。\n'
+      : '  请检查网络与运行环境（容器需允许 --no-sandbox / 足够的 /dev/shm）。\n') +
+    '  若确属受限环境，可设 ALLOW_SKIP_BROWSER_TEST=1 显式放行（不建议用于生产部署）。'
+  );
 }
 
 export async function runFrontendBrowserTest() {
@@ -100,48 +256,15 @@ export async function runFrontendBrowserTest() {
   // buildInlineUI 对 </script> 做了边界转义（<\/script>），加载前还原
   html = html.replace(/<\\\/script/g, '</script');
 
-  let browser;
-  try {
-    browser = await chromium.launch();
-  } catch {
-    // 包已安装但浏览器二进制缺失：自动安装 chromium，确保这道真实浏览器护栏
-    // 真正执行（而不是静默跳过导致回归漏检）。仅在安装失败时才优雅跳过。
-    console.log('  ! Playwright 浏览器二进制未就绪，尝试自动安装 chromium...');
-    const installRes = spawnSync('npx', ['playwright', 'install', 'chromium'], {
-      cwd: ROOT,
-      stdio: 'inherit',
-      env: process.env,
-    });
-    if (installRes.status !== 0) {
-      // 自动安装失败：playwright 已是 devDependency + postinstall 会预装浏览器，
-      // 正常环境不应走到这里。默认硬失败（由 build 收口阻断部署），仅当显式
-      // ALLOW_SKIP_BROWSER_TEST=1 时才跳过，作为受限环境的显式逃生舱。
-      if (process.env.ALLOW_SKIP_BROWSER_TEST) {
-        console.log('  ! 自动安装 chromium 失败，已按 ALLOW_SKIP_BROWSER_TEST=1 跳过（不阻断 build）。');
-        console.log('    手动安装：npx playwright install chromium');
-        return { ok: true, skipped: true, checks: 0, failures: 0 };
-      }
-      throw new Error(
-        'Playwright chromium 自动安装失败（退出码 ' + installRes.status + '）。\n' +
-        '  postinstall 本应已预装浏览器二进制；请检查网络/平台依赖，或手动执行 `npx playwright install chromium`。\n' +
-        '  若确属受限环境，可设 ALLOW_SKIP_BROWSER_TEST=1 显式放行（不建议用于生产部署）。'
-      );
-    }
-    // 安装成功，重试启动
-    try {
-      browser = await chromium.launch();
-    } catch (e) {
-      if (process.env.ALLOW_SKIP_BROWSER_TEST) {
-        console.log('  ! 浏览器二进制已安装但启动失败，已按 ALLOW_SKIP_BROWSER_TEST=1 跳过（不阻断 build）。');
-        console.log('    错误：' + (e && (e.message || String(e))));
-        return { ok: true, skipped: true, checks: 0, failures: 0 };
-      }
-      throw new Error(
-        'Playwright chromium 已安装但启动失败：' + (e && (e.message || String(e))) + '\n' +
-        '  可能是缺少系统共享库，请执行 `npx playwright install-deps chromium` 后重试。'
-      );
-    }
-  }
+  // ── 启动浏览器：多阶段自愈 ──
+  // 失败原因分两类，需分别处理，不能一概而论：
+  //   A. 浏览器二进制缺失      → playwright install chromium
+  //   B. 系统共享库缺失(libglib)→ playwright install-deps chromium / apt-get
+  // 精简镜像（CNB debian:13-all）上 B 极常见，旧实现只处理 A，于是「下载 300MB
+  // 后照样启动失败」。这里按需逐层修复并重试，让 CI 自己具备跑浏览器的能力，
+  // 而不是跳过测试（跳过 = 带病部署）。
+  const browser = await launchWithSelfHeal(chromium);
+  if (browser && browser.__skipped) return { ok: true, skipped: true, checks: 0, failures: 0 };
   const page = await browser.newPage({ baseURL: 'https://e2e.test' });
 
   const pageErrors = [];
