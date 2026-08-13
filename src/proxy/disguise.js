@@ -17,7 +17,7 @@
  * ============================================================================
  */
 
-import { DEFAULT_DISGUISE } from '../config/defaults.js';
+import { DEFAULT_DISGUISE, DEFAULT_GLOBAL_SETTINGS } from '../config/defaults.js';
 
 /**
  * 内置静态伪装页。
@@ -55,14 +55,10 @@ Commercial support is available at
 // ============================================================================
 // 伪装页缓存策略
 // ============================================================================
-
-/** CDN 边缘缓存最大时长（秒）。伪装页内容固定，长缓存可让 CF 边缘直接返回，
- * 后续同一未授权 URL 的请求不再打到 Workers，节省每日请求配额。 */
-const DISGUISE_CDN_MAX_AGE = 86400; // 24h
-
-/** 反代模式 isolate 级内存缓存 TTL（毫秒）。同一 isolate 生命周期内，
- * 多个未匹配站点的并发请求只 fetch 一次伪装目标。 */
-const PROXY_DISGUISE_ISOLATE_TTL_MS = 10 * 60 * 1000; // 10 min
+// 伪装页 TTL / isolate 缓存时长 / 静态页品牌头 / 反代 UA 等参数，已从本文件的
+// 硬编码常量迁移至「全站兜底规则」settings.disguise（见 config/defaults.js），
+// 运行时由 renderDisguise 从 ctx.__globalSettings 读取，用户可在管理面板调整，
+// 无需改代码。下方常量已删除，避免与全站兜底规则出现「双重真相源」。
 
 /** 反代模式 isolate 级缓存：{ key, body, status, headers, cachedAt } */
 let _proxyDisguiseCache = null;
@@ -76,6 +72,9 @@ let _proxyDisguiseCache = null;
  */
 export async function renderDisguise(ctx, disguise) {
   const cfg = disguise || DEFAULT_DISGUISE;
+  // 全站兜底 settings：伪装页 TTL / isolate 缓存时长 / 静态页品牌头 / 反代 UA
+  const dg = (ctx.__globalSettings && ctx.__globalSettings.disguise) || DEFAULT_GLOBAL_SETTINGS.disguise;
+  const proxyUA = (ctx.__globalSettings && ctx.__globalSettings.reqHeaders && ctx.__globalSettings.reqHeaders.proxyUserAgent) || DEFAULT_GLOBAL_SETTINGS.reqHeaders.proxyUserAgent;
 
   try {
     if (cfg.mode === 'none') {
@@ -86,34 +85,37 @@ export async function renderDisguise(ctx, disguise) {
     }
 
     if (cfg.mode === 'proxy' && cfg.target) {
-      const res = await proxyDisguise(ctx, cfg.target);
+      const res = await proxyDisguise(ctx, cfg.target, dg, proxyUA);
       if (res) return res;
       // 反代失败：静默降级到静态页，绝不暴露上游错误
     }
 
-    return staticDisguise(cfg.status);
+    return staticDisguise(cfg.status, dg);
   } catch {
     // 伪装页自身出错也必须给出一个干净的页面
-    return staticDisguise(DEFAULT_DISGUISE.status);
+    return staticDisguise(DEFAULT_DISGUISE.status, dg);
   }
 }
 
 /**
  * 静态伪装页。
  * @param {number} [status]
+ * @param {{disguiseCdnMaxAge:number, staticServerName:string}} dg 全站兜底伪装页参数
  * @returns {Response}
  */
-function staticDisguise(status) {
+function staticDisguise(status, dg) {
   const code = Number.isInteger(status) && status >= 200 && status <= 599 ? status : 200;
+  const maxAge = dg?.disguiseCdnMaxAge ?? 86400;
+  const serverName = dg?.staticServerName ?? 'nginx';
   return new Response(STATIC_HTML, {
     status: code,
     headers: {
       'content-type': 'text/html; charset=utf-8',
       // 伪装页内容固定，长 CDN 缓存让同一未授权 URL 的后续请求由 CF 边缘直接返回，
       // 不再消耗 Workers 配额；s-maxage 专用于共享缓存（CDN）
-      'cache-control': `public, max-age=${DISGUISE_CDN_MAX_AGE}, s-maxage=${DISGUISE_CDN_MAX_AGE}`,
+      'cache-control': `public, max-age=${maxAge}, s-maxage=${maxAge}`,
       // 抹掉可能的服务端指纹，让响应头看起来像一台普通的 nginx
-      server: 'nginx',
+      server: serverName,
     },
   });
 }
@@ -126,13 +128,16 @@ function staticDisguise(status) {
  *
  * @param {import('../contracts.js').Ctx} ctx
  * @param {string} target 绝对 URL（schema 已保证 http/https）
+ * @param {{disguiseCdnMaxAge:number, disguiseIsolateTtlMs:number, staticServerName:string}} dg 全站兜底伪装页参数
+ * @param {string} proxyUA 反代模式使用的伪装 UA
  * @returns {Promise<Response|null>} 失败返回 null 交由调用方降级
  */
-async function proxyDisguise(ctx, target) {
+async function proxyDisguise(ctx, target, dg, proxyUA) {
   // isolate 级缓存：同一 target 在 isolate 生命周期内只 fetch 一次
+  const isolateTtl = dg?.disguiseIsolateTtlMs ?? 600000;
   const now = Date.now();
   if (_proxyDisguiseCache && _proxyDisguiseCache.key === target &&
-      (now - _proxyDisguiseCache.cachedAt) < PROXY_DISGUISE_ISOLATE_TTL_MS) {
+      (now - _proxyDisguiseCache.cachedAt) < isolateTtl) {
     return new Response(_proxyDisguiseCache.body, {
       status: _proxyDisguiseCache.status,
       headers: new Headers(_proxyDisguiseCache.headers),
@@ -143,10 +148,8 @@ async function proxyDisguise(ctx, target) {
     const upstream = await fetch(target, {
       method: 'GET',
       headers: {
-        // 使用通用 UA，不透传访客的任何身份信息
-        'user-agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-          '(KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        // 使用通用 UA（来自全站兜底 settings.reqHeaders.proxyUserAgent），不透传访客的任何身份信息
+        'user-agent': proxyUA,
         accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       },
       redirect: 'follow',
@@ -162,12 +165,14 @@ async function proxyDisguise(ctx, target) {
     if (buf.byteLength > MAX_BODY) return null;
     const body = new TextDecoder().decode(buf);
     const ct = upstream.headers.get('content-type');
+    const maxAge = dg?.disguiseCdnMaxAge ?? 86400;
+    const serverName = dg?.staticServerName ?? 'nginx';
 
     const headers = {
       'content-type': ct || 'text/html; charset=utf-8',
       // 长 CDN 缓存：伪装页内容固定，同一未授权 URL 的后续请求由 CF 边缘直接返回
-      'cache-control': `public, max-age=${DISGUISE_CDN_MAX_AGE}, s-maxage=${DISGUISE_CDN_MAX_AGE}`,
-      'server': 'nginx',
+      'cache-control': `public, max-age=${maxAge}, s-maxage=${maxAge}`,
+      'server': serverName,
     };
 
     // 写入 isolate 缓存

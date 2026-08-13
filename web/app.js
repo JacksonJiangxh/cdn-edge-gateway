@@ -912,9 +912,17 @@ import { el, clear, $ } from './dom.js';
       return { set, remove };
     };
     const addKv = (wrap, k0, v0, withVal) => {
+      // 头值支持 ${var} 内置变量（与后端 headers.js 的 applyHeaderOps.set 接入 expandVars 对齐），
+      // 故在 value 输入框下方挂变量提示条——这是计划 overview 点名的 HeaderOps.set 覆盖字段。
+      const valCell = withVal
+        ? el('div', { class: 'kv-val' }, [
+            el('input', { class: 'input hv', value: v0 || '', placeholder: 'value（可写 ${var} 变量）' }),
+            varHintBar('头值可写 ${host} ${client_ip} ${uri} 等内置变量，运行时替换为真实值。'),
+          ])
+        : el('span', { class: 'muted', text: '(移除)' });
       const row = el('div', { class: 'kv-row' }, [
         el('input', { class: 'input hk', value: k0 || '', placeholder: 'Header-Name' }),
-        withVal ? el('input', { class: 'input hv', value: v0 || '', placeholder: 'value' }) : el('span', { class: 'muted', text: '(移除)' }),
+        valCell,
         el('button', { class: 'btn btn-sm btn-danger', text: '×', onclick: () => row.remove() }),
       ]);
       wrap.appendChild(row);
@@ -1406,7 +1414,7 @@ import { el, clear, $ } from './dom.js';
           : '示例：填 /img，则 /img/x.png → /x.png' }));
       } else if (t === 'regex') {
         fieldsBox.appendChild(field('匹配规则（源正则）', fromInput));
-        fieldsBox.appendChild(field('替换为（目标，可用 $1 $2 引用分组）', toInput));
+        fieldsBox.appendChild(field('替换为（目标，可用 $1 $2 引用分组）', toInput, '还支持 ${var} 变量，如 /new/$1?host=${host}', [varHintBar()]));
         // 小白友好的常用简单示例：点一下即可套用（源正则 + 目标）
         const EXAMPLES = [
           { from: '^(.*)$', to: '$1', note: '整体原样透传（保留完整路径，仅做占位/后续拼接用）' },
@@ -1622,7 +1630,7 @@ import { el, clear, $ } from './dom.js';
           field('状态码', status),
           el('label', { class: 'check' }, [keep, el('span', { text: '保留原查询串' })]),
         ]);
-        const targetField = field('目标 URL（支持 $1..$9 引用路径正则捕获组）', target);
+        const targetField = field('目标 URL（支持 $1..$9 引用路径正则捕获组）', target, '可写 ${var} 内置变量，如 https://${host}/new/$1', [varHintBar()]);
         const syncEn = () => {
           grid.style.display = en.checked ? '' : 'none';
           targetField.style.display = en.checked ? '' : 'none';
@@ -1679,7 +1687,7 @@ import { el, clear, $ } from './dom.js';
         ], hh.mode || 'inherit');
         sel.className = 'input';
         const custom = el('input', { class: 'input', value: hh.custom || '', placeholder: 'origin.example.com' });
-        const customField = field('自定义值', custom);
+        const customField = field('自定义值', custom, '支持 ${var} 变量，如 ${host}', [varHintBar()]);
         // 仅「自定义」模式需要填值，其余模式该框无效，完全隐藏避免误导
         const syncMode = () => { customField.style.display = sel.value === 'custom' ? '' : 'none'; };
         sel.addEventListener('change', syncMode);
@@ -2076,7 +2084,7 @@ import { el, clear, $ } from './dom.js';
       const hostCustomField = field('回源 Host 自定义值', fHostCustom, '仅用于回源请求的 Host 头，与站点配置的「加速域名」无关。');
 
       const inlineFields = el('div', { id: 'origin-inline-fields' }, [
-        addrField, portField, schemeField, engineField, r2BindingField, hostModeField, hostCustomField,
+        engineField, addrField, portField, schemeField, r2BindingField, hostModeField, hostCustomField,
       ]);
 
       const syncEngine = () => {
@@ -3255,10 +3263,82 @@ import { el, clear, $ } from './dom.js';
     ]);
     wrap.appendChild(cfgCard);
 
+    // ---- 调试响应头配置（settings.debug，原写死的 X-Origin-Id / X-Cache 等头名收编为可配置可关）----
+    // 走全站规则 settings 段（与后端 DEFAULT_GLOBAL_SETTINGS.debug 对齐），非顶层 GlobalConfig。
+    const dbgEnabled = el('input', { type: 'checkbox' });
+    const dbgOriginId = el('input', { class: 'input', placeholder: 'X-Origin-Id' });
+    const dbgCache = el('input', { class: 'input', placeholder: 'X-Cache' });
+    const dbgRuleId = el('input', { class: 'input', placeholder: 'X-Rule-Id' });
+    const dbgRetry = el('input', { class: 'input', placeholder: 'X-Retry-Count' });
+    const dbgEdge = el('input', { class: 'input', placeholder: 'X-Edge-Time' });
+    const dbgEnabledField = field('启用调试响应头', dbgEnabled, '开启后，响应会带上源站 ID / 命中状态 / 命中规则 / 重试次数 / 边缘耗时等调试头，便于排查。生产环境可关闭。');
+    const syncDbg = () => {
+      [dbgOriginId, dbgCache, dbgRuleId, dbgRetry, dbgEdge].forEach((i) => { i.disabled = !dbgEnabled.checked; });
+    };
+    dbgEnabled.addEventListener('change', syncDbg);
+    syncDbg();
+
+    const fillDbg = (s) => {
+      const d = (s && s.debug) || {};
+      const h = d.headers || {};
+      dbgEnabled.checked = d.enabled !== false;
+      dbgOriginId.value = h.originId || '';
+      dbgCache.value = h.cache || '';
+      dbgRuleId.value = h.ruleId || '';
+      dbgRetry.value = h.retryCount || '';
+      dbgEdge.value = h.edgeTime || '';
+      syncDbg();
+    };
+    const dbgCard = el('div', { class: 'card-block' }, [
+      el('h4', {}, '调试响应头'),
+      el('div', { class: 'form-stack' }, [
+        dbgEnabledField,
+        field('源站 ID 头名', dbgOriginId, '留空=沿用默认 X-Origin-Id'),
+        field('缓存命中 头名', dbgCache, '留空=沿用默认 X-Cache'),
+        field('命中规则 头名', dbgRuleId, '留空=沿用默认 X-Rule-Id'),
+        field('重试次数 头名', dbgRetry, '留空=沿用默认 X-Retry-Count'),
+        field('边缘耗时 头名', dbgEdge, '留空=沿用默认 X-Edge-Time'),
+      ]),
+      el('div', { class: 'section-head' }, [
+        el('button', {
+          class: 'btn btn-primary', text: '保存调试头配置',
+          onclick: async () => {
+            const payload = {
+              settings: {
+                debug: {
+                  enabled: dbgEnabled.checked,
+                  headers: {
+                    originId: dbgOriginId.value.trim(),
+                    cache: dbgCache.value.trim(),
+                    ruleId: dbgRuleId.value.trim(),
+                    retryCount: dbgRetry.value.trim(),
+                    edgeTime: dbgEdge.value.trim(),
+                  },
+                },
+              },
+            };
+            try {
+              const saved = await API.rules.saveGlobal(payload);
+              fillDbg((saved && saved.settings) || {});
+              toast('已保存调试头配置', 'ok');
+              await loadAll();
+            } catch (e) { toast(e.message, 'err'); }
+          },
+        }),
+      ]),
+    ]);
+    wrap.appendChild(dbgCard);
+
     // 载入现有全局配置填入表单（此时操作的是节点引用，无需已挂载到 document）
     try {
       fillGlobalForm(await API.config.get());
     } catch (e) { /* 配置尚未初始化时忽略 */ }
+
+    // 载入调试响应头配置（settings.debug 段）
+    try {
+      const g = await API.rules.global().catch(() => null);
+      fillDbg((g && g.settings) || {});
+    } catch (e) { /* 全站规则尚未初始化时忽略 */ }
 
     wrap.appendChild(el('div', { class: 'section-head' }, [
       el('button', { class: 'btn', text: '导出配置', onclick: exportConfig }),
@@ -3358,6 +3438,15 @@ import { el, clear, $ } from './dom.js';
       control,
       hint ? el('div', { class: 'field-hint muted' }, hint) : null,
       ...(Array.isArray(extra) ? extra : []),
+    ]);
+  }
+
+  // 动态变量提示条：在支持 ${var} 的字段旁统一展示「可用变量」说明。
+  // 仅作人话提示，不参与表单读取（read() 仍只取用户输入框的值）。
+  function varHintBar(text) {
+    return el('div', { class: 'field-hint muted var-hint' }, [
+      el('span', { class: 'var-hint-tag', text: '支持动态变量' }),
+      el('span', { text: text || '可写 ${host} ${client_ip} ${uri} ${path} 等内置变量，运行时替换为真实值。如读请求头用 ${http_x_forwarded_for}，读查询参数用 ${query_foo}。' }),
     ]);
   }
 

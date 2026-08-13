@@ -36,6 +36,7 @@ import {
   getDomainQuota,
   touchBudget,
 } from '../platform/memBudget.js';
+import { DEFAULT_GLOBAL_SETTINGS } from '../config/defaults.js';
 
 // ============================================================================
 // 常量
@@ -44,18 +45,21 @@ import {
 /** KV 键前缀。完整形态：`rl:{host}:{ip}:{minute}` */
 const RL_PREFIX = 'rl:';
 
-/** KV 条目 TTL（秒）。窗口是 1 分钟，留 2 分钟便于跨窗口读取上一分钟。 */
-const RL_TTL_SEC = 120;
-
 /**
- * 从 KV 同步远端标记的最小间隔（毫秒）。
- * 30 秒意味着一个 IP 被其他 isolate 标记后，最晚 30 秒内全校验。
- * 这也控制了 KV 读取频率：每个嫌疑 IP 每分钟最多读 2 次。
+ * 全站兜底「限流参数」读取。
+ * 模块级无 ctx 的工具函数（rlEntryCap 等）使用静态内置默认；
+ * 热路径 checkRateLimit（有 ctx）优先使用运行时 settings（用户改 KV 即生效）。
+ * 默认值见 DEFAULT_GLOBAL_SETTINGS.security。
  */
-const REMOTE_SYNC_INTERVAL_MS = 30000;
+function secSettings(ctx) {
+  if (ctx && ctx.__globalSettings && ctx.__globalSettings.security) {
+    return ctx.__globalSettings.security;
+  }
+  return DEFAULT_GLOBAL_SETTINGS.security;
+}
 
 /** 内存表最大条目数（兜底最大值），超出则整体清理，防止内存无限增长导致 isolate OOM。 */
-const MEM_MAX_ENTRIES = 5000;
+const MEM_MAX_ENTRIES = DEFAULT_GLOBAL_SETTINGS.security.memMaxEntries;
 
 /**
  * 单条限流计数槽的估算字节（用于 memBudget 记账与配额推导）。
@@ -236,6 +240,10 @@ export async function checkRateLimit(ctx, host, ip, rpm) {
   if (!Number.isFinite(limit) || limit <= 0) {
     return { limited: false, count: 0, rpm: 0, retryAfter: 0 };
   }
+
+  const sec = secSettings(ctx);
+  const RL_TTL_SEC = sec.rlTtlSec || 120;
+  const REMOTE_SYNC_INTERVAL_MS = sec.remoteSyncIntervalMs || 30000;
 
   const minute = currentMinute();
   sweep(minute);

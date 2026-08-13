@@ -11,7 +11,7 @@
  */
 
 import { getSite } from '../config/store.js';
-import { TARGETS_NEED_KEY } from '../config/defaults.js';
+import { TARGETS_NEED_KEY, DEFAULT_GLOBAL_SETTINGS } from '../config/defaults.js';
 
 /**
  * 匹配站点配置。
@@ -52,6 +52,19 @@ export function buildMatchSubject(ctx) {
   const ext = dot > 0 && dot !== seg.length - 1 ? seg.slice(dot + 1).toLowerCase() : '';
   const headers = ctx.request.headers;
 
+  // 请求接收层默认参数：取自全站兜底 settings.request（可被用户在管理面板调整，
+  // 无需改代码）。clientIpHeaders 为提取真实客户端 IP 的回源头优先级；
+  // defaultProtocol 为协议回落值（当 url.protocol 缺失时）。
+  const reqSettings =
+    (ctx.__globalSettings && ctx.__globalSettings.request) || DEFAULT_GLOBAL_SETTINGS.request;
+  const clientIpHeaders = reqSettings.clientIpHeaders || ['cf-connecting-ip', 'x-real-ip'];
+  let clientIp = '';
+  for (const h of clientIpHeaders) {
+    const v = headers.get(h);
+    if (v) { clientIp = v; break; }
+  }
+  const protocol = (url.protocol || `${reqSettings.defaultProtocol}:`).replace(':', '');
+
   return {
     host: String(url.hostname || '').toLowerCase(),
     path: pathname,
@@ -61,8 +74,8 @@ export function buildMatchSubject(ctx) {
     filename: seg,
     directory: pathname.slice(0, pathname.lastIndexOf('/') + 1),
     method: (ctx.request.method || 'GET').toUpperCase(),
-    protocol: (url.protocol || 'https:').replace(':', ''),
-    clientIp: headers.get('cf-connecting-ip') || headers.get('x-real-ip') || '',
+    protocol,
+    clientIp,
     clientCountry: (headers.get('cf-ipcountry') || '').toUpperCase(),
     userAgent: headers.get('user-agent') || '',
     referer: headers.get('referer') || '',

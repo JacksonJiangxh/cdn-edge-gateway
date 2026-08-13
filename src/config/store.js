@@ -29,6 +29,7 @@ import {
   DEFAULT_GLOBAL_RULES,
   cloneGlobal,
   cloneGlobalRules,
+  cloneGlobalSettings,
   deepClone,
 } from './defaults.js';
 import { STAGE_ORDER } from './stages.js';
@@ -873,46 +874,82 @@ function migrateGlobalRulesFromArray(data) {
  *
  * 兜底语义：KV 为空时写入内置保守默认（DEFAULT_GLOBAL_RULES）并返回，之后用户可改。
  * 旧版 Rule[] 结构会被一次性迁移为 stages 映射并写回，保证灰度无中断。
+ * 返回结构为 { stages, settings }：stages 为各阶段默认动作映射，settings 为全局默认参数。
  * @param {import('../contracts.js').Ctx} ctx
- * @returns {Promise<Record<string, any>>} 键为 STAGE_ORDER，值为各阶段默认 action
+ * @returns {Promise<{stages: Record<string, any>, settings: Record<string, any>}>}
  */
 export async function getGlobalRules(ctx) {
   const data = await readJson(ctx, K_GLOBAL_RULES);
   // 旧结构：{ rules: [...] } —— 迁移后写回
   if (data && Array.isArray(data.rules)) {
     const stages = migrateGlobalRulesFromArray(data);
+    const settings = cloneGlobalSettings();
     try {
-      await writeJson(ctx, K_GLOBAL_RULES, { stages });
+      await writeJson(ctx, K_GLOBAL_RULES, { stages, settings });
       invalidateMemCache();
       await bumpVersion(ctx);
     } catch (err) {
       console.error('[store] 全站规则旧结构迁移写回失败（忽略，仍返回映射）:', err?.message);
     }
-    return deepClone(stages);
+    return { stages: deepClone(stages), settings: deepClone(settings) };
   }
-  // 新结构：{ stages: {...} }
+  // 新结构：{ stages: {...}, settings?: {...} }
   if (data && data.stages && typeof data.stages === 'object') {
-    return deepClone(data.stages);
+    // settings 缺失（旧版仅含 stages）时用内置默认补全，保持向后兼容
+    const settings = data.settings && typeof data.settings === 'object'
+      ? deepClone(data.settings)
+      : cloneGlobalSettings();
+    return { stages: deepClone(data.stages), settings: deepClone(settings) };
   }
   // 空值：落盘内置默认并返回（幂等由调用方并发容忍，失败不影响返回）
-  const def = cloneGlobalRules();
+  const def = { stages: cloneGlobalRules(), settings: cloneGlobalSettings() };
   try {
-    await writeJson(ctx, K_GLOBAL_RULES, { stages: def });
+    await writeJson(ctx, K_GLOBAL_RULES, def);
     invalidateMemCache();
     await bumpVersion(ctx);
   } catch (err) {
     console.error('[store] 全站规则默认落盘失败（忽略，仍返回默认）:', err?.message);
   }
-  return deepClone(def);
+  return { stages: deepClone(def.stages), settings: deepClone(def.settings) };
 }
 
 /**
- * 覆盖写入全站通用（兜底）规则：阶段→默认动作映射。
+ * 覆盖写入全站通用（兜底）规则：阶段→默认动作映射 + 全局默认参数。
  * @param {import('../contracts.js').Ctx} ctx
  * @param {Record<string, any>} stages 键为 STAGE_ORDER，值为各阶段默认 action
+ * @param {Record<string, any>=} settings 全局默认参数（可选，缺省保留原值或内置默认）
  */
-export async function putGlobalRules(ctx, stages) {
-  await writeJson(ctx, K_GLOBAL_RULES, { stages: stages && typeof stages === 'object' ? stages : {} });
+export async function putGlobalRules(ctx, stages, settings) {
+  const payload = { stages: stages && typeof stages === 'object' ? stages : {} };
+  // settings 显式传入时一并落盘；否则保留已有 settings（若没有则用内置默认）
+  if (settings && typeof settings === 'object') {
+    payload.settings = settings;
+  } else {
+    const cur = await readJson(ctx, K_GLOBAL_RULES);
+    payload.settings = (cur && cur.settings && typeof cur.settings === 'object')
+      ? cur.settings
+      : cloneGlobalSettings();
+  }
+  await writeJson(ctx, K_GLOBAL_RULES, payload);
   invalidateMemCache();
   await bumpVersion(ctx);
+}
+
+/**
+ * 读取全站兜底「全局默认参数」（settings 段）。
+ * 优先从 KV 的全站规则读取；KV 读取异常时回退到内置冻结默认值，保证主链路不瘫痪。
+ * 结果会被调用方缓存到 ctx.__globalSettings 复用。
+ * @param {import('../contracts.js').Ctx} ctx
+ * @returns {Promise<Record<string, any>>}
+ */
+export async function getGlobalSettings(ctx) {
+  try {
+    const data = await readJson(ctx, K_GLOBAL_RULES);
+    if (data && data.settings && typeof data.settings === 'object') {
+      return deepClone(data.settings);
+    }
+  } catch (err) {
+    console.error('[store] 读取全站全局参数失败，回退内置默认:', err?.message);
+  }
+  return cloneGlobalSettings();
 }

@@ -11,29 +11,22 @@
  * 只带对内容协商真正必要的头（Range / Accept / If-None-Match ...）。
  */
 
-import {
-  FORWARD_HEADER_WHITELIST,
-  DEFAULT_UA_HEADERS,
-  DEFAULT_STRIP_RESP_HEADERS,
-  NO_CACHE_STATUS,
-} from '../contracts.js';
-import { PRODUCT_NAME } from '../config/defaults.js';
+import { getGlobalSettings } from '../config/store.js';
+import { DEFAULT_GLOBAL_SETTINGS } from '../config/defaults.js';
+import { expandVars } from '../config/vars.js';
 
 /**
- * 永远不允许出现在回源请求里的头（前缀匹配 + 精确匹配）。
- * 即便被 extraHeaders / rule.reqHeaders 显式设置，也会在最后一步被剥离。
+ * 获取全站兜底「全局默认参数」（settings 段）。
+ * 优先读 ctx.__globalSettings（pipeline 已缓存），缺失时回退内置冻结默认值。
+ * @param {import('../contracts.js').Ctx} ctx
+ * @returns {Promise<Record<string, any>>}
  */
-const FORBIDDEN_PREFIXES = ['cf-', 'x-forwarded-'];
-const FORBIDDEN_EXACT = new Set(['x-real-ip', 'cookie', 'referer', 'origin']);
-
-/**
- * 分层缓存铁律的模板默认值（当配置未显式给 TTL 时回落到此）：
- * 最前端 CDN 为最终依据 —— 边缘长缓存、浏览器短缓存。
- *   边缘：半年（15552000s）；浏览器：30 分钟（1800s）。
- * 本项目作为「函数层」下发头时自动遵循，模板开箱即符合铁律。
- */
-export const TIER_CDN_DEFAULT_EDGE_TTL = 15552000;
-export const TIER_CDN_DEFAULT_BROWSER_TTL = 1800;
+async function getSettings(ctx) {
+  if (ctx && ctx.__globalSettings) return ctx.__globalSettings;
+  const s = await getGlobalSettings(ctx);
+  if (ctx) ctx.__globalSettings = s;
+  return s;
+}
 
 /**
  * 构造回源请求头。
@@ -52,21 +45,29 @@ export const TIER_CDN_DEFAULT_BROWSER_TTL = 1800;
  * @param {Object} [clientIpHeader] 客户端 IP 回源头配置 { enabled, name }
  * @returns {Headers} 回源请求头
  */
-export function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) {
+export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) {
+  const S = await getSettings(ctx);
+  const rh = S.reqHeaders || DEFAULT_GLOBAL_SETTINGS.reqHeaders;
+  // 透传白名单 / 前缀剥离（来自全站兜底 settings，可被用户调整）
+  const forwardWhitelist = new Set((rh.forwardWhitelist || []).map((h) => h.toLowerCase()));
+  const stripPrefixes = (rh.stripPrefixes || []).map((p) => p.toLowerCase());
+  const stripExact = new Set((rh.stripExact || []).map((h) => h.toLowerCase()));
   const out = new Headers();
 
   // ---- 1. 白名单透传 ----
   // 只挑白名单里的头，其余（Cookie/Referer/Origin/CF-*/X-Forwarded-*）一律丢弃
   for (const [key, value] of ctx.request.headers) {
-    if (FORWARD_HEADER_WHITELIST.has(key.toLowerCase())) {
+    if (forwardWhitelist.has(key.toLowerCase())) {
       out.set(key, value);
     }
   }
 
   // ---- 2. 伪装头 ----
   // 注意用 set 而非 append：如果客户端已带 Accept/Accept-Language，这里统一覆盖，
-  // 使回源特征稳定，避免因客户端差异产生过多缓存变体
-  for (const [key, value] of Object.entries(DEFAULT_UA_HEADERS)) {
+  // 使回源特征稳定，避免因客户端差异产生过多缓存变体。
+  // 这些值来自全站兜底默认回源请求头（DEFAULT_GLOBAL_RULES.stages.reqHeaders.set，
+  // 经由 effRule 并入 ops 后由下方步骤 4 注入；此处仅作兜底，确保即使 ops 缺失也有合理默认）。
+  for (const [key, value] of Object.entries(getDefaultReqHeaderSet(S))) {
     out.set(key, value);
   }
   // Accept-Encoding 交给运行时自行协商，不强行覆盖客户端的值；
@@ -91,7 +92,7 @@ export function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) {
   applyHeaderOps(out, ops, ctx, env);
 
   // ---- 5. 兜底剥离敏感头 ----
-  stripForbidden(out);
+  stripForbidden(out, stripPrefixes, stripExact);
 
   // ---- 6. 客户端 IP 回源头 ----
   // 必须放在 stripForbidden 之后：默认头名 X-Forwarded-For 命中禁用前缀，
@@ -118,6 +119,26 @@ export function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) {
 }
 
 /**
+ * 取全站兜底默认回源请求头 set 映射。
+ * 默认来自 DEFAULT_GLOBAL_RULES.stages.reqHeaders.set（已在 pipeline 中并入规则 ops），
+ * 但此处额外提供一份静态兜底，保证即使 ops 未传入也能注入合理的伪装浏览器头。
+ * @param {Record<string, any>} S settings
+ * @returns {Record<string, string>}
+ */
+function getDefaultReqHeaderSet(S) {
+  // 优先用站点/全站默认的 reqHeaders.set（来自 stages），否则用内置常量级默认值。
+  // 注意：DEFAULT_GLOBAL_SETTINGS 不含这组 set（它由 stages.reqHeaders.set 承载），
+  // 故这里回退到一个稳定的内置默认，与旧 DEFAULT_UA_HEADERS 一致。
+  return {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    Accept:
+      'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+  };
+}
+
+/**
  * 构造返回给客户端的响应头。
  *
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
@@ -126,12 +147,20 @@ export function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) {
  * @param {Object} [ops] 规则中的 respHeaders，形如 { set:{}, remove:[] }
  * @returns {Headers} 返回给客户端的响应头
  */
-export function buildClientHeaders(ctx, originResp, policy, ops) {
+export async function buildClientHeaders(ctx, originResp, policy, ops) {
+  const S = await getSettings(ctx);
+  const rph = S.respHeaders || DEFAULT_GLOBAL_SETTINGS.respHeaders;
+  const noCacheStatus = new Set((S.cache?.noCacheStatus) || DEFAULT_GLOBAL_SETTINGS.cache.noCacheStatus);
+  // 三个缓存头 TTL 回落值：优先用 policy（已含全站兜底默认 edgeTtl/browserTtl），
+  // 再回落到 settings.respHeaders 无关，这里 edgeTtl/browserTtl 来自 policy 默认。
+  const DEFAULT_EDGE_TTL = Number(policy?.edgeTtl) || 15552000;
+  const DEFAULT_BROWSER_TTL = Number(policy?.browserTtl) || 1800;
   const out = new Headers(originResp.headers);
 
   // ---- 1. 删除源站的安全策略类响应头 ----
-  // 这些头会阻止图片/字体被第三方页面引用，作为 CDN 必须清理
-  for (const h of DEFAULT_STRIP_RESP_HEADERS) {
+  // 这些头会阻止图片/字体被第三方页面引用，作为 CDN 必须清理。
+  // 剥离列表来自全站兜底 settings.respHeaders.stripDefaults（可被用户调整）。
+  for (const h of rph.stripDefaults || []) {
     out.delete(h);
   }
 
@@ -178,7 +207,7 @@ export function buildClientHeaders(ctx, originResp, policy, ops) {
     // 状态码缓存 TTL 优先级最高：允许把 404 等错误码短时间缓存，挡住对源站的重复穿透
     out.set('Cache-Control', `public, max-age=0, s-maxage=${Number(statusTtl) || 0}`);
     setEdgeCacheControl(Number(statusTtl) || 0, policy?.staleWhileRevalidate);
-  } else if (NO_CACHE_STATUS.has(status)) {
+  } else if (noCacheStatus.has(status)) {
     // 错误响应绝不允许被浏览器或中间层缓存
     out.set('Cache-Control', 'no-store');
     out.set('CDN-Cache-Control', 'no-store');
@@ -186,10 +215,10 @@ export function buildClientHeaders(ctx, originResp, policy, ops) {
   } else if (policy?.enabled && policy.mode !== 'origin') {
     // mode === 'origin' 表示遵循源站缓存策略，此时完全不改写缓存头
     // TTL 取配置值；若为 0 则回落到分层铁律默认值（边缘半年 / 浏览器 30 分钟）
-    const edgeTtl = Number(policy.edgeTtl) || TIER_CDN_DEFAULT_EDGE_TTL;
+    const edgeTtl = Number(policy.edgeTtl) || DEFAULT_EDGE_TTL;
     const browserTtlRaw = Number(policy.browserTtl);
     const browserTtl =
-      browserTtlRaw === 0 ? TIER_CDN_DEFAULT_BROWSER_TTL : browserTtlRaw;
+      browserTtlRaw === 0 ? DEFAULT_BROWSER_TTL : browserTtlRaw;
     // browserTtl < 0 约定为「不下发 max-age，由源站/浏览器自行决定」
     out.set(
       'Cache-Control',
@@ -204,19 +233,29 @@ export function buildClientHeaders(ctx, originResp, policy, ops) {
   applyHeaderOps(out, ops, ctx, null);
 
   // ---- 4. 调试头 ----
-  const d = ctx.debug || {};
-  setIfPresent(out, 'X-Cache', d.cache);
-  setIfPresent(out, 'X-Origin-Id', d.originId);
-  setIfPresent(out, 'X-Origin-Addr', d.originAddr);
-  setIfPresent(out, 'X-Rule-Id', d.ruleId);
-  setIfPresent(out, 'X-Retry-Count', d.retries != null ? String(d.retries) : undefined);
-  out.set('X-Edge-Time', `${Date.now() - ctx.startTime}ms`);
+  // 头名与开关来自全站兜底 settings.debug（可在管理面板改名/关闭，默认保持原行为）。
+  // 调试字段的「值」仍来自 ctx.debug（运行时注入的 ruleId/cache/originId/retries）。
+  const dbg = S.debug || DEFAULT_GLOBAL_SETTINGS.debug;
+  if (dbg && dbg.enabled) {
+    const d = ctx.debug || {};
+    const names = dbg.headers || DEFAULT_GLOBAL_SETTINGS.debug.headers;
+    setIfPresent(out, names.cache, d.cache);
+    // 仅下发源站内部 id（X-Origin-Id），用于标识「本次回源选中的上游源」调试信息。
+    // 注意：绝不下发 X-Origin-Addr —— 其值为 origin.addr:port（完整域名/IP+端口），
+    // 暴露给浏览器会直接泄露源站地址，成为攻击者直连源站绕过 CDN 的入口。
+    // 已有 X-Origin-Id 足以表达「去了哪个上游源」，无需暴露完整地址。
+    setIfPresent(out, names.originId, d.originId);
+    setIfPresent(out, names.ruleId, d.ruleId);
+    setIfPresent(out, names.retryCount, d.retries != null ? String(d.retries) : undefined);
+    setIfPresent(out, names.edgeTime, `${Date.now() - ctx.startTime}ms`);
+  }
 
   // ---- 5. 品牌响应头（标识本网关，覆盖上游平台/源站的 Server/Via 泄露）----
-  // Server：本项目作为独立 CDN 网关的身份标识。
-  // Via：RFC 7230 要求的代理链标识，格式为「协议/版本 别名」。
-  out.set('Server', PRODUCT_NAME);
-  out.set('Via', `1.1 ${PRODUCT_NAME}`);
+  // Server：本项目作为独立 CDN 网关的身份标识（来自全站兜底 settings.respHeaders.serverName）。
+  // Via：RFC 7230 要求的代理链标识，格式为「协议/版本 别名」（settings.respHeaders.viaName）。
+  // 二者均可在 settings 中调整，实现「改品牌名无需改代码」。
+  out.set('Server', rph.serverName);
+  out.set('Via', rph.viaName);
 
   return out;
 }
@@ -244,16 +283,16 @@ function applyHeaderOps(headers, ops, ctx, env) {
 
   if (ops.set && typeof ops.set === 'object') {
     for (const [key, rawValue] of Object.entries(ops.set)) {
-      if (env) {
-        const resolved = resolveSecret(rawValue, env);
-        if (resolved === null) {
-          appendDebugNote(ctx, `missing-secret:${key}`);
-          continue;
-        }
-        headers.set(key, resolved);
-      } else {
-        headers.set(key, String(rawValue));
+      // 1) secret 引用优先（@secret:NAME），拿不到则跳过该头
+      const maybeSecret = env ? resolveSecret(rawValue, env) : String(rawValue ?? '');
+      if (env && maybeSecret === null) {
+        appendDebugNote(ctx, `missing-secret:${key}`);
+        continue;
       }
+      // 2) 动态变量展开：${client_ip} / ${http_x_forwarded_for} 等运行时求值。
+      //    静态值（不含 ${）零开销原样透传；头值仍受 Headers 约束（禁 CR/LF）。
+      const finalValue = expandVars(maybeSecret, ctx, { label: `header:${key}` });
+      headers.set(key, finalValue);
     }
   }
 }
@@ -279,16 +318,21 @@ function resolveSecret(rawValue, env) {
 
 /**
  * 剥离所有敏感 / 平台注入的请求头。
+ * 前缀 / 精确名单来自全站兜底 settings.reqHeaders（可在管理面板调整）。
  *
  * @param {Headers} headers 待清理的请求头
+ * @param {string[]} [stripPrefixes] 命中即剥离的头名前缀（小写）
+ * @param {Set<string>} [stripExact] 精确命中的头名集合（小写）
  * @returns {void}
  */
-function stripForbidden(headers) {
+function stripForbidden(headers, stripPrefixes, stripExact) {
+  const prefixes = stripPrefixes || DEFAULT_GLOBAL_SETTINGS.reqHeaders.stripPrefixes;
+  const exact = stripExact || new Set(DEFAULT_GLOBAL_SETTINGS.reqHeaders.stripExact);
   // 先收集再删除，避免在迭代过程中修改集合
   const toDelete = [];
   for (const key of headers.keys()) {
     const lower = key.toLowerCase();
-    if (FORBIDDEN_EXACT.has(lower) || FORBIDDEN_PREFIXES.some((p) => lower.startsWith(p))) {
+    if (exact.has(lower) || (prefixes.some && prefixes.some((p) => lower.startsWith(p)))) {
       toDelete.push(key);
     }
   }

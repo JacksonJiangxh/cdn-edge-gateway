@@ -25,7 +25,7 @@ import { buildCacheKey, shouldBypassCache } from './cachekey.js';
 import { buildOriginUrl, resolveHostHeader, mergeRewrite, mergeHeaderOps } from './rewrite.js';
 import { getPool, getGlobal, getGlobalRules } from '../config/store.js';
 import { renderDisguise } from './disguise.js';
-import { PRODUCT_NAME, DEFAULT_FAILOVER, deepClone } from '../config/defaults.js';
+import { DEFAULT_FAILOVER, DEFAULT_GLOBAL_SETTINGS, deepClone } from '../config/defaults.js';
 import { STAGE_ORDER } from '../config/stages.js';
 import { cacheMatch, cachePut, isCacheable } from '../platform/cache.js';
 import { checkSecurity } from '../security/guard.js';
@@ -34,6 +34,12 @@ import { requestWithFailover } from '../balancer/failover.js';
 import { eoEdgeFetch } from './engines/eoEdgeEngine.js';
 import { record } from '../stats/collector.js';
 import { selectOrigin } from '../balancer/strategy.js';
+import { expandVars } from '../config/vars.js';
+
+/** 朴素的「是普通对象」判断（避免引入 schema 内部依赖）。 */
+function isObj(x) {
+  return x !== null && typeof x === 'object' && !Array.isArray(x);
+}
 
 /**
  * 默认缓存策略：规则未配置 cache 时使用（保守起见默认不缓存）。
@@ -92,7 +98,7 @@ export async function handleProxy(ctx) {
     // 兜底：任何未预期的异常都转成 500，绝不让 Worker 抛到运行时
     return errorResponse(
       500,
-      'Internal Error',
+      'Internal Server Error',
       `Pipeline failure: ${err?.message || String(err)}`,
       ctx
     );
@@ -106,6 +112,18 @@ export async function handleProxy(ctx) {
  * @returns {Promise<Response>} 响应
  */
 async function runPipeline(ctx) {
+  // ---- 0. 预取全站兜底规则（含 stages + settings）----
+  // 提前到最前面，使站点匹配 / 规则匹配（matcher 的 clientIp/protocol 提取）即可读到
+  // 运行时 settings。读取失败不影响主链路（退化为内置默认）。
+  let globalStages = {};
+  try {
+    const g = await getGlobalRules(ctx);
+    globalStages = (g && g.stages) || {};
+    ctx.__globalSettings = (g && g.settings) || undefined;
+  } catch {
+    // 读取兜底规则失败时不影响站点自身逻辑
+  }
+
   // ---- 1. 匹配站点 ----
   const site = await matchSite(ctx);
   if (!site) {
@@ -153,16 +171,8 @@ async function runPipeline(ctx) {
   // 站点规则：条件匹配取单条（含各阶段 action 字段）。
   const siteRule = matchRule(site, ctx);
 
-  // 全站通用（兜底）规则：新阶段→默认动作映射（每阶段 1 条、无条件）。
-  // 读不到或异常时退化为空映射（站点规则仍生效，仅无全站兜底补全）。
-  let globalStages = {};
-  try {
-    globalStages = (await getGlobalRules(ctx)) || {};
-  } catch {
-    // 读取兜底规则失败时不影响站点自身逻辑
-  }
-
-  // 合并：站点某阶段字段缺失时，用全站兜底对应 stage 补全；
+  // 全站通用（兜底）规则 stages：已在函数开头预取并缓存到 globalStages / ctx.__globalSettings。
+  // 此处直接复用，站点某阶段字段缺失时用全站兜底对应 stage 补全；
   // 站点命中则用站点字段（站点优先），全站仅补足「站点未覆盖的阶段」。
   const effAction = {};
   if (siteRule && siteRule.action) Object.assign(effAction, deepClone(siteRule.action));
@@ -252,7 +262,7 @@ async function runPipeline(ctx) {
       // 响应头改写合并：源站级打底，规则级覆盖（用实际选中的源站，而非首选）
       const hitOrigin = pool?.origins?.find(o => o.id === ctx.debug.originId) || primaryOriginActual;
       const mergedRespHeaders = mergeHeaderOps(hitOrigin.respHeaders, rule?.action?.respHeaders);
-      const headers = buildClientHeaders(ctx, hit, policy, mergedRespHeaders);
+      const headers = await buildClientHeaders(ctx, hit, policy, mergedRespHeaders);
       recordSafely(ctx, { status: hit.status, cacheHit: 'HIT' });
       return new Response(hit.body, {
         status: hit.status,
@@ -309,8 +319,9 @@ async function runPipeline(ctx) {
         ctx.debug.cache = 'STALE';
         // stale 分支只用 policy 构造客户端头（mergedRespHeaders 在下方步骤 9 才计算，
         // 此处不依赖它，避免时序耦合；stale 响应本身已含源站级响应头）。
-        const headers = buildClientHeaders(ctx, stale, policy, undefined);
-        headers.set('X-Cache', 'STALE');
+        // 注意：X-Cache 头名由 settings.debug 可配置，buildClientHeaders 已按可配置名写出 STALE，
+        // 此处不再硬编码覆盖。
+        const headers = await buildClientHeaders(ctx, stale, policy, undefined);
         recordSafely(ctx, { status: stale.status, cacheHit: 'STALE' });
         return new Response(stale.body, {
           status: stale.status,
@@ -345,7 +356,7 @@ async function runPipeline(ctx) {
   if (!ruleCache.edgeTtl && selOriginCache.edgeTtl) policy.edgeTtl = selOriginCache.edgeTtl;
   if (!ruleCache.browserTtl && selOriginCache.browserTtl) policy.browserTtl = selOriginCache.browserTtl;
   const mergedRespHeaders = mergeHeaderOps(currentOrigin.respHeaders, rule?.action?.respHeaders);
-  const headers = buildClientHeaders(ctx, originResp, policy, mergedRespHeaders);
+  const headers = await buildClientHeaders(ctx, originResp, policy, mergedRespHeaders);
   const clientResp = new Response(originResp.body, {
     status: originResp.status,
     statusText: originResp.statusText,
@@ -390,6 +401,9 @@ function applyTerminalActions(ctx, rule) {
   const a = rule?.action;
   if (!a) return null;
 
+  // 品牌响应头：优先取运行时全站兜底 settings（用户改 KV 即生效），回退内置默认
+  const brand = (ctx.__globalSettings && ctx.__globalSettings.respHeaders) || DEFAULT_GLOBAL_SETTINGS.respHeaders;
+
   // ---- 强制 HTTPS ----
   // 只在确实是 http 时跳转，避免已经是 https 还 301 造成无限循环
   if (a.forceHttps && ctx.url.protocol === 'http:') {
@@ -400,8 +414,8 @@ function applyTerminalActions(ctx, rule) {
       headers: {
         Location: target.toString(),
         'Cache-Control': 'no-store',
-        Server: PRODUCT_NAME,
-        Via: `1.1 ${PRODUCT_NAME}`,
+        Server: brand.serverName,
+        Via: brand.viaName,
       },
     });
   }
@@ -409,13 +423,16 @@ function applyTerminalActions(ctx, rule) {
   // ---- 自定义直接响应 ----
   if (a.directResponse?.enabled) {
     const dr = a.directResponse;
-    return new Response(dr.body || '', {
+    // body 支持 ${var} 变量模板（对齐 EO/CF 响应体变量能力），
+    // 如直接返回客户端 IP：body = "your ip: ${client_ip}"。
+    const body = expandVars(dr.body || '', ctx, { label: 'directResponse.body', maxLen: 65536 });
+    return new Response(body, {
       status: dr.status || 200,
       headers: {
         'Content-Type': dr.contentType || 'text/plain; charset=utf-8',
         'Cache-Control': 'no-store',
-        Server: PRODUCT_NAME,
-        Via: `1.1 ${PRODUCT_NAME}`,
+        Server: brand.serverName,
+        Via: brand.viaName,
       },
     });
   }
@@ -426,7 +443,7 @@ function applyTerminalActions(ctx, rule) {
     if (loc) {
       return new Response(null, {
         status: a.redirect.status || 302,
-        headers: { Location: loc, 'Cache-Control': 'no-store', Server: PRODUCT_NAME, Via: `1.1 ${PRODUCT_NAME}` },
+        headers: { Location: loc, 'Cache-Control': 'no-store', Server: brand.serverName, Via: brand.viaName },
       });
     }
   }
@@ -448,6 +465,20 @@ function applyTerminalActions(ctx, rule) {
 function buildRedirectTarget(ctx, rule, redirect) {
   let target = String(redirect.target || '');
 
+  // ---- 捕获组 $1..$9：来自规则 match 中 path 正则条件的捕获 ----
+  // 对齐 CF/EO 重定向「路径搬迁改写」。若规则含 target=path 且 op=regex 的条件，
+  // 用其对当前路径做匹配，得到捕获组后替换 target 中的 $1..$9。
+  const groups = matchPathCaptureGroups(ctx, rule);
+  if (groups) {
+    target = target.replace(/\$(\d)/g, (m, d) => {
+      const idx = Number(d);
+      return idx >= 1 && idx <= groups.length ? groups[idx] : m;
+    });
+  }
+
+  // ---- 变量 ${var}：请求上下文动态值 ----
+  target = expandVars(target, ctx, { label: 'redirect.target', maxLen: 8192 });
+
   let url;
   try {
     url = new URL(target, ctx.url.href);
@@ -466,6 +497,32 @@ function buildRedirectTarget(ctx, rule, redirect) {
 }
 
 /**
+ * 取规则匹配条件中「path + regex」对当前路径产生的捕获组数组（[full, g1, ...]）。
+ * 找不到或匹配失败时返回 null。
+ * @param {import('../contracts.js').Ctx} ctx
+ * @param {Object} rule
+ * @returns {string[]|null}
+ */
+function matchPathCaptureGroups(ctx, rule) {
+  const conds = rule?.match?.conditions;
+  if (!Array.isArray(conds)) return null;
+  for (const group of conds) {
+    if (!Array.isArray(group)) continue;
+    for (const c of group) {
+      if (isObj(c) && c.target === 'path' && c.op === 'regex' && Array.isArray(c.values) && c.values[0]) {
+        try {
+          const m = ctx.url.pathname.match(new RegExp(c.values[0]));
+          if (m) return m;
+        } catch {
+          /* 非法正则容错 */
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * 安全地调用 isCacheable，任何异常都视为不可缓存。
  *
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
@@ -476,7 +533,8 @@ function buildRedirectTarget(ctx, rule, redirect) {
  */
 function safeIsCacheable(ctx, cacheKey, resp, policy) {
   try {
-    return isCacheable(cacheKey, resp, policy) === true;
+    const noCacheStatus = ctx.__globalSettings && ctx.__globalSettings.cache && ctx.__globalSettings.cache.noCacheStatus;
+    return isCacheable(cacheKey, resp, policy, noCacheStatus) === true;
   } catch {
     return false;
   }
@@ -519,20 +577,31 @@ function errorResponse(status, title, detail, ctx) {
   });
 
   if (ctx?.debug) {
+    const dbg = (ctx.__globalSettings && ctx.__globalSettings.debug) || DEFAULT_GLOBAL_SETTINGS.debug;
+    const names = dbg.headers || DEFAULT_GLOBAL_SETTINGS.debug.headers;
     if (ctx.debug.siteId) headers.set('X-Site-Id', ctx.debug.siteId);
-    if (ctx.debug.ruleId) headers.set('X-Rule-Id', ctx.debug.ruleId);
+    if (dbg.enabled && ctx.debug.ruleId) headers.set(names.ruleId, ctx.debug.ruleId);
     if (Array.isArray(ctx.debug.tried) && ctx.debug.tried.length) {
       headers.set('X-Tried-Origins', ctx.debug.tried.join(','));
     }
+    if (dbg.enabled && ctx.startTime) headers.set(names.edgeTime, `${Date.now() - ctx.startTime}ms`);
   }
-  if (ctx?.startTime) {
-    headers.set('X-Edge-Time', `${Date.now() - ctx.startTime}ms`);
-  }
-  // 错误响应同样注入品牌头，避免泄漏上游平台身份
-  headers.set('Server', PRODUCT_NAME);
-  headers.set('Via', `1.1 ${PRODUCT_NAME}`);
+  // 错误响应同样注入品牌头，避免泄漏上游平台身份（来自全站兜底 settings）
+  const brand = (ctx.__globalSettings && ctx.__globalSettings.respHeaders) || DEFAULT_GLOBAL_SETTINGS.respHeaders;
+  headers.set('Server', brand.serverName);
+  headers.set('Via', brand.viaName);
 
-  return new Response(`${title}\n\n${detail}\n`, { status, headers });
+  // 错误标题优先使用全站兜底 settings.error.messages 中对应的语义文案（可被用户调整），
+  // 未命中语义键时回退到调用方传入的字面量。
+  const messages = (ctx.__globalSettings && ctx.__globalSettings.error && ctx.__globalSettings.error.messages) || DEFAULT_GLOBAL_SETTINGS.error.messages;
+  const MSG_MAP = {
+    'Internal Server Error': messages.internal,
+    'No Origin': messages.noOrigin,
+    'Config Error': messages.configError,
+  };
+  const outTitle = MSG_MAP[title] || title;
+
+  return new Response(`${outTitle}\n\n${detail}\n`, { status, headers });
 }
 
 /**

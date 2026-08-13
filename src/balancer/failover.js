@@ -17,9 +17,11 @@ import { buildOriginUrl, resolveHostHeader, applyRewrite, joinPath, mergeRewrite
 import { buildOriginHeaders } from '../proxy/headers.js';
 import { fetchOrigin } from '../proxy/engines/fetchEngine.js';
 import { fetchOrigin as r2FetchOrigin } from '../proxy/engines/r2Engine.js';
-import { DEFAULT_RETRY_ON } from '../contracts.js';
+import { getGlobalSettings } from '../config/store.js';
+import { DEFAULT_GLOBAL_SETTINGS } from '../config/defaults.js';
 
 // 重试时为了避免把整请求体物化进内存，超过该上限的 body 直接关闭重试（流式透传）。
+// 默认值来自全站兜底 settings.origin.maxRetryBodyBytes（可被用户调整，无需改代码）。
 const MAX_RETRY_BODY = 5 * 1024 * 1024;
 
 /**
@@ -32,16 +34,21 @@ const MAX_RETRY_BODY = 5 * 1024 * 1024;
  * @returns {Promise<Response>} 源站响应；全部失败时返回 502
  */
 export async function requestWithFailover(ctx, pool, rule, hostHeader) {
+  // 全站兜底默认回源策略（池级 failover 未配置时的回落值），可被用户调整，无需改代码
+  const fb = (ctx.__globalSettings && ctx.__globalSettings.origin) || DEFAULT_GLOBAL_SETTINGS.origin;
   const failover = pool?.failover || {};
   const enabled = failover.enabled !== false;
   const retryOn = new Set(
     Array.isArray(failover.retryOn) && failover.retryOn.length > 0
       ? failover.retryOn
-      : DEFAULT_RETRY_ON
+      : (fb.retryOn || [])
   );
-  const maxRetries = enabled ? (Number.isFinite(failover.maxRetries) ? failover.maxRetries : 2) : 0;
-  // 超时优先级：规则级 > 源站级 > 池级 > 默认 10000
-  const poolTimeout = Number(failover.timeoutMs) > 0 ? Number(failover.timeoutMs) : 10000;
+  const maxRetries = enabled ? (Number.isFinite(failover.maxRetries) ? failover.maxRetries : (fb.maxRetries ?? 2)) : 0;
+  // 超时优先级：规则级 > 源站级 > 池级 > 全站兜底默认（10000ms）
+  const poolTimeout = Number(failover.timeoutMs) > 0 ? Number(failover.timeoutMs) : (fb.timeoutMs || 10000);
+  // 重试时物化请求体的上限：池级 > 全站兜底默认（5MB）
+  const maxRetryBody = Number(failover.maxRetryBodyBytes) > 0 ? Number(failover.maxRetryBodyBytes) : (fb.maxRetryBodyBytes || MAX_RETRY_BODY);
+  const MAX_RETRY_BODY = maxRetryBody;
 
   // 预先把「已熔断」的源站并入排除列表。
   // 熔断查询是异步 KV 操作，而 selectOrigin 是同步的，所以在这里一次性算好。
@@ -129,7 +136,7 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
     const originHostHeader = resolveHostHeader(rule?.action?.hostHeader, origin.hostHeader, hostHeader);
     const originUrl = buildOriginUrl(ctx, origin, effectiveRule, originHostHeader);
 
-    const headers = buildOriginHeaders(
+    const headers = await buildOriginHeaders(
       ctx,
       origin,
       mergedReqHeaders,

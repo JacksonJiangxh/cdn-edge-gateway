@@ -34,10 +34,14 @@ import {
   DEFAULT_CLIENT_IP_HEADER,
   MATCH_TARGETS,
   MATCH_OPERATORS,
+  DEFAULT_GLOBAL_SETTINGS,
+  cloneGlobalSettings,
   deepClone,
 } from './defaults.js';
 // 阶段字典：落库「按阶段裁剪 action 字段」的唯一真相源（与前端 web/app.js 同构副本一致）。
 import { STAGE_OPS, normalizeStage, STAGE_ORDER } from './stages.js';
+// 动态变量校验：规则动作值支持 ${var} 引用，校验变量名白名单
+import { validateVarNames, hasVars } from './vars.js';
 
 /**
  * op（STAGE_OPS.allowedOps 里的项）→ 落库 action 对象里的字段名。
@@ -330,6 +334,14 @@ function normHeaderMap(input, label) {
       errors.push(`${label} 中头 ${k} 的值包含非法字符（换行符）`);
       continue;
     }
+    // 动态变量引用校验：${var} 变量名必须在白名单内，否则拒绝，避免未知变量静默失效
+    if (hasVars(val)) {
+      const chk = validateVarNames(val);
+      if (!chk.ok) {
+        errors.push(`${label} 中头 ${k} 的值含未知变量: ${chk.unknown.join(', ')}`);
+        continue;
+      }
+    }
     if (val.length > LIMITS.STR_MAX) {
       errors.push(`${label} 中头 ${k} 的值过长`);
       continue;
@@ -505,6 +517,14 @@ function normRedirect(input, label) {
   const enabled = bool(input.enabled, d.enabled);
   const target = str(input.target, '', 2048);
 
+  // 动态变量引用校验：${var} 变量名必须在白名单内
+  if (hasVars(target)) {
+    const chk = validateVarNames(target);
+    if (!chk.ok) {
+      errors.push(`${label} 重定向目标含未知变量: ${chk.unknown.join(', ')}`);
+    }
+  }
+
   // 仅允许 http/https 绝对 URL 或站内绝对路径，杜绝 javascript:/data: 注入
   if (enabled) {
     if (!target) {
@@ -538,13 +558,25 @@ function normRedirect(input, label) {
  * @returns {Object}
  */
 function normDirectResponse(input) {
+  const errors = [];
   const d = DEFAULT_DIRECT_RESPONSE;
-  if (!isObj(input)) return deepClone(d);
+  if (!isObj(input)) return { value: deepClone(d), errors };
+  const body = str(input.body, '', 64 * 1024);
+  // 直接响应体支持 ${var} 模板，校验变量名白名单
+  if (hasVars(body)) {
+    const chk = validateVarNames(body);
+    if (!chk.ok) {
+      errors.push(`直接响应体含未知变量: ${chk.unknown.join(', ')}`);
+    }
+  }
   return {
-    enabled: bool(input.enabled, d.enabled),
-    status: int(input.status, d.status, 100, 599),
-    contentType: str(input.contentType, d.contentType, 128),
-    body: str(input.body, '', 64 * 1024),
+    value: {
+      enabled: bool(input.enabled, d.enabled),
+      status: int(input.status, d.status, 100, 599),
+      contentType: str(input.contentType, d.contentType, 128),
+      body,
+    },
+    errors,
   };
 }
 
@@ -596,6 +628,13 @@ function normRewrite(input) {
       out.regexFrom = r.value;
     }
     out.regexTo = str(input.regexTo, '');
+    // regexTo 支持 $1..$9 与 ${var}；校验 ${var} 变量名白名单
+    if (hasVars(out.regexTo)) {
+      const chk = validateVarNames(out.regexTo);
+      if (!chk.ok) {
+        errors.push(`重写 regexTo 含未知变量: ${chk.unknown.join(', ')}`);
+      }
+    }
   }
   return { value: out, errors };
 }
@@ -705,7 +744,7 @@ export function normRule(input, idx) {
       action: buildActionByStage(a, {
         rewrite: rw.value, cache: normCachePolicy(a.cache), reqHeaders: rq.value,
         respHeaders: rp.value, hostHeader: { mode: ahMode, custom: ahCustom },
-        redirect: rd.value, directResponse: normDirectResponse(a.directResponse),
+        redirect: rd.value, directResponse: normDirectResponse(a.directResponse).value,
         clientIpHeader: cip.value,
         forceHttps: bool(a.forceHttps, false), forceHttpsStatus: int(a.forceHttpsStatus, 301, 301, 308),
         followRedirect: bool(a.followRedirect, false),
@@ -745,13 +784,13 @@ export function validateRule(input) {
  *   - 未知 stage key 会被忽略（不参与落库）。
  *   - 某阶段缺失则保留内置默认（调用方应以 DEFAULT_GLOBAL_RULES 兜底补全）。
  * @param {import('./defaults.js').DEFAULT_GLOBAL_RULES} [base] 补全基线（缺失阶段用它的同阶段值）
- * @returns {{ ok: boolean, value: Record<string, any>, errors: string[] }}
+ * @returns {{ ok: boolean, value: {stages: Record<string, any>, settings: Record<string, any>}, errors: string[] }}
  */
 export function validateGlobalRulesStages(input, base) {
   const errors = [];
   // 顶层结构必须是对象（{stages} 或直接 stages 映射），数组/字符串/null 一律拒绝。
   if (!isObj(input) || Array.isArray(input)) {
-    return { ok: false, value: {}, errors: ['全站规则结构应为对象 { stages: { 阶段: 默认动作 } }，而非数组/字符串'] };
+    return { ok: false, value: { stages: {}, settings: cloneGlobalSettings() }, errors: ['全站规则结构应为对象 { stages: { 阶段: 默认动作 }, settings: {...} }，而非数组/字符串'] };
   }
   const rawStages = isObj(input.stages) ? input.stages : input;
   /** @type {Record<string, any>} */
@@ -785,6 +824,124 @@ export function validateGlobalRulesStages(input, base) {
       out[stage] = deepClone(base[stage]);
     }
   }
+  // 全局默认参数（settings 段）：用内置默认做基线，逐字段钳制；未知 key 忽略，缺失补全。
+  const settings = validateGlobalSettings(isObj(input.settings) ? input.settings : undefined);
+  if (settings.errors.length) errors.push(...settings.errors.map((e) => `全站规则[settings] ${e}`));
+  return { ok: errors.length === 0, value: { stages: out, settings: settings.value }, errors };
+}
+
+/**
+ * 校验并规范化「全站兜底全局默认参数」（settings 段）。
+ * 采用「宽进严出」：以 DEFAULT_GLOBAL_SETTINGS 为基线，对用户输入的已知字段做类型/范围钳制，
+ * 未知字段忽略、缺失字段补全内置默认，保证落盘结构稳定、可读、安全。
+ * @param {any} input 用户提交的 settings（可能为空 / 部分字段）
+ * @returns {{ok:boolean, value: Record<string, any>, errors: string[]}}
+ */
+export function validateGlobalSettings(input) {
+  const def = DEFAULT_GLOBAL_SETTINGS;
+  const errors = [];
+  const out = {};
+  const src = isObj(input) ? input : {};
+
+  // request：请求接收层
+  const req = src.request && isObj(src.request) ? src.request : {};
+  out.request = {
+    clientIpHeaders: Array.isArray(req.clientIpHeaders) && req.clientIpHeaders.length
+      ? req.clientIpHeaders.map((x) => str(x, '')).filter(Boolean)
+      : [...def.request.clientIpHeaders],
+    defaultProtocol: enumOf(req.defaultProtocol, ['http', 'https'], def.request.defaultProtocol),
+  };
+
+  // origin：回源策略兜底（池级 failover 未配置时的回落值）
+  const og = src.origin && isObj(src.origin) ? src.origin : {};
+  out.origin = {
+    retryOn: Array.isArray(og.retryOn) && og.retryOn.length
+      ? og.retryOn.map((x) => int(x, 0, 100, 599)).filter((c) => c >= 100)
+      : [...def.origin.retryOn],
+    maxRetries: int(og.maxRetries, def.origin.maxRetries, 0, 10),
+    timeoutMs: int(og.timeoutMs, def.origin.timeoutMs, 500, 60000),
+    maxRetryBodyBytes: int(og.maxRetryBodyBytes, def.origin.maxRetryBodyBytes, 0, 32 * 1024 * 1024),
+  };
+
+  // reqHeaders：回源请求构造全局策略
+  const rh = src.reqHeaders && isObj(src.reqHeaders) ? src.reqHeaders : {};
+  out.reqHeaders = {
+    forwardWhitelist: Array.isArray(rh.forwardWhitelist) && rh.forwardWhitelist.length
+      ? rh.forwardWhitelist.map((x) => str(x, '').toLowerCase()).filter(Boolean)
+      : [...def.reqHeaders.forwardWhitelist],
+    stripPrefixes: Array.isArray(rh.stripPrefixes) && rh.stripPrefixes.length
+      ? rh.stripPrefixes.map((x) => str(x, '').toLowerCase()).filter(Boolean)
+      : [...def.reqHeaders.stripPrefixes],
+    stripExact: Array.isArray(rh.stripExact) && rh.stripExact.length
+      ? rh.stripExact.map((x) => str(x, '').toLowerCase()).filter(Boolean)
+      : [...def.reqHeaders.stripExact],
+    proxyUserAgent: str(rh.proxyUserAgent, def.reqHeaders.proxyUserAgent, 512),
+  };
+
+  // respHeaders：品牌头 + 默认剥离（跨请求全局语义）
+  const rph = src.respHeaders && isObj(src.respHeaders) ? src.respHeaders : {};
+  out.respHeaders = {
+    serverName: str(rph.serverName, def.respHeaders.serverName, 128),
+    viaName: str(rph.viaName, def.respHeaders.viaName, 128),
+    stripDefaults: Array.isArray(rph.stripDefaults) && rph.stripDefaults.length
+      ? rph.stripDefaults.map((x) => str(x, '').toLowerCase()).filter(Boolean)
+      : [...def.respHeaders.stripDefaults],
+  };
+
+  // cache：缓存可写性判定（全局生效）
+  const cp = src.cache && isObj(src.cache) ? src.cache : {};
+  out.cache = {
+    noCacheStatus: Array.isArray(cp.noCacheStatus) && cp.noCacheStatus.length
+      ? cp.noCacheStatus.map((x) => int(x, 0, 100, 599)).filter((c) => c >= 100)
+      : [...def.cache.noCacheStatus],
+  };
+
+  // security：限速 / 签名 URL
+  const sec = src.security && isObj(src.security) ? src.security : {};
+  out.security = {
+    rateLimitRpm: int(sec.rateLimitRpm, def.security.rateLimitRpm, 0, 1000000),
+    rlTtlSec: int(sec.rlTtlSec, def.security.rlTtlSec, 1, 86400),
+    remoteSyncIntervalMs: int(sec.remoteSyncIntervalMs, def.security.remoteSyncIntervalMs, 1000, 3600000),
+    memMaxEntries: int(sec.memMaxEntries, def.security.memMaxEntries, 100, 1000000),
+    signedUrlParam: str(sec.signedUrlParam, def.security.signedUrlParam, 64),
+    signedUrlTtl: int(sec.signedUrlTtl, def.security.signedUrlTtl, 1, 86400 * 30),
+  };
+
+  // error：错误与拦截响应
+  const err = src.error && isObj(src.error) ? src.error : {};
+  out.error = {
+    blockBody: str(err.blockBody, def.error.blockBody, 4096),
+    blockCacheControl: str(err.blockCacheControl, def.error.blockCacheControl, 128),
+    messages: {
+      internal: str(err.messages && err.messages.internal, def.error.messages.internal, 256),
+      noOrigin: str(err.messages && err.messages.noOrigin, def.error.messages.noOrigin, 256),
+      configError: str(err.messages && err.messages.configError, def.error.messages.configError, 256),
+    },
+  };
+
+  // disguise：伪装页 TTL（独立生成路径）
+  const dg = src.disguise && isObj(src.disguise) ? src.disguise : {};
+  out.disguise = {
+    disguiseCdnMaxAge: int(dg.disguiseCdnMaxAge, def.disguise.disguiseCdnMaxAge, 0, 31536000),
+    disguiseIsolateTtlMs: int(dg.disguiseIsolateTtlMs, def.disguise.disguiseIsolateTtlMs, 0, 3600000),
+    staticServerName: str(dg.staticServerName, def.disguise.staticServerName, 64),
+  };
+
+  // debug：调试响应头开关（把原写死的 X-Origin-Id / X-Cache 等头名变为可配置可关）
+  const db = src.debug && isObj(src.debug) ? src.debug : {};
+  const dbh = isObj(db.headers) ? db.headers : {};
+  const defH = def.debug.headers;
+  out.debug = {
+    enabled: bool(db.enabled, def.debug.enabled),
+    headers: {
+      originId: str(dbh.originId, defH.originId, 64),
+      cache: str(dbh.cache, defH.cache, 64),
+      ruleId: str(dbh.ruleId, defH.ruleId, 64),
+      retryCount: str(dbh.retryCount, defH.retryCount, 64),
+      edgeTime: str(dbh.edgeTime, defH.edgeTime, 64),
+    },
+  };
+
   return { ok: errors.length === 0, value: out, errors };
 }
 

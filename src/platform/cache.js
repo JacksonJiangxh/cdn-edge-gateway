@@ -20,7 +20,7 @@
  * ============================================================================
  */
 
-import { NO_CACHE_STATUS } from '../contracts.js';
+import { NO_CACHE_STATUS_LIST } from '../config/defaults.js';
 import { detectCaps } from './caps.js';
 
 /**
@@ -285,9 +285,10 @@ export function resetCacheStats() {
  * @param {Request} request 客户端请求
  * @param {Response} response 源站响应
  * @param {import('../contracts.js').CachePolicy} policy 缓存策略
+ * @param {number[]|Set<number>} [noCacheStatus] 不应缓存的状态码黑名单（默认取全站兜底 settings.cache.noCacheStatus）
  * @returns {boolean} 是否可缓存
  */
-export function isCacheable(request, response, policy) {
+export function isCacheable(request, response, policy, noCacheStatus) {
   // 1. 策略开关
   if (!policy || policy.enabled !== true) return false;
   if (!request || !response) return false;
@@ -303,9 +304,10 @@ export function isCacheable(request, response, policy) {
     /* headers 不可用时忽略此项 */
   }
 
-  // 4. 状态码黑名单
+  // 4. 状态码黑名单（应来自全站兜底 settings.cache.noCacheStatus，可被用户调整）
+  const blacklist = noCacheStatus || NO_CACHE_STATUS_LIST;
   const status = response.status;
-  if (NO_CACHE_STATUS.has(status)) return false;
+  if (blacklist instanceof Set ? blacklist.has(status) : blacklist.includes(status)) return false;
   // 6. 206 不在黑名单里但同样不可缓存
   if (status === 206) return false;
 

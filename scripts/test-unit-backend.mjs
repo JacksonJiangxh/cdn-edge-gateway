@@ -32,6 +32,15 @@ import {
 } from '../src/proxy/rewrite.js';
 
 import {
+  expandVars,
+  hasVars,
+  validateVarNames,
+  extractVarNames,
+} from '../src/config/vars.js';
+
+import { DEFAULT_GLOBAL_SETTINGS } from '../src/config/defaults.js';
+
+import {
   buildCacheKey,
   shouldBypassCache,
 } from '../src/proxy/cachekey.js';
@@ -280,8 +289,8 @@ test('applyRewrite: none / prefix / strip / regex 四模式', () => {
   assert.equal(applyRewrite('/x.png', { type: 'prefix', value: '/img' }), '/img/x.png');
   assert.equal(applyRewrite('/old/x.png', { type: 'strip', value: '/old' }), '/x.png');
   assert.equal(applyRewrite('/old/x.png', { type: 'strip', value: '/nope' }), '/old/x.png'); // 不以该前缀开头则不动
-  // regex：$& 注入防护——用函数回调让替换文本按字面量处理，而非被当作替换模式展开
-  assert.equal(applyRewrite('/a/b', { type: 'regex', regexFrom: '/b', regexTo: '$&' }), '/a$&');
+  // regex：捕获组/特殊模式生效（对齐 CF/EO 路径重写），此处 $& 展开为匹配到的 /b
+  assert.equal(applyRewrite('/a/b', { type: 'regex', regexFrom: '/b', regexTo: '$&' }), '/a/b');
 });
 
 test('applyRewrite: 非法正则容错保持原路径', () => {
@@ -961,7 +970,15 @@ console.log('\n[headers/cache-control] buildClientHeaders 三平台缓存头策�
  * @param {('cf'|'eo'|'esa'|string)} platform
  */
 function makeCacheCtx(platform = 'eo') {
-  return makeCtx({ ctx: { caps: { platform } } });
+  // 注入 mock kv，使 getGlobalSettings 走「读取为空 → 返回内置默认」分支，
+  // 等价于运行时未配置 settings 的情况（与原写死常量行为一致）。
+  const ctx = makeCtx({ ctx: { caps: { platform } } });
+  ctx.env = Object.assign({}, ctx.env, {
+    KV: { get: async () => null, put: async () => {}, delete: async () => {} },
+  });
+  // store.readJson 优先用 ctx.env.KV，其次 ctx.KV；这里直接挂到 ctx 上双保险
+  ctx.KV = ctx.env.KV;
+  return ctx;
 }
 
 /** 构造一个源站响应；默认带会污染缓存的 set-cookie / no-store，用于验证剥离逻辑。 */
@@ -979,9 +996,9 @@ function ccDirectives(h) {
   );
 }
 
-test('可缓存（CF）：三个头均含 max-age + s-maxage，且额外下发 Cloudflare-CDN-Cache-Control', () => {
+test('可缓存（CF）：三个头均含 max-age + s-maxage，且额外下发 Cloudflare-CDN-Cache-Control', async () => {
   const ctx = makeCacheCtx('cf');
-  const out = buildClientHeaders(
+  const out = await buildClientHeaders(
     ctx,
     makeOriginResp(200),
     { enabled: true, edgeTtl: 15552000, browserTtl: 1800 },
@@ -1015,10 +1032,10 @@ test('可缓存（CF）：三个头均含 max-age + s-maxage，且额外下发 C
   assert.ok(/s-maxage=15552000/.test(cdn), 'CDN-Cache-Control s-maxage 应为 15552000');
 });
 
-test('可缓存（EO / ESA）：仅 Cache-Control + CDN-Cache-Control，无 Cloudflare 专有头', () => {
+test('可缓存（EO / ESA）：仅 Cache-Control + CDN-Cache-Control，无 Cloudflare 专有头', async () => {
   for (const platform of ['eo', 'esa']) {
     const ctx = makeCacheCtx(platform);
-    const out = buildClientHeaders(
+    const out = await buildClientHeaders(
       ctx,
       makeOriginResp(200),
       { enabled: true, edgeTtl: 15552000, browserTtl: 1800 },
@@ -1034,9 +1051,9 @@ test('可缓存（EO / ESA）：仅 Cache-Control + CDN-Cache-Control，无 Clou
   }
 });
 
-test('TTL 回落默认：edgeTtl/browserTtl 为 0 时使用常量默认（半年/30分钟）', () => {
+test('TTL 回落默认：edgeTtl/browserTtl 为 0 时使用常量默认（半年/30分钟）', async () => {
   const ctx = makeCacheCtx('cf');
-  const out = buildClientHeaders(ctx, makeOriginResp(200), { enabled: true, edgeTtl: 0, browserTtl: 0 }, 0);
+  const out = await buildClientHeaders(ctx, makeOriginResp(200), { enabled: true, edgeTtl: 0, browserTtl: 0 }, 0);
   const cc = out.get('cache-control');
   const cdn = out.get('cdn-cache-control');
   assert.ok(/max-age=1800/.test(cc), '浏览器应回落到默认 1800');
@@ -1044,18 +1061,18 @@ test('TTL 回落默认：edgeTtl/browserTtl 为 0 时使用常量默认（半年
   assert.ok(/max-age=15552000/.test(cdn), 'CDN-Cache-Control 应回落到默认 15552000');
 });
 
-test('browserTtl < 0：Cache-Control 不下发 max-age（仅 s-maxage，交浏览器/源站决定）', () => {
+test('browserTtl < 0：Cache-Control 不下发 max-age（仅 s-maxage，交浏览器/源站决定）', async () => {
   const ctx = makeCacheCtx('cf');
-  const out = buildClientHeaders(ctx, makeOriginResp(200), { enabled: true, edgeTtl: 100, browserTtl: -1 }, 0);
+  const out = await buildClientHeaders(ctx, makeOriginResp(200), { enabled: true, edgeTtl: 100, browserTtl: -1 }, 0);
   const cc = out.get('cache-control');
   assert.ok(!/max-age=/.test(cc) && /s-maxage=100/.test(cc), `应仅带 s-maxage=100: ${cc}`);
   // 边缘头仍带 max-age
   assert.ok(/max-age=100/.test(out.get('cdn-cache-control')), 'CDN-Cache-Control 仍应带 max-age');
 });
 
-test('statusTtl：错误状态码被短时间边缘缓存（s-maxage=statusTtl，浏览器 max-age=0）', () => {
+test('statusTtl：错误状态码被短时间边缘缓存（s-maxage=statusTtl，浏览器 max-age=0）', async () => {
   const ctx = makeCacheCtx('cf');
-  const out = buildClientHeaders(ctx, makeOriginResp(404), { enabled: true, edgeTtl: 15552000, browserTtl: 1800, statusTtl: { '404': 60 } }, 0);
+  const out = await buildClientHeaders(ctx, makeOriginResp(404), { enabled: true, edgeTtl: 15552000, browserTtl: 1800, statusTtl: { '404': 60 } }, 0);
   const cc = out.get('cache-control');
   assert.ok(/max-age=0/.test(cc), '404 时浏览器 max-age 应为 0');
   assert.ok(/s-maxage=60/.test(cc), '404 时边缘 s-maxage 应为 statusTtl=60');
@@ -1063,17 +1080,17 @@ test('statusTtl：错误状态码被短时间边缘缓存（s-maxage=statusTtl�
   assert.ok(out.get('cloudflare-cdn-cache-control'), 'CF 下 404 也应下发 Cloudflare-CDN-Cache-Control');
 });
 
-test('NO_CACHE_STATUS：错误响应三头均为 no-store（含 CF 专有头）', () => {
+test('NO_CACHE_STATUS：错误响应三头均为 no-store（含 CF 专有头）', async () => {
   const ctx = makeCacheCtx('cf');
-  const out = buildClientHeaders(ctx, makeOriginResp(500), { enabled: true, edgeTtl: 15552000, browserTtl: 1800 }, 0);
+  const out = await buildClientHeaders(ctx, makeOriginResp(500), { enabled: true, edgeTtl: 15552000, browserTtl: 1800 }, 0);
   assert.equal(out.get('cache-control'), 'no-store', '500 应为 no-store');
   assert.equal(out.get('cdn-cache-control'), 'no-store', 'CDN-Cache-Control 应为 no-store');
   assert.equal(out.get('cloudflare-cdn-cache-control'), 'no-store', 'CF 下 500 专有头也应为 no-store');
 });
 
-test('mode=origin：完全不改写缓存头（源站 no-store 透传，不下发 CDN 头）', () => {
+test('mode=origin：完全不改写缓存头（源站 no-store 透传，不下发 CDN 头）', async () => {
   const ctx = makeCacheCtx('cf');
-  const out = buildClientHeaders(ctx, makeOriginResp(200), { enabled: true, mode: 'origin', edgeTtl: 100, browserTtl: 10 }, 0);
+  const out = await buildClientHeaders(ctx, makeOriginResp(200), { enabled: true, mode: 'origin', edgeTtl: 100, browserTtl: 10 }, 0);
   // 源站头（小写）原样保留
   assert.ok(/no-store/.test(out.get('cache-control')), '源站 no-store 应透传');
   assert.equal(out.get('cdn-cache-control'), null, 'origin 模式不应下发 CDN-Cache-Control');
@@ -1112,11 +1129,13 @@ test('validateGlobalRulesStages: 合法 stages 原样通过校验', () => {
   const input = cloneGlobalRules();
   const r = validateGlobalRulesStages(input);
   assert.equal(r.ok, true, `合法 stages 应校验通过，但得到: ${r.errors.join('; ')}`);
-  assert.deepEqual(Object.keys(r.value).sort(), [...STAGE_ORDER].sort(), '校验后保留全部阶段');
-  // 不应保留冗余字段（value 仅含合法 stage 的 action 片段）
+  assert.deepEqual(Object.keys(r.value.stages).sort(), [...STAGE_ORDER].sort(), '校验后保留全部阶段');
+  // 不应保留冗余字段（value.stages 仅含合法 stage 的 action 片段）
   for (const stage of STAGE_ORDER) {
-    assert.ok(r.value[stage] !== undefined, `${stage} 应有默认动作`);
+    assert.ok(r.value.stages[stage] !== undefined, `${stage} 应有默认动作`);
   }
+  // settings 段应随合法输入一并返回（与 stages 并列）
+  assert.ok(r.value.settings && typeof r.value.settings === 'object', '校验后应返回 settings 段');
 });
 
 test('validateGlobalRulesStages: 未知 stage key 被忽略，缺失阶段用 base 补全', () => {
@@ -1127,11 +1146,11 @@ test('validateGlobalRulesStages: 未知 stage key 被忽略，缺失阶段用 ba
   };
   const r = validateGlobalRulesStages(input, cloneGlobalRules());
   assert.equal(r.ok, true, `缺失+未知 key 应仍通过校验，但得到: ${r.errors.join('; ')}`);
-  assert.equal(r.value.__bogus, undefined, '未知 stage key 应被丢弃');
-  assert.equal(r.value.rewrite.type, 'prefix', '已知 stage 的合法值应保留');
+  assert.equal(r.value.stages.__bogus, undefined, '未知 stage key 应被丢弃');
+  assert.equal(r.value.stages.rewrite.type, 'prefix', '已知 stage 的合法值应保留');
   // 缺失阶段应用 base（DEFAULT_GLOBAL_RULES）补全
-  assert.equal(r.value.redirect.enabled, false, '缺失 redirect 应由 base 补全为默认关闭重定向');
-  assert.equal(r.value.cache.enabled, false, '缺失 cache 应由 base 补全为默认不缓存');
+  assert.equal(r.value.stages.redirect.enabled, false, '缺失 redirect 应由 base 补全为默认关闭重定向');
+  assert.equal(r.value.stages.cache.enabled, false, '缺失 cache 应由 base 补全为默认不缓存');
 });
 
 test('validateGlobalRulesStages: 某阶段非法值被拒绝并收集错误', () => {
@@ -1152,6 +1171,107 @@ test('validateGlobalRulesStages: 顶层非法类型（数组/字符串）被拒'
 
 
 // ============================================================================
+// ============================================================================
+console.log('\n[vars] 内置变量 ${var} 解析引擎（动态规则写法）');
+
+test('expandVars: 静态值（无 ${ 前缀）原样零开销透传', () => {
+  const ctx = makeCtx({ url: 'https://x.com/' });
+  assert.equal(expandVars('X-Foo', ctx), 'X-Foo');
+  assert.equal(expandVars('', ctx), '');
+  assert.equal(expandVars('no-dollar-here', ctx), 'no-dollar-here');
+});
+
+test('expandVars: 标量变量替换（host/client_ip/method/path）', () => {
+  const ctx = makeCtx({ url: 'https://cdn.example.com/a/b?x=1', headers: { 'cf-connecting-ip': '1.2.3.4' } });
+  assert.equal(expandVars('${host}', ctx), 'cdn.example.com');
+  assert.equal(expandVars('${client_ip}', ctx), '1.2.3.4');
+  assert.equal(expandVars('${method}', ctx), 'GET');
+  assert.equal(expandVars('${path}', ctx), '/a/b');
+});
+
+test('expandVars: 带 key 前缀变量（http_/query_/cookie_）', () => {
+  const ctx = makeCtx({
+    url: 'https://x.com/?token=abc',
+    headers: { 'x-forwarded-for': '9.9.9.9', cookie: 'sid=xyz' },
+  });
+  // http_ 下划线还原为连字符
+  assert.equal(expandVars('${http_x_forwarded_for}', ctx), '9.9.9.9');
+  assert.equal(expandVars('${query_token}', ctx), 'abc');
+  assert.equal(expandVars('${cookie_sid}', ctx), 'xyz');
+});
+
+test('expandVars: 混合文本 + 多个变量', () => {
+  const ctx = makeCtx({ url: 'https://x.com/p', headers: { 'x-foo': 'bar' } });
+  assert.equal(expandVars('client=${client_ip} via=${http_x_foo}', ctx), 'client= via=bar');
+});
+
+test('expandVars: 未知变量回退空串、不抛错、记 debug note', () => {
+  const ctx = makeCtx({ url: 'https://x.com/' });
+  ctx.debug = { notes: [] };
+  assert.equal(expandVars('a${not_a_real_var}b', ctx), 'ab');
+  assert.ok(ctx.debug.notes.includes('unknown-var:not_a_real_var'), '应记录未知变量 debug note');
+});
+
+test('expandVars: 非法变量名（含大写/点）原样保留、不展开', () => {
+  const ctx = makeCtx({ url: 'https://x.com/' });
+  // ${a.b} 中的 . 不匹配 [a-z0-9_]+，整段 ${a.b} 不被识别为变量引用，原样保留
+  assert.equal(expandVars('x=${a.b}y', ctx), 'x=${a.b}y');
+  // ${CLIENT} 大写不匹配白名单，原样保留（强类型：不展开未知大写变量）
+  assert.equal(expandVars('x=${CLIENT}y', ctx), 'x=${CLIENT}y');
+});
+
+test('expandVars: maxLen 截断防超长注入', () => {
+  const ctx = makeCtx({ url: 'https://x.com/', headers: { 'x-long': 'ZZZZZZZZZZ' } });
+  const out = expandVars('${http_x_long}', ctx, { maxLen: 4 });
+  assert.equal(out.length, 4);
+});
+
+test('hasVars / extractVarNames / validateVarNames 辅助', () => {
+  assert.equal(hasVars('plain'), false);
+  assert.equal(hasVars('${host}'), true);
+  assert.deepEqual([...extractVarNames('${client_ip}-${http_x_foo}')].sort(), ['client_ip', 'http_x_foo']);
+  // 合法变量名
+  assert.equal(validateVarNames('${host}/${path}?ip=${client_ip}').ok, true);
+  // 大写变量名不被正则识别为变量引用 → validateVarNames 视为无变量（ok=true），
+  // 且 expandVars 原样保留（不展开未知大写变量，强类型防误用）
+  assert.equal(validateVarNames('${Host}').ok, true);
+  assert.equal(expandVars('x=${Host}y', makeCtx({ url: 'https://x.com/' })), 'x=${Host}y');
+});
+
+test('DEFAULT_GLOBAL_SETTINGS.debug 默认保持原调试头行为（可配置、默认开启）', () => {
+  assert.equal(DEFAULT_GLOBAL_SETTINGS.debug.enabled, true);
+  assert.equal(DEFAULT_GLOBAL_SETTINGS.debug.headers.originId, 'X-Origin-Id');
+  assert.equal(DEFAULT_GLOBAL_SETTINGS.debug.headers.cache, 'X-Cache');
+  assert.equal(DEFAULT_GLOBAL_SETTINGS.debug.headers.ruleId, 'X-Rule-Id');
+  assert.equal(DEFAULT_GLOBAL_SETTINGS.debug.headers.retryCount, 'X-Retry-Count');
+  assert.equal(DEFAULT_GLOBAL_SETTINGS.debug.headers.edgeTime, 'X-Edge-Time');
+});
+
+test('applyRewrite regexTo：捕获组 $1..$9 真正生效', () => {
+  const ctx = makeCtx({ url: 'https://x.com/api/v1/users' });
+  const out = applyRewrite('/api/v1/users', { type: 'regex', regexFrom: '^/api/(v\\d+)/(.*)$', regexTo: '/v2/$1/$2' }, ctx);
+  assert.equal(out, '/v2/v1/users');
+});
+
+test('applyRewrite regexTo：支持 ${var} 与捕获组混合', () => {
+  const ctx = makeCtx({ url: 'https://x.com/img/photo.png', headers: { 'x-cdn': 'cdn1' } });
+  const out = applyRewrite('/img/photo.png', { type: 'regex', regexFrom: '^/img/(.+)$', regexTo: '/${http_x_cdn}/asset/$1' }, ctx);
+  assert.equal(out, '/cdn1/asset/photo.png');
+});
+
+test('applyRewrite regexTo：超长替换结果回退原路径（防注入）', () => {
+  const ctx = makeCtx({ url: 'https://x.com/a' });
+  // 用一个会让结果膨胀的替换，超出 8192 上限则回退原路径
+  const out = applyRewrite('/a', { type: 'regex', regexFrom: 'a', regexTo: 'X'.repeat(9000) }, ctx);
+  assert.equal(out, '/a', '超长替换应回退原路径');
+});
+
+test('applyRewrite regex：非法正则容错（不抛错、保持原路径）', () => {
+  const ctx = makeCtx({ url: 'https://x.com/(' });
+  const out = applyRewrite('/(', { type: 'regex', regexFrom: '(', regexTo: 'x' }, ctx);
+  assert.equal(out, '/(');
+});
+
 // 直接运行入口（node scripts/test-unit-backend.mjs）
 // ============================================================================
 import { pathToFileURL } from 'node:url';

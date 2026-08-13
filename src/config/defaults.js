@@ -11,7 +11,10 @@
  * ============================================================================
  */
 
-import { DEFAULT_RETRY_ON, CONFIG_VERSION } from '../contracts.js';
+import {
+  DEFAULT_RETRY_ON, CONFIG_VERSION, NO_CACHE_STATUS, FORWARD_HEADER_WHITELIST,
+} from '../contracts.js';
+import { setProductName } from './vars.js';
 
 // ----------------------------------------------------------------------------
 // 共享默认值（需置于引用它的 DEFAULT_RULE / DEFAULT_RULE_ACTION / DEFAULT_ORIGIN 之前，避免 TDZ）
@@ -22,6 +25,10 @@ import { DEFAULT_RETRY_ON, CONFIG_VERSION } from '../contracts.js';
  * 用于注入到响应头（Server / Via），明确请求由本网关处理、而非上游平台或源站。
  */
 export const PRODUCT_NAME = 'EdgeGateway';
+
+// 让 ${product_name} 变量与本项目身份标识保持同步（无需硬编码在 vars.js 中）。
+// 必须在 PRODUCT_NAME 声明之后调用，避免 ESM 顶层 const 的 TDZ。
+setProductName(PRODUCT_NAME);
 
 /**
  * 默认 Host 头处理方式：inherit = 沿用 fetch 的默认行为（Host 取源站域名）。
@@ -286,15 +293,70 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
     forceHttpsStatus: 301,
     directResponse: deepUnfreeze(DEFAULT_DIRECT_RESPONSE),
   }),
-  reqHeaders: deepUnfreeze(DEFAULT_HEADER_OPS),
+  reqHeaders: Object.freeze({
+    // 全站兜底「默认回源请求头」。被站点规则级 reqHeaders 覆盖（站点级缺失则继承此处）。
+    // 语义：回源时默认携带的伪装浏览器头 + 默认 Accept-Encoding，
+    // 使回源请求表现得像一个全新的浏览器请求（与 buildClientHeaders 的旧写死逻辑一致）。
+    set: Object.freeze({
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      Accept:
+        'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      'Accept-Encoding': 'gzip, deflate, br',
+    }),
+    remove: Object.freeze([]),
+  }),
   origin: Object.freeze({
     hostHeader: deepUnfreeze(DEFAULT_HOST_HEADER),
     clientIpHeader: deepUnfreeze(DEFAULT_CLIENT_IP_HEADER),
     followRedirect: false,
     originTimeoutMs: 0,
+    // 故障转移策略：全站兜底默认值。站点/源站级可覆盖（见 DEFAULT_FAILOVER）。
+    // maxRetryBodyBytes：判定源站「可重试错误响应」的最大响应体字节（failover.js 写死 5MB）。
+    failover: Object.freeze({
+      enabled: true,
+      retryOn: DEFAULT_RETRY_ON,
+      maxRetries: 2,
+      timeoutMs: 10000,
+      maxRetryBodyBytes: 5242880,
+    }),
   }),
-  cache: deepUnfreeze(DEFAULT_CACHE_POLICY),
-  respHeaders: deepUnfreeze(DEFAULT_HEADER_OPS),
+  cache: Object.freeze({
+    // 未显式开启就不缓存，避免误缓存动态内容 / 登录态响应。
+    // edgeTtl / browserTtl / staleWhileRevalidate 为「开启缓存后的默认回落值」，
+    // 与旧 headers.js 写死的 TIER_CDN_DEFAULT_EDGE_TTL=15552000 / BROWSER_TTL=1800 /
+    // stale-while-revalidate=86400 一致。noCacheStatus（不应缓存状态码黑名单）为全局判定，
+    // 始终生效，故单独收进 settings.cache（见 DEFAULT_GLOBAL_SETTINGS）。
+    enabled: false,
+    mode: 'ttl',
+    edgeTtl: 15552000,
+    staleWhileRevalidate: 86400,
+    browserTtl: 1800,
+    ignoreQuery: false,
+    queryWhitelist: Object.freeze([]),
+    key: deepUnfreeze(DEFAULT_CACHE_KEY),
+    statusTtl: Object.freeze({}),
+    preRefresh: false,
+    preRefreshPercent: 80,
+    offlineCache: false,
+  }),
+  respHeaders: Object.freeze({
+    // 全站兜底「默认响应头」。所有响应默认注入本项目品牌头 Server / Via，
+    // 并剥离上游敏感响应头（与旧 headers.js 写死的 PRODUCT_NAME / DEFAULT_STRIP_RESP_HEADERS 一致）。
+    set: Object.freeze({
+      server: PRODUCT_NAME,
+      via: `1.1 ${PRODUCT_NAME}`,
+    }),
+    remove: Object.freeze([
+      'cross-origin-resource-policy',
+      'cross-origin-embedder-policy',
+      'content-security-policy',
+      'content-security-policy-report-only',
+      'x-frame-options',
+      'set-cookie',
+    ]),
+  }),
 });
 
 /**
@@ -303,6 +365,140 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
  */
 export function cloneGlobalRules() {
   return deepUnfreeze(DEFAULT_GLOBAL_RULES);
+}
+
+// ----------------------------------------------------------------------------
+// 全站兜底「全局默认参数」（settings 段）
+// ----------------------------------------------------------------------------
+// 与 stages 段并列，存放「不属于任何规则 stage action、但贯穿整条流量序列」的全局默认。
+// 例如：请求接收层（clientIp 提取）、回源请求构造策略（透传白名单 / 前缀剥离）、
+// 限速 / 签名 URL / 拦截响应 / 错误文案 / 伪装页 TTL 等。
+// 这些项无法用某一 stage 的 HeaderOps / CachePolicy 等 action 字段表达（前缀/白名单/跨请求语义），
+// 故独立成 settings，与 stages 一起落盘、一起版本号广播。
+
+/**
+ * 不应缓存的状态码全集（源自 contracts.js 的 NO_CACHE_STATUS）。
+ * 用于 isCacheable 判定：命中即视为不可缓存。
+ * @type {readonly number[]}
+ */
+export const NO_CACHE_STATUS_LIST = Object.freeze([...NO_CACHE_STATUS]);
+
+/**
+ * 回源请求头透传白名单（源自 contracts.js 的 FORWARD_HEADER_WHITELIST）。
+ * 只有这些客户端请求头会被透传到源站，其余一律丢弃。
+ * @type {readonly string[]}
+ */
+export const FORWARD_HEADER_WHITELIST_LIST = Object.freeze([...FORWARD_HEADER_WHITELIST]);
+
+/**
+ * 回源请求头默认剥离前缀 / 精确名（旧 headers.js 的 FORBIDDEN_PREFIXES / FORBIDDEN_EXACT）。
+ * 凡以此类前缀开头、或精确命中的客户端请求头，构造回源请求时一律剔除。
+ * @type {{prefixes: readonly string[], exact: readonly string[]}}
+ */
+export const STRIP_REQ_HEADERS = Object.freeze({
+  prefixes: Object.freeze(['cf-', 'x-forwarded-', 'x-real-ip']),
+  exact: Object.freeze(['forwarded', 'true-client-ip']),
+});
+
+/** 全站兜底全局默认参数。 */
+export const DEFAULT_GLOBAL_SETTINGS = Object.freeze({
+  // 请求接收层
+  request: Object.freeze({
+    // 提取真实客户端 IP 的回源/请求头优先级（matcher.js 旧写死 cf-connecting-ip || x-real-ip）
+    clientIpHeaders: Object.freeze(['cf-connecting-ip', 'x-real-ip']),
+    // 默认协议（matcher.js 默认 https）
+    defaultProtocol: 'https',
+  }),
+  // 回源策略兜底（池级 failover 未配置时的回落值；与 stages.origin.failover 层级不同：
+  // 此处作用于「池」，stages.origin.failover 作用于「源站/规则」）
+  origin: Object.freeze({
+    retryOn: DEFAULT_RETRY_ON,
+    maxRetries: 2,
+    timeoutMs: 10000,
+    maxRetryBodyBytes: 5242880,
+  }),
+  // 回源请求构造全局策略（无法用 reqHeaders.set 表达前缀/白名单语义）
+  reqHeaders: Object.freeze({
+    forwardWhitelist: FORWARD_HEADER_WHITELIST_LIST,
+    stripPrefixes: STRIP_REQ_HEADERS.prefixes,
+    stripExact: STRIP_REQ_HEADERS.exact,
+    // 反代模式（disguise=proxy）使用的伪装 UA（旧 disguise.js 写死 Chrome/120.0）
+    proxyUserAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  }),
+  // 响应头设置（品牌头 + 默认剥离，无法用单一规则 action 表达跨请求全局语义）
+  respHeaders: Object.freeze({
+    // 本项目作为独立 CDN 网关的身份标识（旧 headers.js 写死 PRODUCT_NAME）
+    serverName: PRODUCT_NAME,
+    // RFC 7230 要求的代理链标识，格式为「协议/版本 别名」
+    viaName: `1.1 ${PRODUCT_NAME}`,
+    // 默认删除的源站响应头（旧 contracts.js 的 DEFAULT_STRIP_RESP_HEADERS）
+    stripDefaults: Object.freeze([
+      'cross-origin-resource-policy',
+      'cross-origin-embedder-policy',
+      'content-security-policy',
+      'content-security-policy-report-only',
+      'x-frame-options',
+      'set-cookie',
+    ]),
+  }),
+  // 缓存可写性判定（全局生效，与某条 cache 规则无关）
+  cache: Object.freeze({
+    noCacheStatus: NO_CACHE_STATUS_LIST,
+  }),
+  // 安全防护（独立于 7 阶段流量序列）
+  security: Object.freeze({
+    // 限流（旧 DEFAULT_RATE_LIMIT.rpm=600 / ratelimit.js 写死 RL_TTL_SEC=120 等）
+    rateLimitRpm: 600,
+    rlTtlSec: 120,
+    remoteSyncIntervalMs: 30000,
+    memMaxEntries: 5000,
+    // 签名 URL（旧 guard.js 写死 param='sign' / ttl=3600）
+    signedUrlParam: 'sign',
+    signedUrlTtl: 3600,
+  }),
+  // 错误与拦截响应
+  error: Object.freeze({
+    // 拦截体（旧 guard.js 写死 'Forbidden'）
+    blockBody: 'Forbidden',
+    // 拦截响应缓存控制（旧 guard.js 写死 'no-store'）
+    blockCacheControl: 'no-store',
+    // 5xx 错误文案（旧 app.js errorResponse 写死）
+    messages: Object.freeze({
+      internal: 'Internal Server Error',
+      noOrigin: 'No Origin',
+      configError: 'Config Error',
+    }),
+  }),
+  // 伪装页（disguise 独立生成路径，不进 7 阶段序列）
+  disguise: Object.freeze({
+    // 伪装页在 CDN 层的缓存时长（旧 disguise.js 写死 86400）
+    disguiseCdnMaxAge: 86400,
+    // 伪装页在本地的 isolate 内存缓存时长（旧 disguise.js 写死 600000=10min）
+    disguiseIsolateTtlMs: 600000,
+    // 静态伪装页 Server 头（旧 disguise.js 写死 'nginx'）
+    staticServerName: 'nginx',
+  }),
+  // 调试响应头（原 headers.js 写死的 X-Origin-Id / X-Cache / X-Rule-Id / X-Retry-Count / X-Edge-Time
+  // 头名与开关，现收编为可配置、可关闭、可改名，默认保持原行为不变）
+  debug: Object.freeze({
+    enabled: true,
+    headers: Object.freeze({
+      originId: 'X-Origin-Id',
+      cache: 'X-Cache',
+      ruleId: 'X-Rule-Id',
+      retryCount: 'X-Retry-Count',
+      edgeTime: 'X-Edge-Time',
+    }),
+  }),
+});
+
+/**
+ * 生成一份可写全站兜底全局默认参数（深拷贝）。
+ * @returns {Record<string, any>} 新对象
+ */
+export function cloneGlobalSettings() {
+  return deepUnfreeze(DEFAULT_GLOBAL_SETTINGS);
 }
 
 // ----------------------------------------------------------------------------

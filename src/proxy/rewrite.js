@@ -10,6 +10,11 @@
  *   回源    https://storage.example.net/repo/-/git/raw/main/img/x.png
  */
 
+import { expandVars } from '../config/vars.js';
+
+/** 正则替换结果长度上限，超出回退原路径（防超长路径注入）。 */
+const REGEX_REPLACE_MAX_LEN = 8192;
+
 /**
  * 应用规则里的 rewrite 配置，得到「重写后的路径」（尚未拼 origin.pathPrefix）。
  *
@@ -59,7 +64,7 @@ export function mergeHeaderOps(originOps, ruleOps) {
   ]);
   return { set, remove: Array.from(removeSet) };
 }
-export function applyRewrite(pathname, rewrite) {
+export function applyRewrite(pathname, rewrite, ctx) {
   const type = rewrite?.type || 'none';
   let out = pathname || '/';
 
@@ -80,11 +85,14 @@ export function applyRewrite(pathname, rewrite) {
       // 用户可配置的正则，必须容错：非法正则时保持原路径不变
       try {
         const re = new RegExp(rewrite.regexFrom || '', 'g');
-        // 注意：regexTo 是用户可配置字符串，作为 replace 第二参时其中的
-        // $& $1 $' $$ 等会被当作替换模式展开（内容注入/路径操纵风险）。
-        // 用函数形式回调，让替换文本按字面量处理，杜绝 $ 语义。
-        const to = rewrite.regexTo ?? '';
-        out = out.replace(re, () => to);
+        // regexTo 支持两类动态写法（对齐 CF/EO/ESA）：
+        //   1) $1..$9 捕获组引用（路径搬迁改写）
+        //   2) ${var} 内置变量引用（如 ${path} / ${client_ip}）
+        // 先对 regexTo 做变量展开（静态值无 ${ 前缀时零开销），再用其作为
+        // replace 第二参让捕获组真正生效。
+        const to = expandVars(rewrite.regexTo ?? '', ctx, { label: 'rewrite.regexTo', maxLen: REGEX_REPLACE_MAX_LEN });
+        const replaced = out.replace(re, to);
+        out = replaced.length > REGEX_REPLACE_MAX_LEN ? out : replaced;
       } catch {
         out = pathname;
       }
@@ -117,7 +125,7 @@ export function applyRewrite(pathname, rewrite) {
  * @returns {URL} 完整的回源 URL 对象
  */
 export function buildOriginUrl(ctx, origin, rule, hostHeader) {
-  const rewritten = applyRewrite(ctx.url.pathname, rule?.action?.rewrite);
+  const rewritten = applyRewrite(ctx.url.pathname, rule?.action?.rewrite, ctx);
 
   // 源站前缀 + 重写后路径，joinPath 内部保证不出现 "//"
   const fullPath = origin.pathPrefix
@@ -141,8 +149,9 @@ export function buildOriginUrl(ctx, origin, rule, hostHeader) {
   // （无 host）而抛 TypeError → 缓存键构造阶段 500。
   if (!authorityAddr) authorityAddr = ctx.url.hostname;
   if (hostHeader && hostHeader.mode === 'custom' && hostHeader.custom) {
-    // 支持 "host" 或 "host:port"
-    const [h, p] = String(hostHeader.custom).split(':');
+    // 支持 "host" 或 "host:port"，custom 值支持 ${var} 动态引用（如 ${host} 按请求域名回源）
+    const customRaw = expandVars(String(hostHeader.custom), ctx, { label: 'hostHeader.custom', maxLen: 253 });
+    const [h, p] = customRaw.split(':');
     authorityAddr = h;
     if (p) authorityPort = Number(p);
   } else if (hostHeader && (hostHeader.mode === 'client' || hostHeader.mode === 'accel')) {

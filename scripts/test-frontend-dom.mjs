@@ -445,6 +445,24 @@ export async function runFrontendDomTest() {
       await sleep(60);
     }
 
+    // 用例 E：动态变量提示条（.var-hint）在支持 ${var} 的字段旁渲染
+    // 复现风险：计划 overview 点名 HeaderOps.set / rewrite.regexTo / redirect.target /
+    // hostHeader.custom 均需支持 ${var}，若前端漏挂 varHintBar() 则用户无从知晓可用变量。
+    console.log('▸ 用例 E：动态变量提示条渲染（计划点名的变量字段）');
+    {
+      ruleCard = await openDrawerAndAddRule('改写响应头', '改写响应头');
+      if (ruleCard) {
+        const hv = ruleCard.querySelector('.hv');
+        assert(!!hv, '头值输入框(.hv)存在');
+        const hasVarHint = !!ruleCard.querySelector('.var-hint');
+        assert(hasVarHint, '头值字段旁渲染动态变量提示条(.var-hint)', 'HeaderOps.set 须在 value 框下挂 varHintBar()');
+        doc.getElementById('drawer-close')?.click();
+        await sleep(40);
+      } else {
+        assert(false, '改写响应头规则卡片已打开以校验变量提示');
+      }
+    }
+
     // 用例 C''：源站抽屉已移除 pathPrefix 编辑框（⑨ URL 重写可替代）
     console.log('▸ 用例 C\'\'：源站编辑器 pathPrefix 编辑框已移除');
     {

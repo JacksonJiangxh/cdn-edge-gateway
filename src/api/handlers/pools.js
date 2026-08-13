@@ -58,15 +58,17 @@ async function collectRefs(ctx) {
 
   try {
     const globalRules = await getGlobalRules(ctx);
-    if (Array.isArray(globalRules)) {
-      for (const r of globalRules) {
-        const pid = r?.action?.poolId;
-        if (!pid) continue;
+    const globalStages = globalRules && globalRules.stages ? globalRules.stages : globalRules;
+    if (globalStages && typeof globalStages === 'object') {
+      // 全站兜底规则的回源阶段（origin）可能通过 poolId 引用某个源站池
+      const origin = globalStages.origin;
+      const pid = origin && origin.poolId;
+      if (pid) {
         add(pid, {
           type: 'globalRule',
           host: '',
           label: '全站通用规则',
-          detail: `规则「${r.name || r.id}」覆盖回源`,
+          detail: '全站通用规则覆盖回源',
         });
       }
     }

@@ -24,12 +24,11 @@
 import { hmacSha256, verifyHmacSha256 } from '../utils/crypto.js';
 import { getClientIp } from './loginGuard.js';
 import { checkRateLimit } from './ratelimit.js';
-
-/** 统一的拦截响应体，简短且无信息量。 */
-const BLOCK_BODY = 'Forbidden';
+import { DEFAULT_GLOBAL_SETTINGS } from '../config/defaults.js';
 
 /**
  * 构造统一的拦截响应。
+ * 拦截体 / 缓存控制来自全站兜底 settings.error（可被用户在管理面板调整，无需改代码）。
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
  * @param {string} reason 内部原因标记，仅写入 debug，不进响应体
  * @param {number} [status=403] HTTP 状态码
@@ -41,11 +40,12 @@ function block(ctx, reason, status = 403) {
   } catch {
     /* ignore */
   }
-  return new Response(BLOCK_BODY, {
+  const err = (ctx && ctx.__globalSettings && ctx.__globalSettings.error) || DEFAULT_GLOBAL_SETTINGS.error;
+  return new Response(err.blockBody || 'Forbidden', {
     status,
     headers: {
       'Content-Type': 'text/plain; charset=utf-8',
-      'Cache-Control': 'no-store',
+      'Cache-Control': err.blockCacheControl || 'no-store',
     },
   });
 }
@@ -283,7 +283,8 @@ function signaturePayload(host, pathname, expire) {
 }
 
 async function signedUrlBlocked(ctx, cfg) {
-  const param = String(cfg.param || 'sign');
+  const signedUrl = (ctx.__globalSettings && ctx.__globalSettings.security) || DEFAULT_GLOBAL_SETTINGS.security;
+  const param = String(cfg.param || signedUrl.signedUrlParam || 'sign');
   const secret = String(cfg.secret || '');
   // 未配置密钥时无法校验；此时拦截而不是放行，避免「开了开关却形同虚设」
   if (!secret) return true;
@@ -434,8 +435,9 @@ export async function checkSecurity(ctx, site) {
  *   否则校验必定失败。签名与 host 绑定是为了防止跨站重放。
  * @returns {Promise<string>} 形如 `sign=abc...&t=1712345678` 的查询串
  */
-export async function buildSignedQuery(pathname, secret, ttl, param = 'sign', host = '') {
-  const expire = Math.floor(Date.now() / 1000) + (Number(ttl) > 0 ? Math.floor(Number(ttl)) : 3600);
+export async function buildSignedQuery(pathname, secret, ttl, param = DEFAULT_GLOBAL_SETTINGS.security.signedUrlParam, host = '') {
+  const signedUrl = DEFAULT_GLOBAL_SETTINGS.security;
+  const expire = Math.floor(Date.now() / 1000) + (Number(ttl) > 0 ? Math.floor(Number(ttl)) : (signedUrl.signedUrlTtl || 3600));
   // 与 signedUrlBlocked 严格对称：共用 signaturePayload() 构造原文，
   // 同样的 base64url 编码。base64url 字符集（A-Za-z0-9-_）本身即 URL 安全，
   // 无需再 encodeURIComponent。
