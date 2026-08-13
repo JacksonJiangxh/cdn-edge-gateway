@@ -67,8 +67,16 @@ export async function handleRequest(ctx) {
   const adminPath = normalizeSeg(global?.adminPath) || '__panel';
   const adminPrefix = `/${adminPath}`;
 
+  // ---- 管理面域名白名单校验 ----
+  // adminDomain 留空（默认）= 任何绑定到本运行时的域名 + adminPrefix 都进入管理面（兼容旧逻辑）。
+  // adminDomain 非空 = 仅「该域名（忽略大小写、去除端口）」+ adminPrefix 才进入管理面，
+  // 其余域名即便 path 命中也按数据面代理处理，规避跨域探测与越界访问。
+  const adminDomain = global?.adminDomain ? String(global.adminDomain).trim().toLowerCase() : '';
+  const reqHost = ctx.url?.hostname ? ctx.url.hostname.toLowerCase() : '';
+  const hostOk = adminDomain === '' || (reqHost !== '' && reqHost === adminDomain);
+
   // ---- 管理面与管理 API ----
-  if (pathname === adminPrefix || pathname.startsWith(adminPrefix + '/')) {
+  if (hostOk && (pathname === adminPrefix || pathname.startsWith(adminPrefix + '/'))) {
     const rest = pathname.slice(adminPrefix.length); // '' | '/' | '/api/xxx'
 
     // 管理 API

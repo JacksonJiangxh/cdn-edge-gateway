@@ -80,6 +80,7 @@
 /**
  * @typedef {Object} GlobalConfig
  * @property {string}  adminPath          管理面路径段，如 "__panel"
+ * @property {string}  adminDomain        自定义面板域名（留空=任意绑定域名均可进管理面板；填写后仅此域名+管理面路径可进入）
  * @property {string}  passwordHash       PBKDF2 哈希（base64）
  * @property {string}  passwordSalt       盐（base64）
  * @property {number}  tokenTtl           JWT 有效期（秒），默认 7200

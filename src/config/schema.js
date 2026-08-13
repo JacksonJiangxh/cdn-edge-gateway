@@ -1267,6 +1267,19 @@ export function validateGlobal(input, caps, current) {
     adminPath = (cur.adminPath && /^[a-zA-Z0-9_-]+$/.test(cur.adminPath)) ? cur.adminPath : d.adminPath;
   }
 
+  // 自定义面板域名：留空=不限制域名（兼容旧逻辑）；非空=trim、小写、去端口、校验为基本合法 hostname
+  const rawAdminDomain = input.adminDomain;
+  const adminDomainIsBlank = rawAdminDomain == null || String(rawAdminDomain).trim() === '';
+  let adminDomain = adminDomainIsBlank
+    ? (cur.adminDomain != null && cur.adminDomain !== '' ? cur.adminDomain : d.adminDomain)
+    : String(rawAdminDomain).trim().toLowerCase().replace(/:\d+$/, '');
+  // 合法 hostname：字母数字、点、连字符（不含协议前缀），且不以点开头/结尾
+  const HOST_RE = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+  if (!adminDomain || !HOST_RE.test(adminDomain)) {
+    // 非法：沿用旧值（若旧值合法），否则回退默认
+    adminDomain = (cur.adminDomain && HOST_RE.test(cur.adminDomain)) ? cur.adminDomain : d.adminDomain;
+  }
+
   const rawTokenTtl = input.tokenTtl;
   const tokenTtlIsBlank = rawTokenTtl == null || String(rawTokenTtl).trim() === '';
   const tokenTtl = tokenTtlIsBlank
@@ -1285,6 +1298,7 @@ export function validateGlobal(input, caps, current) {
 
   const value = {
     adminPath,
+    adminDomain,
     passwordHash: str(input.passwordHash, '', 512),
     passwordSalt: str(input.passwordSalt, '', 512),
     tokenTtl,

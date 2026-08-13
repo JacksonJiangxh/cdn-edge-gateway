@@ -679,6 +679,26 @@ test('validateGlobal: 留空沿用 current，adminPath 非法字符回落默认'
   assert.equal(r4.value.statsDriver, 'kv');
 });
 
+test('validateGlobal: adminDomain 留空沿用 / 规范化去端口小写 / 非法回落', () => {
+  // 1) 留空（未提供）→ 沿用 current，无 current 则默认空串
+  const r1 = validateGlobal({}, null, { adminDomain: 'panel.example.com' });
+  assert.equal(r1.value.adminDomain, 'panel.example.com');
+
+  const r2 = validateGlobal({}, null, {});
+  assert.equal(r2.value.adminDomain, '');
+
+  // 2) 填写 → trim、小写、去端口
+  const r3 = validateGlobal({ adminDomain: '  Panel.Example.COM:443  ' }, null, {});
+  assert.equal(r3.value.adminDomain, 'panel.example.com');
+
+  // 3) 非法值（含协议/非法字符）→ 回落 current，无 current 则空串
+  const r4 = validateGlobal({ adminDomain: 'https://bad' }, null, { adminDomain: 'good.example.com' });
+  assert.equal(r4.value.adminDomain, 'good.example.com');
+
+  const r5 = validateGlobal({ adminDomain: 'http://bad' }, null, {});
+  assert.equal(r5.value.adminDomain, '');
+});
+
 test('validateGlobal: 平台能力联动（d1 在无 D1 平台被拦截）', () => {
   const r = validateGlobal({ statsDriver: 'd1' }, { platform: 'eo', hasD1: false });
   assert.equal(r.ok, false);

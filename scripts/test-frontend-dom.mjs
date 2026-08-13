@@ -397,6 +397,77 @@ export async function runFrontendDomTest() {
     }
   }
 
+  // ── 用例 B'/C'：受限模式「添加操作」下拉已移除、操作卡片初始即内联 ────────
+  // 复现诉求：受限模式（最小任务包）各阶段只渲染白名单内的固定操作，此前仍渲染
+  // 一个「添加操作」下拉，但多数阶段只有 1 个可选项 → 等于定死了还要点一下。
+  // 修复后：受限模式进入抽屉新建规则即内联列出 allowedOps 全部卡片，不再有
+  // .op-add 下拉；不限模式（完整规则编辑器）保留下拉不动。
+  console.log('▸ 用例 B\'/C\'：受限模式移除「添加操作」下拉、初始内联操作卡片');
+  {
+    async function navTo(hash) {
+      window.location.hash = hash;
+      window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+      await sleep(250);
+    }
+    async function openDrawerAndAddRule(stageKeyword, drawerTitleKeyword) {
+      await navTo('#/sequence');
+      const titleSpan = [...doc.querySelectorAll('.seq-title span')].find((s) => s.textContent.includes(stageKeyword));
+      if (!titleSpan) { assert(false, `序列页渲染出「${stageKeyword}」阶段卡片`); return null; }
+      titleSpan.closest('.seq-stage').click();
+      await sleep(300);
+      const drawerBody = doc.getElementById('drawer-body');
+      const addBtn = [...drawerBody.querySelectorAll('button')].find((b) => b.textContent.includes('+ 添加规则'));
+      if (!addBtn) { assert(false, '抽屉内存在「+ 添加规则」按钮'); return null; }
+      try { addBtn.click(); } catch (e) { errors.push('点击「+ 添加规则」抛错: ' + (e && e.message)); }
+      await sleep(80);
+      const ruleCard = drawerBody.querySelector('.rules-box .rule-card');
+      if (!ruleCard) { assert(false, '新建规则卡片渲染进抽屉'); return null; }
+      return ruleCard;
+    }
+
+    // 用例 B'：改写响应头（respHeaders，受限模式白名单仅 1 项）
+    let ruleCard = await openDrawerAndAddRule('改写响应头', '改写响应头');
+    if (ruleCard) {
+      const hasDropdown = !!ruleCard.querySelector('.op-add');
+      assert(!hasDropdown, '受限模式规则卡片无「添加操作」下拉(.op-add)', '仍存在多余下拉');
+      const opCards = ruleCard.querySelectorAll('.ops-list > .subcard');
+      assert(opCards.length >= 1, '受限模式规则卡片初始即内联操作卡片', `内联卡片数=${opCards.length}`);
+      doc.getElementById('drawer-close').click();
+      await sleep(60);
+    }
+
+    // 用例 C'：修改请求头（reqHeaders，同受限单选项）
+    ruleCard = await openDrawerAndAddRule('修改请求头', '修改请求头');
+    if (ruleCard) {
+      assert(!ruleCard.querySelector('.op-add'), '受限模式(reqHeaders)规则卡片无「添加操作」下拉(.op-add)');
+      assert(ruleCard.querySelectorAll('.ops-list > .subcard').length >= 1, '受限模式(reqHeaders)规则卡片初始即内联操作卡片');
+      doc.getElementById('drawer-close').click();
+      await sleep(60);
+    }
+
+    // 用例 C''：源站抽屉已移除 pathPrefix 编辑框（⑨ URL 重写可替代）
+    console.log('▸ 用例 C\'\'：源站编辑器 pathPrefix 编辑框已移除');
+    {
+      await navTo('#/pools');
+      const editBtn = [...doc.querySelectorAll('#content button')].find((b) => b.textContent.trim() === '编辑');
+      if (editBtn) {
+        editBtn.click();
+        await sleep(120);
+        const dBody = doc.getElementById('drawer-body');
+        assert(!!dBody, '点击「编辑」打开源站抽屉');
+        const hasPathPrefix = !!dBody.querySelector('.o-pathprefix');
+        assert(!hasPathPrefix, '源站抽屉不再含 pathPrefix 编辑框(.o-pathprefix)', 'pathPrefix 应通过⑨ Origin Rules 托管，前端不再提供编辑入口');
+        // 连接参数保留且带⑨覆盖提示
+        const hasOverrideHint = [...dBody.querySelectorAll('.hint')].some((h) => h.textContent.includes('⑨'));
+        assert(hasOverrideHint, '源站连接参数区含「⑨ 覆盖」提示');
+        doc.getElementById('drawer-close')?.click();
+        await sleep(40);
+      } else {
+        assert(false, '源站列表存在「编辑」按钮以打开源站抽屉');
+      }
+    }
+  }
+
   // ── 用例 D：规则保存 read() 汇总结构回归 ───────────────────────────────
   // 复现 bug：OP_BUILDERS.cache/reqHeaders/respHeaders/rewrite 的 read() 曾返回扁平
   // 结构 {enabled,edgeTtl,...} / {set,remove} / {type,value,...}，经 buildRuleCard 的

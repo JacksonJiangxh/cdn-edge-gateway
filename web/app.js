@@ -1836,15 +1836,17 @@ import { el, clear, $ } from './dom.js';
         ]),
         // 目标源站 + 按需添加的「操作卡片」：未添加的操作不渲染
         section('操作（命中后执行的操作）', allowed
-          ? '本抽屉仅允许配置「' + opts.title + '」所属的最小任务包，不可越界添加其它动作类型。'
+          ? '本抽屉仅允许配置「' + opts.title + '」所属的最小任务包。该阶段所有可用操作已直接列于下方，无需再点「添加操作」。'
           : '先选「目标源站」，再点「添加操作」加入需要的动作；每个动作是独立卡片，未添加的不显示', [
           // 目标源站属于 ⑨ Origin Rules 的「候选源站」动作，非该包的受限抽屉隐藏，避免越界
           ...(hideTargetPool ? [] : [field('目标源站（这条规则命中后回到哪台后端）', el('div', {}, [poolSel, poolDatalist]),
             '决定「命中条件的请求」回源到哪个源站：留空则回退到站点默认源站；也可从「源站」页已有的单一源站 / 源站池里选一个。简单站一般不用改，留空即可。')]),
-          ...(shownGroups.length ? [el('div', { class: 'op-add' }, [
+          // 受限模式（最小任务包）：不再渲染「添加操作」下拉，进入即内联列出 allowedOps 全部卡片。
+          // 不限模式（完整规则编辑器）：保留原下拉，未添加的操作不渲染。
+          ...(allowed ? [] : (shownGroups.length ? [el('div', { class: 'op-add' }, [
             el('span', { class: 'op-add-label', text: '添加操作：' }),
             actionAddSel,
-          ])] : [el('div', { class: 'hint' }, '本任务包没有可添加的子操作（仅「目标源站」一项）。')]),
+          ])] : [el('div', { class: 'hint' }, '本任务包没有可添加的子操作（仅「目标源站」一项）。')])),
           opsList,
         ]),
       ]),
@@ -1854,12 +1856,17 @@ import { el, clear, $ } from './dom.js';
     // 「添加操作」后确保卡片处于展开态并滚动可见（否则折叠态下看不到刚加的操作卡）
     const ensureExpanded = () => card.classList.remove('collapsed');
 
-    // 初始只挂载该规则实际启用的操作卡片（受限模式下只挂白名单内的）。
+    // 初始挂载：
+    // - 受限模式（最小任务包）：进入抽屉即内联列出该阶段 allowedOps 全部卡片，
+    //   不依赖 activeOpKeys（例如 cache 默认 enabled:false、forceHttps 默认未勾选
+    //   也应直接呈现，让用户无需「点添加」即可看到本阶段所有可用操作）。
+    // - 不限模式（完整规则编辑器）：只挂载规则实际启用的操作卡片。
     // 必须放在 ensureExpanded 定义之后执行：mountOp 内部同步调用 ensureExpanded()。
-    // 若仍在 card 创建前（原 1775 行）执行，新建规则（reqHeaders/respHeaders 均
-    // truthy → activeOpKeys 非空）会在 const ensureExpanded 声明前访问 → TDZ 崩溃
-    // （报错 Cannot access 'X' before initialization，压缩产物变量名为 W）。
-    activeOpKeys(rule.action).forEach((k) => { if (!allowed || allowed.has(k)) mountOp(k); });
+    if (allowed) {
+      allowed.forEach((k) => mountOp(k));
+    } else {
+      activeOpKeys(rule.action).forEach((k) => mountOp(k));
+    }
 
     const read = () => {
       // 受限模式：以原始 action 为基底，只覆盖本包允许编辑的字段，其余字段原样保留（不丢数据、不越界）
@@ -2291,9 +2298,12 @@ import { el, clear, $ } from './dom.js';
         // 引擎变化会影响站点级「回源 Host」可选项（fetch 不支持加速域名），通知其重算
         if (typeof onEngineChange === 'function') onEngineChange();
       };
+      // 回源连接参数（协议/端口/引擎/Host）作为整池物理默认；⑨ Origin Rules
+      // 可针对请求条件覆盖这些参数，故仅作「默认」保留、不再与⑨重复成独立编辑点。
+      const overrideHint = el('div', { class: 'hint', text: '回源连接参数（协议 / 端口 / 引擎 / Host）作为本源站整池默认；如需按请求条件差异化，请在⑨「Origin Rules」里设置对应规则，规则级设置会覆盖此处默认值。' });
       const addrField = field('源站地址（域名 / IP）', el('input', { class: 'input o-addr', value: o.addr || '', placeholder: 'storage.example.net' }), '你的真实服务器地址。');
-      const portField = field('端口', el('input', { class: 'input o-port', type: 'number', value: o.port || 443 }), 'https 默认 443，http 默认 80。');
-      const schemeField = field('协议', select('', [''], o.scheme || 'https', [{ value: 'https', label: 'https' }, { value: 'http', label: 'http' }], 'o-scheme'));
+      const portField = field('端口', el('input', { class: 'input o-port', type: 'number', value: o.port || 443 }), 'https 默认 443，http 默认 80。可被⑨规则覆盖。');
+      const schemeField = field('协议', select('', [''], o.scheme || 'https', [{ value: 'https', label: 'https' }, { value: 'http', label: 'http' }], 'o-scheme'), '可被⑨规则覆盖。');
       const hostEnLabel = el('label', { class: 'check' }, [hostEn, el('span', { text: '覆盖站点级回源 Host（源站专用）' })]);
       const weightField = field('权重', el('input', { class: 'input o-weight', type: 'number', value: o.weight || 1 }), '配合「加权」策略使用，默认 1 即可。');
       inlineWeightFields.push(weightField);
@@ -2301,12 +2311,12 @@ import { el, clear, $ } from './dom.js';
         addrField,
         portField,
         schemeField,
-        field('路径前缀', el('input', { class: 'input o-pathprefix', value: o.pathPrefix || '', placeholder: '如 /api/v1（留空=用请求原路径）' }), '追加在请求路径前面的固定前缀，每个源站可不同。例如三台同服务源站分别填 /node1、/node2、/node3，请求 /img/x.png 会分别回源到 /node1/img/x.png 等。留空则不加。'),
         hostEnLabel,
         hostField,
-        field('引擎', engineSel, '回源方式：① fetch=标准回源，支持自定义 Host 头（CF/EO/ESA 均可用，Host 由「回源域名/地址」或规则级 hostHeader 决定）；② socket=已弃用（自定义 Host 现由 fetch 原生支持，CF 上裸 IP+HTTPS+自定义 SNI 由 fetchEngine 内部自动走 socket 兜底）；③ r2=回源到 R2 桶（仅 CF，需先在 wrangler.toml 绑定）。'),
+        field('引擎', engineSel, '回源方式（整池默认）：① fetch=标准回源，支持自定义 Host 头（CF/EO/ESA 均可用，Host 由「回源域名/地址」或规则级 hostHeader 决定）；② socket=已弃用（自定义 Host 现由 fetch 原生支持，CF 上裸 IP+HTTPS+自定义 SNI 由 fetchEngine 内部自动走 socket 兜底）；③ r2=回源到 R2 桶（仅 CF，需先在 wrangler.toml 绑定）。可被⑨规则覆盖。'),
         r2Fields,
         weightField,
+        overrideHint,
         // 单一源站恒为 1 行，无「移除」按钮：清空地址即视为未填写
       ]);
       engineSel.onchange = syncEngine;
@@ -2444,7 +2454,7 @@ import { el, clear, $ } from './dom.js';
           scheme: $('.o-scheme', row) ? $('.o-scheme', row).value : 'https',
           addr: engine === 'r2' ? '' : addr,
           port: Number($('.o-port', row).value) || 443,
-          pathPrefix: ($('.o-pathprefix', row).value || '').trim(),
+          pathPrefix: '',
           hostHeader: (() => {
             const en = $('.o-host-en', row);
             const custom = ($('.o-host', row).value || '').trim();
@@ -2888,10 +2898,13 @@ import { el, clear, $ } from './dom.js';
       };
       r2KeyModeSel.onchange = syncR2Key;
       syncR2Key();
+      // 回源连接参数（协议/端口/引擎/Host）属于整池物理默认；⑨ Origin Rules
+      // 可针对请求条件覆盖这些参数，故仅作「默认」保留、不再与⑨重复成独立编辑点。
+      const overrideHint = el('div', { class: 'hint', text: '回源连接参数（协议 / 端口 / 引擎 / Host）作为本源站整池默认；如需按请求条件差异化，请在⑨「Origin Rules」里设置对应规则，规则级设置会覆盖此处默认值。' });
       const addrField = field('源站地址（域名 / IP）', el('input', { class: 'input o-addr', value: o.addr || '', placeholder: 'storage.example.net' }), '你的真实服务器地址。');
-      const portField = field('端口', el('input', { class: 'input o-port', type: 'number', value: o.port || 443 }), 'https 默认 443，http 默认 80。');
-      const schemeField = field('协议', select('', [''], o.scheme || 'https', [{ value: 'https', label: 'https' }, { value: 'http', label: 'http' }], 'o-scheme'));
-      const hostField = field('回源 Host（该源站专用）', el('input', { class: 'input o-host', value: o.hostHeader?.custom || '', placeholder: '如 api1.internal（留空=用规则/站点级 Host）' }), '仅这台源站回源时使用的 Host 头。同组多源站各自 Host 不同时填这里；规则里再设 Host 会覆盖它。');
+      const portField = field('端口', el('input', { class: 'input o-port', type: 'number', value: o.port || 443 }), 'https 默认 443，http 默认 80。可被⑨规则覆盖。');
+      const schemeField = field('协议', select('', [''], o.scheme || 'https', [{ value: 'https', label: 'https' }, { value: 'http', label: 'http' }], 'o-scheme'), '可被⑨规则覆盖。');
+      const hostField = field('回源 Host（该源站专用）', el('input', { class: 'input o-host', value: o.hostHeader?.custom || '', placeholder: '如 api1.internal（留空=用规则/站点级 Host）' }), '仅这台源站回源时使用的 Host 头（整池默认）。同组多源站各自 Host 不同时填这里；⑨规则再设 Host 会覆盖它。');
       // fetch 引擎无法手写 Host 头（平台强制 Host = 回源 URL hostname），
       // 该字段只有 socket 引擎能真正生效，故仅 socket 时显示。
       const hostNote = el('div', { class: 'hint', text: 'fetch 引擎下该 Host 由回源地址决定、无法自定义；如需自定义 Host 请把引擎改为 socket。' });
@@ -2913,12 +2926,12 @@ import { el, clear, $ } from './dom.js';
         addrField,
         portField,
         schemeField,
-        field('路径前缀', el('input', { class: 'input o-pathprefix', value: o.pathPrefix || '', placeholder: '如 /api/v1（留空=用请求原路径）' }), '追加在请求路径前面的固定前缀，每个源站可不同。例如三台同服务源站分别填 /node1、/node2、/node3，请求 /img/x.png 会分别回源到 /node1/img/x.png 等。留空则不加。'),
         hostField,
         hostNote,
-        field('引擎', engineSel, '回源方式：① fetch=标准回源，支持自定义 Host 头（CF/EO/ESA 均可用，Host 由「回源域名/地址」或规则级 hostHeader 决定）；② socket=已弃用（自定义 Host 现由 fetch 原生支持，CF 上裸 IP+HTTPS+自定义 SNI 由 fetchEngine 内部自动走 socket 兜底）；③ r2=回源到 R2 桶（仅 CF，需先在 wrangler.toml 绑定）。'),
+        field('引擎', engineSel, '回源方式（整池默认）：① fetch=标准回源，支持自定义 Host 头（CF/EO/ESA 均可用，Host 由「回源域名/地址」或规则级 hostHeader 决定）；② socket=已弃用（自定义 Host 现由 fetch 原生支持，CF 上裸 IP+HTTPS+自定义 SNI 由 fetchEngine 内部自动走 socket 兜底）；③ r2=回源到 R2 桶（仅 CF，需先在 wrangler.toml 绑定）。可被⑨规则覆盖。'),
         r2Fields,
         weightField,
+        overrideHint,
         el('button', { class: 'btn btn-sm btn-danger', text: '移除源站', onclick: () => row.remove() }),
       ]);
       syncEngine(); // 回显时根据已有 engine 显隐 R2 字段
@@ -2983,7 +2996,7 @@ import { el, clear, $ } from './dom.js';
           scheme: $('.o-scheme', row) ? $('.o-scheme', row).value : 'https',
           addr: engine === 'r2' ? '' : addr,
           port: Number($('.o-port', row).value) || 443,
-          pathPrefix: ($('.o-pathprefix', row).value || '').trim() || legacy.pathPrefix || '',
+          pathPrefix: legacy.pathPrefix || '',
           hostHeader: ($('.o-host', row).value || '').trim()
             ? { mode: 'custom', custom: ($('.o-host', row).value || '').trim() }
             : (legacy.hostHeader || { mode: 'inherit', custom: '' }),
@@ -3160,6 +3173,7 @@ import { el, clear, $ } from './dom.js';
     // 函数体内 document 里根本不存在这些 id，$() 返回 null —— 回填时会抛
     // TypeError（表现为打开设置页永远是空值），保存时同样取不到值。
     const gAdminPath = el('input', { class: 'input', id: 'g-adminPath', placeholder: 'panel' });
+    const gAdminDomain = el('input', { class: 'input', id: 'g-adminDomain', placeholder: 'panel.example.com' });
     const gTokenTtl = el('input', { class: 'input', id: 'g-tokenTtl', type: 'number' });
     const gConfigCacheTtl = el('input', { class: 'input', id: 'g-configCacheTtl', type: 'number' });
     const gGlobalRateLimit = el('input', { class: 'input', id: 'g-globalRateLimit', type: 'number', placeholder: '0 表示不限制' });
@@ -3180,6 +3194,7 @@ import { el, clear, $ } from './dom.js';
     const fillGlobalForm = (cfg) => {
       if (!cfg) return;
       gAdminPath.value = cfg.adminPath || '';
+      gAdminDomain.value = cfg.adminDomain || '';
       gTokenTtl.value = cfg.tokenTtl != null ? cfg.tokenTtl : '';
       gConfigCacheTtl.value = cfg.configCacheTtl != null ? cfg.configCacheTtl : '';
       gStatsEnabled.checked = !!cfg.statsEnabled;
@@ -3192,6 +3207,7 @@ import { el, clear, $ } from './dom.js';
       el('h4', {}, '全局配置'),
       el('div', { class: 'form-stack', id: 'global-form' }, [
         field('管理面路径', gAdminPath, '留空表示沿用当前已保存的值。'),
+        field('自定义面板域名', gAdminDomain, '留空=任意绑定域名均可进管理面板（兼容旧逻辑）；填写后仅此域名 + 管理面路径可进入，规避探测与越界。'),
         field('Token 有效期（秒）', gTokenTtl, '留空表示沿用当前已保存的值。'),
         field('配置缓存 TTL（秒）', gConfigCacheTtl, '留空表示沿用当前已保存的值。'),
         field('全局限流（req/s）⚠️实验特性', gGlobalRateLimit, '⚠️ 实验特性（待开发）：全局请求频率上限，0 表示不限制；最少 10 req/s。当前为实验阶段，不建议生产依赖。'),
@@ -3206,6 +3222,7 @@ import { el, clear, $ } from './dom.js';
             // 注意不要用 Number(...)||0 —— 那会把「留空」变成显式 0，反而覆盖掉旧值。
             const payload = {
               adminPath: gAdminPath.value.trim(),
+              adminDomain: gAdminDomain.value.trim(),
               tokenTtl: gTokenTtl.value.trim(),
               configCacheTtl: gConfigCacheTtl.value.trim(),
               globalRateLimit: gGlobalRateLimit.value.trim(),

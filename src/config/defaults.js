@@ -53,6 +53,8 @@ export const DEFAULT_SITE_HOST_HEADER = Object.freeze({
  */
 export const DEFAULT_GLOBAL = Object.freeze({
   adminPath: '__panel',
+  /** 自定义面板域名（留空=任意绑定域名均可进管理面板） */
+  adminDomain: '',
   passwordHash: '',
   passwordSalt: '',
   tokenTtl: 7200,
