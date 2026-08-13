@@ -11,6 +11,53 @@
   cpus: 2
   tags: cnb:arch:amd64
 
+# ---------------- 构建缓存 volumes ----------------
+# 利用云原生构建的 Docker volumes 能力，把构建机目录 mount 进容器，
+# 跨同构建机的多次流水线复用，免重复下载。覆盖三类环境部署产物：
+#   1) node_modules              —— npm ci 装好的项目依赖（命中后 up to date 秒过）
+#   2) /root/.npm                —— npm 本地缓存（加速 npm ci 与 npm install -g）
+#   3) /root/.cache/ms-playwright —— playwright 的 chromium 二进制（postinstall 跳过下载）
+#   4) /var/cache/apt/archives    —— apt 下载的 .deb（setup-browser-deps 免联网下载）
+#   5) /usr/local/lib/node_modules—— 全局包（esa-cli 等，ESA 按钮免 npm install -g）
+# 说明：volumes 缓存在「当前构建机」有效；构建机轮换则需重新预热（仍比纯裸跑快，
+#      因为 apt/npm 缓存卷大概率仍在）。需要跨构建机/跨流水线稳定命中请改用 docker:cache 镜像。
+# 远程开发（vscode 事件）刻意不挂此卷，保持纯净 debian 环境。
+.docker-cache-vol: &docker-cache-vol
+  volumes:
+    - node_modules:copy-on-write
+    - /root/.npm:copy-on-write
+    - /root/.cache/ms-playwright:copy-on-write
+    - /var/cache/apt/archives:copy-on-write
+    - /usr/local/lib/node_modules:copy-on-write
+
+# ---------------- 依赖缓存镜像（docker:cache） ----------------
+# 把环境部署整体烤进镜像（apt 库 + node_modules + chromium + esa-cli），
+# 推到远端镜像源，跨构建机/跨流水线稳定命中（彻底免运行期 apt/npm/下载）。
+# 与 volumes 并存时需注意：volumes 挂载点会覆盖容器内同路径，故 docker:cache 按钮
+# 只用「精简版」volumes（仅纯网络加速项，不含 node_modules/全局包/ms-playwright），
+# 避免空卷遮蔽镜像内已固化的内容。
+# 缓存镜像构建任务（每个启用镜像缓存的按钮 stages 首项）：
+.docker-cache-task: &docker-cache-task
+  name: 构建依赖缓存镜像
+  type: docker:cache
+  options:
+    dockerfile: cache.dockerfile
+    by:
+      - package.json
+      - package-lock.json
+    versionBy:
+      - package-lock.json
+  exports:
+    name: DOCKER_CACHE_IMAGE_NAME
+# 引用缓存镜像（stage 级 image，供 build/install 等阶段复用）：
+.docker-cache-image: &docker-cache-image
+  image: $DOCKER_CACHE_IMAGE_NAME
+# docker:cache 按钮专用的精简 volumes（仅网络加速，不遮蔽镜像固化内容）：
+.docker-cache-image-vol: &docker-cache-image-vol
+  volumes:
+    - /root/.npm:copy-on-write
+    - /var/cache/apt/archives:copy-on-write
+
 # 密钥仓库地址。CNB 不支持仓库级 Secret 直填，凭据须放在独立的「密钥仓库」，
 # 通过 imports 导入（详见 https://docs.cnb.cool/zh/repo/secret.html）。
 # 地址可用环境变量 CNB_SECRET_ENVS 覆盖，未配置时回退默认路径。
@@ -37,11 +84,19 @@
 # 【原则】不跳过测试，而是让流水线具备跑浏览器的能力。
 # 这里在 npm ci 之前预装系统库：postinstall 随后下载二进制即可直接可用。
 # 该步骤幂等；即使失败，scripts/e2e-browser.mjs 仍会在启动失败时自动补装重试。
+# 【缓存优化】配合 docker:cache 镜像：镜像已固化全部系统库，so 探针直接命中跳过；
+#   即便退回 volumes 模式（无镜像），命中 apt 缓存卷也跳过 apt-get update。
 .setup-browser-deps: &setup-browser-deps
+  <<: *docker-cache-image
   name: setup-browser-deps
   script: |
     set -e
     export DEBIAN_FRONTEND=noninteractive
+    if [ -f /usr/lib/x86_64-linux-gnu/libnss3.so ] \
+       && [ -f /usr/lib/x86_64-linux-gnu/libgbm.so.1 ]; then
+      echo "✓ 系统共享库已就绪（缓存镜像/卷命中，跳过 apt）"
+      exit 0
+    fi
     echo "▸ 预装 chromium 运行所需系统共享库..."
     apt-get update -qq
     # 逐包安装并兼容 Debian 13 的 t64 改名（libasound2 → libasound2t64）
@@ -57,25 +112,37 @@
     echo "✓ 系统共享库就绪"
 
 # ---------------- 校验步骤（仅手动校验按钮使用，绝不含部署） ----------------
+# 全部 stage 跑在 docker:cache 镜像上（*docker-cache-image），install 从镜像
+# 拷出 node_modules 让 npm ci 命中 up to date。首项 docker:cache 任务构建并导出镜像。
 .ci-stages: &ci-stages
+  - *docker-cache-task
   - *setup-browser-deps
   - name: install
+    <<: *docker-cache-image
     # postinstall（scripts/ensure-playwright-browsers.mjs）会在此下载 chromium，
     # 系统库已由上一步就位，故下载完即可直接启动。
-    script: npm ci
+    script: |
+      set -e
+      # 从缓存镜像把依赖拷到工作区（命中则 npm ci 直接 up to date）
+      cp -r "$NODE_PATH" ./node_modules 2>/dev/null || true
+      npm ci
   - name: check
+    <<: *docker-cache-image
     # 静态一致性检查（scripts/check.mjs）：CLOUD_PLATFORM 恒为 cf|eo|esa
     # + 自动生成前端入口可解析/可重建，与 GitHub Actions 的 ci.yml 对齐。
     script: npm run check
   - name: build
+    <<: *docker-cache-image
     # build.mjs 内置产物自检（文件完整性 + _worker.js 可加载 + 导出面）
     script: npm run build
   - name: e2e
+    <<: *docker-cache-image
     # scripts/e2e-test.mjs：用产物 _worker.js 跑通「健康检查→管理面→登录→鉴权→
     # 后台」完整链路 + Node 沙箱执行前端 JS 验证 window.API，拦截「构建成功但登录
     # 后进不去后台」这类运行时问题（与 GitHub Actions 的 ci.yml 对齐）。
     script: npm run test:e2e
   - name: test
+    <<: *docker-cache-image
     script: |
       set -e
       if ls test/*.test.js >/dev/null 2>&1; then
@@ -84,6 +151,7 @@
         echo "跳过：test/ 下暂无用例"
       fi
   - name: verify-deploy-config
+    <<: *docker-cache-image
     # 部署配置是纯文本，错了要到部署时才发现，这里提前静态校验
     script: |
       set -e
@@ -145,22 +213,22 @@ $:
             echo "✓ 环境体检完成"
 
   # ---- 按钮：仅构建校验（不部署，可随时验产物） ----
+  # 环境依赖由 docker:cache 镜像（ci-stages 首项）提供，故 job 级不再声明 docker/volumes。
   web_trigger_verify:
     - runner:
         <<: *runner2
-      docker:
-        <<: *docker-image
       stages: *ci-stages
 
   # ---- 按钮：部署 Cloudflare Workers ----
   web_trigger_deploy_cf_workers:
+    # 环境依赖由 docker:cache 镜像提供，job 级不声明 docker/volumes。
     - runner:
-        <<: *runner4
-      docker:
-        <<: *docker-image
+        <<: *runner2
       imports: *secret-envs
       stages:
+        - *docker-cache-task
         - name: 确认手动触发
+          <<: *docker-cache-image
           script: |
             echo "触发事件: $CNB_EVENT"
             echo "分支/提交: $CNB_BRANCH @ $CNB_COMMIT_SHORT"
@@ -168,11 +236,17 @@ $:
             echo "干跑模式: ${dry_run:-false}"
         - *setup-browser-deps
         - name: install
-          script: npm ci
+          <<: *docker-cache-image
+          script: |
+            set -e
+            cp -r "$NODE_PATH" ./node_modules 2>/dev/null || true
+            npm ci
         - name: check
+          <<: *docker-cache-image
           # 与 GitHub deploy-cf-workers.yml 对齐：build 前先做静态一致性检查
           script: npm run check
         - name: build
+          <<: *docker-cache-image
           # ADMIN_PATH 是【纯运行时】变量，build 阶段不读取它（见 build.mjs）。
           # 管理面静态资源使用固定物理路径 /assets，与 ADMIN_PATH 解耦，
           # 改管理面入口前缀无需重新构建。部署用内置默认 __panel 兜底，
@@ -181,18 +255,21 @@ $:
           # 上传，管理面静态资源由此命中边缘缓存、零函数额度（CF Workers 形态专属）。
           script: npm run build
         - name: 部署前自检清单
+          <<: *docker-cache-image
           script: |
             echo "── 部署前自检清单（CF 控制台「变量」中设置）──"
             echo "• REDIS_URL（必填，不绑 KV/R2/D1 时）：指向自建 Webdis/Redis"
             echo "• ADMIN_PASSWORD（可选）/ JWT_SECRET（强烈建议，≥8 位）"
             echo "• ADMIN_PATH（可选，不设用默认 __panel）/ CLOUD_PLATFORM（可不设，构建期已烘焙）"
         - name: 校验凭据
+          <<: *docker-cache-image
           script: |
             set -e
             [ -n "$CLOUDFLARE_API_TOKEN" ] || { echo "✗ 缺少 CLOUDFLARE_API_TOKEN（请检查密钥仓库）"; exit 1; }
             [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || { echo "✗ 缺少 CLOUDFLARE_ACCOUNT_ID"; exit 1; }
             echo "✓ 凭据就绪"
         - name: 干跑校验（不发布）
+          <<: *docker-cache-image
           if: |
             [ "$dry_run" = "true" ]
           script: |
@@ -200,6 +277,7 @@ $:
             npx wrangler deploy --dry-run --outdir /tmp/wrangler-dryrun
             echo "✓ 干跑通过，未发布到线上"
         - name: 生成临时部署配置（保留远程绑定/变量）
+          <<: *docker-cache-image
           if: |
             [ "$dry_run" != "true" ]
           script: |
@@ -211,6 +289,7 @@ $:
             # 面出现该值误导小白。根 wrangler.toml 始终保持干净（不暴露资源 ID、不写死入口前缀）。
             node scripts/gen-deploy-config.mjs
         - name: 发布到 Workers
+          <<: *docker-cache-image
           if: |
             [ "$dry_run" != "true" ]
           script: |
@@ -221,36 +300,45 @@ $:
 
   # ---- 按钮：部署 Cloudflare Pages ----
   web_trigger_deploy_cf_pages:
+    # 环境依赖由 docker:cache 镜像提供，job 级不声明 docker/volumes。
     - runner:
-        <<: *runner4
-      docker:
-        <<: *docker-image
+        <<: *runner2
       imports: *secret-envs
       stages:
+        - *docker-cache-task
         - name: 确认手动触发
+          <<: *docker-cache-image
           script: |
             echo "触发事件: $CNB_EVENT"
             echo "分支/提交: $CNB_BRANCH @ $CNB_COMMIT_SHORT"
             echo "目标: Cloudflare Pages"
         - *setup-browser-deps
         - name: install
-          script: npm ci
+          <<: *docker-cache-image
+          script: |
+            set -e
+            cp -r "$NODE_PATH" ./node_modules 2>/dev/null || true
+            npm ci
         - name: check
+          <<: *docker-cache-image
           # 与 GitHub deploy-cf-pages.yml 对齐：build 前先做静态一致性检查
           script: npm run check
         - name: build
+          <<: *docker-cache-image
           # ADMIN_PATH 是【纯运行时】变量，build 阶段不读取它（见 build.mjs）。
           # 管理面静态资源使用固定物理路径 /assets，与 ADMIN_PATH 解耦，
           # 改管理面入口前缀无需重新构建。部署用内置默认 __panel 兜底，
           # 部署后到管理面把入口前缀改成随机串并存进 KV（最高优先级生效）。
           script: npm run build
         - name: 部署前自检清单
+          <<: *docker-cache-image
           script: |
             echo "── 部署前自检清单（CF Pages 控制台「环境变量」中设置）──"
             echo "• REDIS_URL（必填，不绑 KV/R2/D1 时）：指向自建 Webdis/Redis"
             echo "• ADMIN_PASSWORD（可选）/ JWT_SECRET（强烈建议，≥8 位）"
             echo "• ADMIN_PATH（可选，不设用默认 __panel）/ CLOUD_PLATFORM（可不设，构建期已烘焙）"
         - name: 校验凭据
+          <<: *docker-cache-image
           script: |
             set -e
             [ -n "$CLOUDFLARE_API_TOKEN" ] || { echo "✗ 缺少 CLOUDFLARE_API_TOKEN（请检查密钥仓库）"; exit 1; }
@@ -260,6 +348,7 @@ $:
         # 构建期已由 build.mjs 的 esbuild define 把默认值 'cf' 烘焙进 _worker.js，
         # caps.js 读不到运行时变量时会用它兜底，故 Pages 零配置即可运行。
         - name: 发布到 Pages
+          <<: *docker-cache-image
           script: |
             set -e
             # 优先级：按钮输入 > 密钥仓库变量 > 默认值
@@ -278,28 +367,36 @@ $:
   # 说明：CNB 官方支持直接对接 EO，用腾讯云提供的 tencentcom/deploy-eopages 镜像，
   #       镜像内置 edgeone CLI。部署步骤单独换镜像，故 imports 下沉到该 stage。
   web_trigger_deploy_eo_pages:
+    # 环境依赖由 docker:cache 镜像提供（build 前阶段）；最后发布阶段切换 EO 官方镜像。
     - runner:
-        <<: *runner4
-      docker:
-        <<: *docker-image
+        <<: *runner2
       stages:
+        - *docker-cache-task
         - name: 确认手动触发
+          <<: *docker-cache-image
           script: |
             echo "触发事件: $CNB_EVENT"
             echo "分支/提交: $CNB_BRANCH @ $CNB_COMMIT_SHORT"
             echo "目标: EdgeOne Pages / 环境: ${eo_env:-preview}"
         - *setup-browser-deps
         - name: install
-          script: npm ci
+          <<: *docker-cache-image
+          script: |
+            set -e
+            cp -r "$NODE_PATH" ./node_modules 2>/dev/null || true
+            npm ci
         - name: check
+          <<: *docker-cache-image
           # 与 GitHub deploy-eo-pages.yml 对齐：build 前先做静态一致性检查
           script: npm run check
         - name: build
+          <<: *docker-cache-image
           # ADMIN_PATH 是【纯运行时】变量，build 阶段不读取它（见 build.mjs）。
           # 管理面静态资源使用固定物理路径 /assets，与 ADMIN_PATH 解耦，
           # 改管理面入口前缀无需重新构建。运行时在「环境变量」里配 ADMIN_PATH 即可。
           script: npm run build
         - name: 部署前自检清单
+          <<: *docker-cache-image
           script: |
             echo "── 部署前自检清单（EO 控制台「环境变量」中设置）──"
             echo "• REDIS_URL（必填，不用 EO KV 时）：指向自建 Webdis/Redis"
@@ -336,13 +433,14 @@ $:
   #       「环境变量」中设置 REDIS_URL，否则运行时 store.js requireKV 会报错、配置无法保存。
   #       该变量属运行期配置，不进密钥仓库、不进仓库。
   web_trigger_deploy_esa_pages:
+    # 环境依赖（含全局 esa-cli）由 docker:cache 镜像提供，job 级不声明 docker/volumes。
     - runner:
-        <<: *runner4
-      docker:
-        <<: *docker-image
+        <<: *runner2
       imports: *secret-envs
       stages:
+        - *docker-cache-task
         - name: 确认手动触发
+          <<: *docker-cache-image
           script: |
             echo "触发事件: $CNB_EVENT"
             echo "分支/提交: $CNB_BRANCH @ $CNB_COMMIT_SHORT"
@@ -350,14 +448,21 @@ $:
             echo "（流水线非交互：本步骤仅构建产物 + 自检，实际发布由 ESA 控制台连接仓库自动完成）"
         - *setup-browser-deps
         - name: install
-          script: npm ci
+          <<: *docker-cache-image
+          script: |
+            set -e
+            cp -r "$NODE_PATH" ./node_modules 2>/dev/null || true
+            npm ci
         - name: check
+          <<: *docker-cache-image
           # 与 GitHub deploy-esa-pages.yml 对齐：build 前先做静态一致性检查
           script: npm run check
         - name: build
+          <<: *docker-cache-image
           # ADMIN_PATH 等是【纯运行时】变量，build 阶段不读取（见 build.mjs）。
           script: npm run build
         - name: 部署前自检清单（流水线只读校验，发布在控制台）
+          <<: *docker-cache-image
           script: |
             echo "── 部署前自检清单 ──"
             echo "• 已在 ESA 控制台设置环境变量 REDIS_URL（必填，ESA EdgeKV 收费已禁用）"
@@ -367,6 +472,7 @@ $:
             echo "• 在 ESA 控制台「边缘计算和 AI → 函数和 Pages → 新建 Pages → 连接 CNB 仓库（根目录）」"
             echo "  本按钮 push 后 ESA 会自动读 esa.jsonc 构建并部署。"
         - name: 发布到 ESA Pages（esa-cli 非交互）
+          <<: *docker-cache-image
           # 非交互登录：凭据来自密钥仓库的 ESA_AK_ID / ESA_AK_SECRET，映射为 esa-cli 期望的环境变量
           script: |
             set -e
@@ -379,7 +485,8 @@ $:
             [ -d dist/public ] || { echo "✗ 缺少 dist/public（构建产物）"; exit 1; }
             export ESA_ACCESS_KEY_ID="$ESA_AK_ID"
             export ESA_ACCESS_KEY_SECRET="$ESA_AK_SECRET"
-            npm install -g esa-cli
+            # esa-cli 已固化在缓存镜像内（/usr/local/lib/node_modules），直接可用
+            command -v esa-cli >/dev/null 2>&1 || npm install -g esa-cli
             esa-cli login
             echo "▸ 提交版本..."
             esa-cli commit
