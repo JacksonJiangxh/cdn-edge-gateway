@@ -40,8 +40,10 @@
 # 【关键】CNB 的 docker:cache 构建上下文 ONLY 包含 by 列表里的文件 + Dockerfile 本身，
 #   未列出的文件在构建时「视为不存在」。故 COPY . . 的上下文并非整个仓库。
 #   当前 npm ci 的 postinstall 依赖 scripts/ensure-playwright-browsers.mjs，必须把
-#   scripts/ 纳入 by，否则镜像构建阶段 npm ci 会因找不到脚本而 MODULE_NOT_FOUND。
-#   by 同时决定「何时重建镜像」：package.json / package-lock.json / scripts/ 任一变化即重建。
+#   scripts/ 下的具体文件纳入 by，否则镜像构建阶段 npm ci 会因找不到脚本而 MODULE_NOT_FOUND。
+# 【坑】by 里写目录/glob（如 scripts/*）在当前平台版本「不会」展开进 build context（实测
+#   日志显示 context 仍是 263kB、/space/scripts 不存在）。必须逐文件显式列出才生效。
+#   by 同时决定「何时重建镜像」：package.json / package-lock.json / 任一 scripts 文件变化即重建。
 #   versionBy 仅取 package-lock.json：镜像 tag 版本只随依赖 lock 变化，避免脚本小改动频繁换 tag。
 .docker-cache-task: &docker-cache-task
   name: 构建依赖缓存镜像
@@ -51,7 +53,18 @@
     by:
       - package.json
       - package-lock.json
-      - scripts/*
+      - scripts/_tpl_check.mjs
+      - scripts/check.mjs
+      - scripts/cleanup-cnb-history.py
+      - scripts/deploy-esa-cli.mjs
+      - scripts/dev.mjs
+      - scripts/e2e-browser.mjs
+      - scripts/e2e-test.mjs
+      - scripts/ensure-playwright-browsers.mjs
+      - scripts/gen-deploy-config.mjs
+      - scripts/gen-entries.mjs
+      - scripts/test-frontend-dom.mjs
+      - scripts/test-mem-budget.mjs
     versionBy:
       - package-lock.json
   exports:
