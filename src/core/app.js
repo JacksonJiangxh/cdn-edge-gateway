@@ -15,7 +15,7 @@
  * ============================================================================
  */
 
-import { getGlobal } from '../config/store.js';
+import { getGlobal, ensureGlobalRulesSeeded } from '../config/store.js';
 import { handleApi } from '../api/router.js';
 import { renderAdminPage, tryServePanelStatic } from '../api/adminPage.js';
 import { handleProxy } from '../proxy/pipeline.js';
@@ -53,6 +53,10 @@ export async function handleRequest(ctx) {
       { headers: { 'content-type': 'application/json; charset=utf-8' } }
     );
   }
+
+  // ---- 冷启动主动播种：部署后 isolate 首请求时确保全站规则已在 KV 落盘内置默认 ----
+  // fire-and-forget：不 await，避免拖慢首响；失败由 getGlobalRules 惰性兜底保障。
+  ensureGlobalRulesSeeded(ctx).catch(() => {});
 
   // ---- 读取全局配置以确定管理面路径 ----
   // 注意：getGlobal 内部有 isolate 内存缓存，正常情况不会每请求都打 KV

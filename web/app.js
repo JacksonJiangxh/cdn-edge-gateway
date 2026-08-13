@@ -33,6 +33,33 @@ import { el, clear, $ } from './dom.js';
 
   const APP_DATA = { global: null, sites: [], pools: [], stats: null, info: null };
 
+  // 全站通用（兜底）规则编辑器共享的静态映射与工具函数。
+  // 原定义在 renderTrafficSequence 局部作用域，但顶层函数 openGlobalRulesDrawer
+  // 也需引用，局部变量对其不可见，会导致 ReferenceError: GLOBAL_STAGE_OPS is not defined。
+  // 故统一提升到 IIFE 顶层，使序列视图与全站规则编辑器共享同一套定义。
+  let GLOBAL_STAGES = {};
+  const GLOBAL_STAGE_OPS = {
+    rewrite: ['rewrite'],
+    redirect: ['redirect'],
+    terminate: ['forceHttps', 'directResponse'],
+    reqHeaders: ['reqHeaders'],
+    origin: ['hostHeader', 'clientIp', 'followRedirect', 'originTimeout', 'originConn'],
+    cache: ['cache'],
+    respHeaders: ['respHeaders'],
+  };
+  // 嵌套型阶段：stages[stage] 的值是该阶段的 action 片段（{type:'none'} 等），
+  // 而 terminate / origin 是「扁平 action 字段」直接作为 value。
+  const NESTED_STAGES = new Set(['rewrite', 'redirect', 'reqHeaders', 'respHeaders', 'cache']);
+  // 把 stages[stage] 的值包成 buildRuleCard 期望的 rule.action
+  function globalStageToAction(stage, value) {
+    if (NESTED_STAGES.has(stage)) return { [stage]: value && typeof value === 'object' ? value : {} };
+    return value && typeof value === 'object' ? { ...value } : {};
+  }
+  // 从 buildRuleCard.read() 的 action 还原出 stages[stage] 的值
+  function actionToGlobalStage(stage, action) {
+    return NESTED_STAGES.has(stage) ? (action[stage] || {}) : (action || {});
+  }
+
   function fmtNum(n) {
     n = Number(n) || 0;
     if (n >= 1e9) return (n / 1e9).toFixed(2) + ' GB';
@@ -409,38 +436,12 @@ import { el, clear, $ } from './dom.js';
     wrap.appendChild(flow);
 
     // 预取全站通用（兜底）规则：新阶段→默认动作映射（每阶段 1 条、无条件）。
-    // 用于各阶段「站点未设置→回落全站兜底」的标注与跳转。GLOBAL_STAGES 键为
-    // STAGE_ORDER，值为该阶段的默认 action 片段（如 cache 阶段值为 CachePolicy 对象）。
-    let GLOBAL_STAGES = {};
+    // 用于各阶段「站点未设置→回落全站兜底」的标注与跳转。写入 IIFE 顶层的
+    // GLOBAL_STAGES（与全站规则编辑器共享），预留失败兜底为 {}。
     try {
       const gr = await API.rules.global().catch(() => null);
       GLOBAL_STAGES = (gr && gr.stages) || {};
     } catch { GLOBAL_STAGES = {}; }
-
-    // 全站兜底编辑器中，每个阶段仅允许编辑「该阶段拥有的动作」（与后端
-    // buildActionByStage 的 ownedFields 一一对应）。注意 redirect 属独立 stage，
-    // 故 terminate 阶段只允许 forceHttps / directResponse，避免把 redirect 误并入 terminate。
-    const GLOBAL_STAGE_OPS = {
-      rewrite: ['rewrite'],
-      redirect: ['redirect'],
-      terminate: ['forceHttps', 'directResponse'],
-      reqHeaders: ['reqHeaders'],
-      origin: ['hostHeader', 'clientIp', 'followRedirect', 'originTimeout', 'originConn'],
-      cache: ['cache'],
-      respHeaders: ['respHeaders'],
-    };
-    // 嵌套型阶段：stages[stage] 的值是该阶段的 action 片段（{type:'none'} 等），
-    // 而 terminate / origin 是「扁平 action 字段」直接作为 value。
-    const NESTED_STAGES = new Set(['rewrite', 'redirect', 'reqHeaders', 'respHeaders', 'cache']);
-    // 把 stages[stage] 的值包成 buildRuleCard 期望的 rule.action
-    function globalStageToAction(stage, value) {
-      if (NESTED_STAGES.has(stage)) return { [stage]: value && typeof value === 'object' ? value : {} };
-      return value && typeof value === 'object' ? { ...value } : {};
-    }
-    // 从 buildRuleCard.read() 的 action 还原出 stages[stage] 的值
-    function actionToGlobalStage(stage, action) {
-      return NESTED_STAGES.has(stage) ? (action[stage] || {}) : (action || {});
-    }
 
     // 汇总一条规则的动作子阶段（用于序列展示）
     function ruleSubs(r) {
@@ -497,7 +498,7 @@ import { el, clear, $ } from './dom.js';
         // 仅当非规则型阶段（无 opts）且本站无全站兜底时，才无可点入口。
         const onClick = opts
           ? () => openRulesDrawer(site.host, { ...opts, stage: no, isEmpty: !hasSite })
-          : (hasGlobal ? () => { location.hash = '#/sequence?host=__global__'; } : null);
+          : (hasGlobal ? () => openGlobalRulesDrawer(no, { ...STAGE_OPS[no], stage: no }) : null);
         const owner = opts ? opts.owner : (hasGlobal ? '全站通用规则（兜底，点击前往）' : null);
         flow.appendChild(seqStage(icon, `${no} ${title}`, summary, badge, 'sec-rules', onClick, owner));
         if (hasSite && matched.length) {
@@ -1992,6 +1993,7 @@ import { el, clear, $ } from './dom.js';
   // ⑫ 缓存键阶段的专属抽屉：只编辑「站点缓存代次 cacheGen」，不与 ① 站点基础抽屉重复联动。
   // ⑪ Cache Rules 的缓存策略由「路由规则」抽屉管理；这里的 cacheGen 才是 ⑫ 阶段唯一可干预项。
   async function openCacheGenDrawer(host, cacheRuleCount, hasCache) {
+    if (host === '__global__' || host === '__all__') { toast('全站通用规则请使用全站规则编辑器', 'info'); return; }
     if (!host) { toast('请先创建站点', 'err'); return; }
     let site;
     try { site = await API.sites.get(host); } catch (e) { toast(e.message, 'err'); return; }
@@ -2017,6 +2019,7 @@ import { el, clear, $ } from './dom.js';
   }
 
   async function openSiteDrawer(host, anchor) {
+    if (host === '__global__' || host === '__all__') { toast('全站通用规则请使用全站规则编辑器', 'info'); return; }
     let site;
     if (host) {
       try { site = await API.sites.get(host); } catch (e) { toast(e.message, 'err'); return; }
@@ -2511,6 +2514,7 @@ import { el, clear, $ } from './dom.js';
   // 安全防护：独立抽屉，只读写站点的 security 字段，不碰基础设置/规则/源站
   // 内部按 ②.1~②.5 五个最小任务包分节，anchor 可直达其中一节
   async function openSecurityDrawer(host, anchor) {
+    if (host === '__global__' || host === '__all__') { toast('全站通用规则请使用全站规则编辑器', 'info'); return; }
     if (!host) { toast('请先创建站点', 'err'); return; }
     let site;
     try { site = await API.sites.get(host); } catch (e) { toast(e.message, 'err'); return; }

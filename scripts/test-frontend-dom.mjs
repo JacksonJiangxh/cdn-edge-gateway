@@ -132,7 +132,16 @@ function makeApiStub() {
     },
     sites: {
       list: async () => ({ sites: [SITE] }),
-      get: async (host) => ({ ...SITE, host }),
+      get: (() => {
+        const fn = async (host) => {
+          fn.__calls++;
+          fn.__lastHost = host;
+          return { ...SITE, host };
+        };
+        fn.__calls = 0;
+        fn.__lastHost = null;
+        return fn;
+      })(),
       saveRules: async () => ({}),
       save: async () => ({}),
       saveBasics: async () => ({}),
@@ -168,7 +177,14 @@ function makeApiStub() {
       save: async () => ({}),
     },
     rules: {
-      global: async () => ({ stages: {} }),
+      global: (() => {
+        const fn = async () => {
+          fn.__calls++;
+          return { stages: {} };
+        };
+        fn.__calls = 0;
+        return fn;
+      })(),
       saveGlobal: async () => ({}),
     },
     kv: {
@@ -395,6 +411,79 @@ export async function runFrontendDomTest() {
       await sleep(60);
       assert(doc.getElementById('drawer').hidden === true, '「修改请求头」抽屉已关闭');
     }
+  }
+
+  // ── 用例 T5：全站兜底非规则型阶段卡片点击不触发 sites.get('__global__') ──
+  // 复现 bug：原 web/app.js:501 把 __global__ 当站点 host 跳转
+  // → openRulesDrawer('__global__') → API.sites.get('__global__') → 后端 404。
+  // 修复后：非规则型阶段卡片改为直接 openGlobalRulesDrawer(no)，内部调
+  // API.rules.global()，绝不触发 sites.get。
+  console.log('▸ 用例 T5：全站兜底非规则型阶段卡片不触发 sites.get(__global__)');
+  {
+    // 记录点击前 sites.get / rules.global 调用计数
+    const sitesGet = window.API.sites.get;
+    const rulesGlobal = window.API.rules.global;
+    const beforeSites = sitesGet.__calls || 0;
+    const beforeRules = rulesGlobal.__calls || 0;
+
+    // 进入流量序列视图
+    window.location.hash = '#/sequence';
+    window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+    await sleep(250);
+
+    // 切到「全站通用规则」视图（host === '__global__' → renderGlobal）：
+    // 全站兜底编辑器在此视图内，卡片 onClick 走 openGlobalRulesDrawer（修复目标）。
+    // （站点序列视图里的「回落全站兜底」卡片是规则型阶段、走 openRulesDrawer(host)，
+    //   属合法路径，会调用 sites.get(真实host)，不应在此用例断言。）
+    const hostSel = doc.querySelector('select');
+    assert(!!hostSel, '流量序列视图存在 host 选择器');
+    if (hostSel) {
+      hostSel.value = '__global__';
+      hostSel.dispatchEvent(new window.Event('change'));
+      await sleep(250);
+    }
+
+    // 找到全站兜底阶段卡片（标题含「全站」或标注「内置默认(无动作)」，
+    // 且 onClick 走 openGlobalRulesDrawer 而非站点抽屉）
+    const globalStageCards = [...doc.querySelectorAll('.seq-stage')].filter((el) => {
+      const txt = el.textContent || '';
+      return /全站|内置默认|无动作/.test(txt);
+    });
+    assert(globalStageCards.length > 0, '流量序列中存在全站兜底阶段卡片', `命中数=${globalStageCards.length}`);
+
+    let triggeredDrawer = false;
+    for (const card of globalStageCards) {
+      const errBase = errors.length;
+      const callsBefore = sitesGet.__calls || 0;
+      try {
+        card.click();
+      } catch (e) {
+        errors.push('点击全站兜底卡片抛错: ' + (e && e.message));
+      }
+      await sleep(250);
+      const callsAfter = sitesGet.__calls || 0;
+      assert(callsAfter === callsBefore,
+        `点击全站兜底卡片「${card.textContent.slice(0, 12).trim()}」未触发 sites.get`,
+        `点击后 sites.get 调用 +${callsAfter - callsBefore}`);
+      assert(errors.length === errBase, '点击全站兜底卡片无运行时报错',
+        errors.slice(errBase).map(String).join(' | '));
+      // 任一卡片成功打开全站规则抽屉即可标记
+      const drawer = doc.getElementById('drawer');
+      if (drawer && drawer.hidden === false) {
+        triggeredDrawer = true;
+        doc.getElementById('drawer-close')?.click();
+        await sleep(60);
+      }
+    }
+
+    // 总体断言：整个点击过程未新增任何 sites.get 调用（杜绝 __global__ 404）
+    const totalSites = (sitesGet.__calls || 0) - beforeSites;
+    assert(totalSites === 0,
+      'T5 实际：全站兜底卡片点击全程未触发 sites.get（期望 0）', `实际新增 ${totalSites} 次`);
+    // 且至少一次触发了 openGlobalRulesDrawer → API.rules.global()
+    const totalRules = (rulesGlobal.__calls || 0) - beforeRules;
+    assert(totalRules > 0 || triggeredDrawer,
+      'T5 实际：全站规则抽屉被打开（等价于调 API.rules.global）', `rules.global 调用 +${totalRules}`);
   }
 
   // ── 用例 B'/C'：受限模式「添加操作」下拉已移除、操作卡片初始即内联 ────────

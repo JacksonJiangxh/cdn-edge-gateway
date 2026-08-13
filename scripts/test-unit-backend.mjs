@@ -70,6 +70,7 @@ import {
   DEFAULT_RULE_ACTION,
   DEFAULT_GLOBAL_RULES,
   cloneGlobalRules,
+  cloneGlobalSettings,
   POOL_KINDS,
   MATCH_TARGETS,
   MATCH_OPERATORS,
@@ -95,6 +96,13 @@ import {
 
 import { DEFAULT_RETRY_ON, CONFIG_VERSION } from '../src/contracts.js';
 import { STAGE_OP_FIELDS } from '../src/config/schema.js';
+
+import {
+  getGlobalRules,
+  putGlobalRules,
+  ensureGlobalRulesSeeded,
+  invalidateMemCache,
+} from '../src/config/store.js';
 
 // ----------------------------------------------------------------------------
 // 测试运行器（极简 TAP 风格，零依赖）
@@ -1162,6 +1170,158 @@ test('validateGlobalRulesStages: 某阶段非法值被拒绝并收集错误', ()
   assert.equal(r.ok, false, '非法字段应校验失败');
   assert.ok(r.errors.some((e) => /cache/.test(e)), '错误应指向 cache 阶段');
 });
+
+// ----------------------------------------------------------------------------
+// 全站通用规则落盘：期望 expected vs 实际 actual + 模拟触发
+// 内存 KV 桩：duck-typed，满足 getKV 所需 get/put，物理键存储。
+// 由于 store 模块级缓存 _mem / _seedPromise 跨测试共享，每个用例用独立
+// KV 桩 + invalidateMemCache() 隔离；bumpVersion 不可导出，用读回 cfg:version
+// 实际值断言 bump 次数（initial = 0，每次 +1）。
+// ----------------------------------------------------------------------------
+
+// store.js 经 getKV → wrap 会对键名做 encodeKey 编码（cfg:global_rules → cfg_3Aglobal_5Frules）。
+// 测试桩是「裸 KV 绑定」，由 wrap 负责编码；测试读回/预置必须用编码后的物理键，
+// 否则与 store 实际写入的物理键不匹配（导致读回为 null 或脏数据）。
+const GR_KEY = encodeKey('cfg:global_rules');
+const VER_KEY = encodeKey('cfg:version');
+
+/** 构造一个内存 KV 桩 + 注入 ctx.env.CDN_KV 的 makeCtx */
+function makeGlobalCtx() {
+  const map = new Map();
+  const kv = {
+    async get(k) { return map.has(k) ? map.get(k) : null; },
+    async put(k, v) { map.set(k, v); return undefined; },
+    async delete(k) { map.delete(k); return undefined; },
+    _map: map, // 便于测试直接读回实际值
+  };
+  const ctx = makeCtx({ env: { CDN_KV: kv } });
+  return { ctx, kv, map };
+}
+
+/** 读回 KV 中 cfg:global_rules 的实际解析对象（物理键） */
+async function readGlobalRulesActual(kv) {
+  const raw = await kv.get(GR_KEY);
+  return raw ? JSON.parse(raw) : null;
+}
+/** 读回 KV 中 cfg:version 的实际值（物理键，存储为整数） */
+async function readVersionActual(kv) {
+  const raw = await kv.get(VER_KEY);
+  if (raw == null) return 0;
+  try { return Number(JSON.parse(raw)) || 0; } catch { return 0; }
+}
+
+// T1. 模拟冷启动 seeding 落盘（空 KV）
+testA('T1 落盘(冷启动): 空 KV 经 putGlobalRules 播种全 7 阶段 + bump 一次', async () => {
+  const { ctx, kv } = makeGlobalCtx();
+  invalidateMemCache();
+  // 模拟触发：ensureGlobalRulesSeeded（无模块级 _seedPromise 时第一次进入）
+  await ensureGlobalRulesSeeded(ctx);
+
+  // 期望 expected
+  const expectedStages = cloneGlobalRules();
+  const expectedKeys = [...STAGE_ORDER].sort();
+
+  // 实际 actual
+  const actual = await readGlobalRulesActual(kv);
+  assert.ok(actual !== null, '实际：KV 中 cfg:global_rules 应已落盘');
+  assert.deepEqual(Object.keys(actual.stages).sort(), expectedKeys,
+    `实际 stages 键集应 === 全部 7 阶段，得到: ${Object.keys(actual.stages).sort().join(',')}`);
+  // 每阶段非空对象
+  for (const stage of STAGE_ORDER) {
+    assert.ok(actual.stages[stage] && typeof actual.stages[stage] === 'object',
+      `实际：阶段 ${stage} 应为非空对象`);
+  }
+  // 与期望结构一致
+  assert.deepEqual(Object.keys(actual.stages).sort(), Object.keys(expectedStages).sort(),
+    '实际键集与期望 base 键集一致');
+  // bumpVersion 恰好一次（从 0 → 1）
+  const v = await readVersionActual(kv);
+  assert.equal(v, 1, `实际 cfg:version 应 bump 一次到 1，得到: ${v}`);
+});
+
+// T2. 部分缺失 stages 读取补全
+testA('T2 读取补全: 部分缺失的非空 stages 由 base 合并补全 + bump 一次', async () => {
+  const { ctx, kv } = makeGlobalCtx();
+  invalidateMemCache();
+  // 设置：KV 仅 2/7 阶段
+  const partial = {
+    stages: {
+      rewrite: { type: 'prefix', value: '/v1' },
+      cache: { enabled: false },
+    },
+    settings: { rulesVersion: 1, defaultUpstream: 'pool:main' },
+  };
+  await kv.put(GR_KEY, JSON.stringify(partial));
+
+  // 模拟触发：getGlobalRules
+  const got = await getGlobalRules(ctx);
+
+  // 期望 expected：返回含全部 7 阶段，缺失阶段由 cloneGlobalRules 补全
+  assert.deepEqual(Object.keys(got.stages).sort(), [...STAGE_ORDER].sort(),
+    `期望返回全部 7 阶段，得到: ${Object.keys(got.stages).sort().join(',')}`);
+  assert.equal(got.stages.rewrite.type, 'prefix', '已有 rewrite.type 应保留 prefix');
+  assert.equal(got.stages.cache.enabled, false, '已有 cache.enabled 应保留 false');
+  assert.equal(got.stages.redirect.enabled, false, '缺失 redirect 由 base 补全为默认关闭');
+  assert.ok(got.stages.reqHeaders && typeof got.stages.reqHeaders === 'object', '缺失 reqHeaders 由 base 补全');
+  assert.ok(got.stages.origin && typeof got.stages.origin === 'object', '缺失 origin 由 base 补全');
+  assert.ok(got.stages.respHeaders && typeof got.stages.respHeaders === 'object', '缺失 respHeaders 由 base 补全');
+  assert.ok(got.stages.terminate && typeof got.stages.terminate === 'object', '缺失 terminate 由 base 补全');
+
+  // 实际 actual：KV 应被改写为合并后全量（仅新增 key 时写回 + bump）
+  const actual = await readGlobalRulesActual(kv);
+  assert.deepEqual(Object.keys(actual.stages).sort(), [...STAGE_ORDER].sort(),
+    '实际 KV 应被改写为合并后全量 7 阶段');
+  const v = await readVersionActual(kv);
+  assert.equal(v, 1, `实际 cfg:version 应因新增 key 而 bump 一次到 1，得到: ${v}`);
+});
+
+// T3. 模拟人工编辑调用 putGlobalRules
+testA('T3 模拟人工编辑: putGlobalRules 落盘后全 7 阶段 + rewrite.type=none', async () => {
+  const { ctx, kv } = makeGlobalCtx();
+  invalidateMemCache();
+  // 先播种完整结构
+  await ensureGlobalRulesSeeded(ctx);
+
+  // 模拟触发：等价于前端 openGlobalRulesDrawer → API.rules.saveGlobal
+  // 输入仅改 rewrite.type='none'，其余阶段缺失由 validateGlobalRulesStages 补
+  const inputStages = { rewrite: { type: 'none' } };
+  const inputSettings = { rulesVersion: 2, defaultUpstream: 'pool:edge' };
+  await putGlobalRules(ctx, inputStages, inputSettings);
+
+  // 期望 expected：落盘后 stages 仍含全 7 阶段，rewrite.type==='none'，其余保留 base 默认
+  const actual = await readGlobalRulesActual(kv);
+  assert.deepEqual(Object.keys(actual.stages).sort(), [...STAGE_ORDER].sort(),
+    '期望：落盘后保留全部 7 阶段（缺失由校验补全）');
+  assert.equal(actual.stages.rewrite.type, 'none', '期望：rewrite.type 应被人工编辑为 none');
+  assert.equal(actual.stages.cache.enabled, false, '期望：未编辑的 cache 保留 base 默认关闭');
+  // settings 经 validateGlobalSettings 用内置默认基线裁剪/补全：未知字段(rulesVersion/defaultUpstream)被忽略，
+  // 合法段(security/request/...)保留内置默认。语义与人工在管理面编辑等价。
+  assert.ok(actual.settings && typeof actual.settings === 'object', '期望：settings 段存在且为对象');
+  assert.equal(actual.settings.security.rateLimitRpm, 600, '期望：settings.security 来自内置默认基线');
+  assert.deepEqual(actual.settings.request.clientIpHeaders, ['cf-connecting-ip', 'x-real-ip', 'x-forwarded-for'],
+    '期望：settings.request 来自内置默认基线');
+  // 与 T1 落盘结构对比：语义一致（程序自动化 == 人工逐一设置）
+  const expectedKeys = [...STAGE_ORDER].sort();
+  assert.deepEqual(Object.keys(actual.stages).sort(), expectedKeys, '实际键集与期望一致');
+});
+
+// T4. 幂等：已全量时 getGlobalRules 不重复写回/bump
+testA('T4 幂等: 已全量时 getGlobalRules 不再写回、bumpVersion 不额外触发', async () => {
+  const { ctx, kv } = makeGlobalCtx();
+  invalidateMemCache();
+  // 设置：KV 已全量 7 阶段 = cloneGlobalRules()
+  await kv.put(GR_KEY, JSON.stringify({ stages: cloneGlobalRules(), settings: cloneGlobalSettings() }));
+  const vBefore = await readVersionActual(kv); // 0（未 bump 过）
+
+  // 模拟触发：getGlobalRules（应直接原样返回，无新增 key → 不写回、不 bump）
+  const got = await getGlobalRules(ctx);
+  assert.deepEqual(Object.keys(got.stages).sort(), [...STAGE_ORDER].sort(),
+    '已全量时应原样返回全部 7 阶段');
+
+  const vAfter = await readVersionActual(kv);
+  assert.equal(vAfter, vBefore, `幂等：已全量时 cfg:version 不应被额外 bump（前 ${vBefore} 后 ${vAfter}）`);
+});
+
 
 test('validateGlobalRulesStages: 顶层非法类型（数组/字符串）被拒', () => {
   assert.equal(validateGlobalRulesStages([]).ok, false, '数组应被拒');

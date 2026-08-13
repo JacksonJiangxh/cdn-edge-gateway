@@ -33,7 +33,7 @@ import {
   deepClone,
 } from './defaults.js';
 import { STAGE_ORDER } from './stages.js';
-import { validateGlobal } from './schema.js';
+import { validateGlobal, validateGlobalRulesStages } from './schema.js';
 import { registerDomain, allocBytes, releaseBytes, syncEntries } from '../platform/memBudget.js';
 
 // ============================================================================
@@ -851,6 +851,10 @@ export async function listPools(ctx) {
 
 const K_GLOBAL_RULES = 'cfg:global_rules';
 
+// 冷启动播种去重：每个 isolate 生命周期内仅触发一次检测+写盘。
+// 用 Promise 而非布尔，保证并发冷启动请求只打一次 KV（首请求拿到 Promise，其余复用）。
+let _seedPromise = null;
+
 /**
  * 把旧的「全站通用规则 Rule[]」结构迁移成新的「阶段→默认动作」映射。
  * 旧数据每阶段可能有多条带 conditions 的规则，这里取每阶段「第一条」的 action
@@ -867,6 +871,43 @@ function migrateGlobalRulesFromArray(data) {
     stages[stage] = first ? deepClone(first.action[stage]) : cloneGlobalRules()[stage];
   }
   return stages;
+}
+
+/**
+ * 冷启动主动播种：部署后 isolate 首次处理请求时，若 KV 中全站规则缺失/为空结构，
+ * 则从内置 DEFAULT_GLOBAL_RULES / cloneGlobalSettings() 写入 KV，使后续管理面与数据面
+ * 读取始终命中一致、非空的全站规则（规范化「内置写入落盘」的触发时机）。
+ *
+ * 设计：
+ *  - 每个 isolate 仅执行一次（模块级 _seedPromise 去重，并发首请求复用）。
+ *  - fire-and-forget：调用方不 await，播种失败仅记日志不影响请求，由 getGlobalRules
+ *    惰性兜底继续保障落盘（CDN 可用性优先）。
+ *  - 幂等：仅当确实写入时才 bumpVersion，避免无谓的版本号自增触发全站失效。
+ *
+ * @param {import('../contracts.js').Ctx} ctx
+ * @returns {Promise<void>}
+ */
+export async function ensureGlobalRulesSeeded(ctx) {
+  if (_seedPromise) return _seedPromise;
+  _seedPromise = (async () => {
+    const data = await readJson(ctx, K_GLOBAL_RULES);
+    // 缺失判定：完全空值，或 stages 为空对象（key 存在但被清空残留空结构）。
+    const missing = !data
+      || !(data.stages && typeof data.stages === 'object'
+        && Object.keys(data.stages).length > 0);
+    if (missing) {
+      // 关键：经由统一写入入口 putGlobalRules 落盘，与人工在管理面编辑走同一
+      // validateGlobalRulesStages 校验 + 落盘 + invalidateMemCache + bumpVersion 逻辑，
+      // 禁止直接裸写 KV（满足「程序模拟人工编辑、与人工逐一设置完全等价」要求）。
+      await putGlobalRules(ctx, cloneGlobalRules(), cloneGlobalSettings());
+    }
+  })().catch((err) => {
+    console.error('[store] 全站规则冷启动播种失败（忽略，由读取路径兜底）:', err?.message);
+  }).finally(() => {
+    // 失败/成功都只试一次：失败也不清 _seedPromise，避免异常态下每个请求重试打 KV；
+    // 真正的兜底由 getGlobalRules 的惰性三分支承担。
+  });
+  return _seedPromise;
 }
 
 /**
@@ -895,10 +936,50 @@ export async function getGlobalRules(ctx) {
   }
   // 新结构：{ stages: {...}, settings?: {...} }
   if (data && data.stages && typeof data.stages === 'object') {
+    // 实质为空（stages 是空对象 {}，常见于「KV 被清空后残留一个空结构」或
+    // putGlobalRules 收到空 stages 写入）时，不返回空值、改为补落盘内置默认，
+    // 避免「全站规则 key 存在但所有阶段值空」的永久态。
+    if (Object.keys(data.stages).length === 0) {
+      const def = { stages: cloneGlobalRules(), settings: cloneGlobalSettings() };
+      try {
+        await writeJson(ctx, K_GLOBAL_RULES, def);
+        invalidateMemCache();
+        await bumpVersion(ctx);
+      } catch (err) {
+        console.error('[store] 全站规则空结构补默认落盘失败（忽略，仍返回默认）:', err?.message);
+      }
+      return { stages: deepClone(def.stages), settings: deepClone(def.settings) };
+    }
     // settings 缺失（旧版仅含 stages）时用内置默认补全，保持向后兼容
     const settings = data.settings && typeof data.settings === 'object'
       ? deepClone(data.settings)
       : cloneGlobalSettings();
+    // 逐阶段合并补全：内置默认铺底、用户已有值覆盖。
+    // 仅当 KV 中 stages 缺失个别 key（非空对象但部分阶段丢失）时，
+    // 用 cloneGlobalRules() 补全缺失阶段，并仅在有新增 key 时写回 + bumpVersion（幂等）。
+    // 这样可修复「KV 中 cfg:global_rules.stages 为部分缺失的非空对象时前端某些阶段空白」的 bug。
+    const base = cloneGlobalRules();
+    const merged = {};
+    let added = false;
+    for (const stage of STAGE_ORDER) {
+      if (data.stages[stage] !== undefined) {
+        merged[stage] = deepClone(data.stages[stage]);
+      } else {
+        merged[stage] = deepClone(base[stage]);
+        added = true;
+      }
+    }
+    if (added) {
+      const def = { stages: merged, settings };
+      try {
+        await writeJson(ctx, K_GLOBAL_RULES, def);
+        invalidateMemCache();
+        await bumpVersion(ctx);
+      } catch (err) {
+        console.error('[store] 全站规则缺失阶段补全落盘失败（忽略，仍返回补全值）:', err?.message);
+      }
+      return { stages: deepClone(merged), settings: deepClone(settings) };
+    }
     return { stages: deepClone(data.stages), settings: deepClone(settings) };
   }
   // 空值：落盘内置默认并返回（幂等由调用方并发容忍，失败不影响返回）
@@ -920,19 +1001,18 @@ export async function getGlobalRules(ctx) {
  * @param {Record<string, any>=} settings 全局默认参数（可选，缺省保留原值或内置默认）
  */
 export async function putGlobalRules(ctx, stages, settings) {
-  const payload = { stages: stages && typeof stages === 'object' ? stages : {} };
-  // settings 显式传入时一并落盘；否则保留已有 settings（若没有则用内置默认）
-  if (settings && typeof settings === 'object') {
-    payload.settings = settings;
-  } else {
-    const cur = await readJson(ctx, K_GLOBAL_RULES);
-    payload.settings = (cur && cur.settings && typeof cur.settings === 'object')
-      ? cur.settings
-      : cloneGlobalSettings();
-  }
-  await writeJson(ctx, K_GLOBAL_RULES, payload);
+  // 经统一校验入口规范化：缺失阶段由内置 base 补全，settings 由内置默认基线校验/补全。
+  // 与人工在管理面经 PUT /rules/global 完全等价，禁止裸写 KV。
+  const res = validateGlobalRulesStages(
+    { stages: stages && typeof stages === 'object' ? stages : {}, settings },
+    cloneGlobalRules(),
+  );
+  if (!res.ok) return { ok: false, errors: res.errors };
+  const { stages: normStages, settings: normSettings } = res.value;
+  await writeJson(ctx, K_GLOBAL_RULES, { stages: normStages, settings: normSettings });
   invalidateMemCache();
   await bumpVersion(ctx);
+  return { ok: true, value: { stages: normStages, settings: normSettings } };
 }
 
 /**
