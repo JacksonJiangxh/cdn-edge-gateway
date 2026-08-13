@@ -37,6 +37,12 @@
 # 只用「精简版」volumes（仅纯网络加速项，不含 node_modules/全局包/ms-playwright），
 # 避免空卷遮蔽镜像内已固化的内容。
 # 缓存镜像构建任务（每个启用镜像缓存的按钮 stages 首项）：
+# 【关键】CNB 的 docker:cache 构建上下文 ONLY 包含 by 列表里的文件 + Dockerfile 本身，
+#   未列出的文件在构建时「视为不存在」。故 COPY . . 的上下文并非整个仓库。
+#   当前 npm ci 的 postinstall 依赖 scripts/ensure-playwright-browsers.mjs，必须把
+#   scripts/ 纳入 by，否则镜像构建阶段 npm ci 会因找不到脚本而 MODULE_NOT_FOUND。
+#   by 同时决定「何时重建镜像」：package.json / package-lock.json / scripts/ 任一变化即重建。
+#   versionBy 仅取 package-lock.json：镜像 tag 版本只随依赖 lock 变化，避免脚本小改动频繁换 tag。
 .docker-cache-task: &docker-cache-task
   name: 构建依赖缓存镜像
   type: docker:cache
@@ -45,6 +51,7 @@
     by:
       - package.json
       - package-lock.json
+      - scripts/*
     versionBy:
       - package-lock.json
   exports:
