@@ -208,8 +208,26 @@ toml += `
 # === 平台功能开关（顶层，非 [vars] 环境变量） ===
 assets = { directory = "./dist/public", binding = "ASSETS", html_handling = "none", not_found_handling = "none" }
 preview_urls = false
-observability = { enabled = true }
 `;
+
+// 可观测性：Logs 全量（免费）+ Traces 10% 采样（控成本）。
+// 必须用完整 [observability] 表写法（而非行内 observability = { enabled = true }），
+// 否则 wrangler 会忽略该开关、导致远程面板里 Logs/Traces 显示关闭（历史踩坑）。
+// 根 wrangler.toml 现采用完整表写法，其 [observability] 块在第 1.5 节不会被剥离
+// （剥离正则只匹配行内形式），会被复制进临时 toml；此时此处不可再追加，否则出现
+// 重复的 [observability] 表使 toml 解析报错。仅当基线仍是旧行内写法（已被 1.5 剥离）时才补写。
+if (!/^\[observability\]/m.test(toml)) {
+  toml += `
+# 可观测性：Logs 全量（免费）+ Traces 10% 采样（控成本）。
+[observability]
+enabled = true
+head_sampling_rate = 1.0
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.1
+`;
+}
 
 // ---------- 4. 写出临时 toml ----------
 writeFileSync(OUT_TOML, toml);

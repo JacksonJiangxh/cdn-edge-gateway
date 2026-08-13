@@ -35,9 +35,20 @@ assets = { directory = "./dist/public", binding = "ASSETS", html_handling = "non
 # 显式关闭 Preview URLs，避免 workers.dev 路由下被默认开启（见部署日志 WARNING）。
 preview_urls = false
 
-# 开启可观测性（日志 + 追踪）。部署日志曾显示远程此项为 true 被本地默认 false 覆盖，
-# 此处显式开启，使 wrangler deploy 保留/恢复该设置（与远程原值一致）。
-observability = { enabled = true }
+# 可观测性：Workers Logs + Workers Traces（顶层平台字段，非 [vars] 环境变量）。
+# 此配置对【CF Workers】与【CF Pages】(Functions 跑在同款 Workers runtime) 均生效，
+# 两形态都读本根 wrangler.toml，无需分别写。
+# - Logs：对所有 Workers 免费，故日志保持 100% 采样便于排障；本项目的 console.log
+#   多在配置加载/错误路径（非每请求热路径），全量序列化开销可控。
+# - Traces：GA 后 $0.10/1M spans、免费 10M spans/月。本网关每请求都回源 KV/Redis/源站，
+#   traces 最能暴露慢请求与回源延迟分布；高流量下 100% 采样会超免费额度，故取 10%。
+[observability]
+enabled = true
+head_sampling_rate = 1.0
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.1
 
 # 开启 Cloudflare Workers Cache（面板 "Cache" 开关的 toml 等价项）。
 # 作用：为 fetch handler 返回的 HTTP 响应设置【默认缓存行为】，

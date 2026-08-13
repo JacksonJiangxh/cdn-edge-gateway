@@ -22,6 +22,11 @@ main = "_worker.js"
 compatibility_date = "2026-08-11"
 compatibility_flags = ["nodejs_compat"]
 
+# 本地 dev 开启 Workers 日志（便于排障）；traces 在本地无成本概念且会引入噪声，故不加。
+# 注意：必须用完整 [observability] 表写法，行内 observability = { enabled = true } 会被 wrangler 忽略导致开关关掉。
+[observability]
+enabled = true
+
 [vars]
 # 不在此写死 ADMIN_PATH：留空让运行时缺省回退到代码默认 "__panel"，
 # 同时允许通过 `npm run dev -- --admin-path xxx` 或环境变量 ADMIN_PATH 覆盖
