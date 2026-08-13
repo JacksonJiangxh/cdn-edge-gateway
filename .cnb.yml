@@ -34,25 +34,33 @@
 # 把环境部署整体烤进镜像（apt 库 + node_modules + chromium + esa-cli），
 # 推到远端镜像源，跨构建机/跨流水线稳定命中（彻底免运行期 apt/npm/下载）。
 # 与 volumes 并存时需注意：volumes 挂载点会覆盖容器内同路径，故 docker:cache 按钮
-# 只用「精简版」volumes（仅纯网络加速项，不含 node_modules/全局包/ms-playwright），
+# 只用「精简版」volumes（纯网络加速项 + ms-playwright），不含 node_modules/全局包，
 # 避免空卷遮蔽镜像内已固化的内容。
 # 缓存镜像构建任务（每个启用镜像缓存的按钮 stages 首项）：
 # 【关键】CNB 的 docker:cache 构建上下文 ONLY 包含 by 列表里的文件 + Dockerfile 本身，
-#   未列出的文件在构建时「视为不存在」。故 COPY . . 的上下文并非整个仓库。
+#   未列出的文件在构建时「视为不存在」。故 COPY . . 的上下文由 by 决定。
 #   当前 npm ci 的 postinstall 依赖 scripts/ensure-playwright-browsers.mjs，必须把
 #   scripts/ 下的具体文件纳入 by，否则镜像构建阶段 npm ci 会因找不到脚本而 MODULE_NOT_FOUND。
 # 【坑】by 里写目录/glob（如 scripts/*）在当前平台版本「不会」展开进 build context（实测
 #   日志显示 context 仍是 263kB、/space/scripts 不存在）。必须逐文件显式列出才生效。
-#   by 同时决定「何时重建镜像」：package.json / package-lock.json / 任一 scripts 文件变化即重建。
-#   versionBy 仅取 package-lock.json：镜像 tag 版本只随依赖 lock 变化，避免脚本小改动频繁换 tag。
+#
+# 【重要修正】by 同时决定「何时重建镜像」。本缓存镜像承载的是「环境依赖」
+#   （apt 库 + node_modules + chromium 二进制 + esa-cli），其唯一真相源是
+#   package-lock.json —— 依赖树变了才需要重建环境。
+#   因此 by 只保留 package-lock.json + 构建所需的最小脚本集（scripts/ 用于 npm ci
+#   的 postinstall 与 check，package.json 仅用于供 npm ci 读取 scripts/postinstall 字段）。
+#   业务代码（src/、web/、docs/ 等）的改动【不应】触发镜像重建 —— 那属于
+#   「监控上下文误覆盖到代码层面」，会导致每次 bug 修复/优化都重烤整镜像（约 40s~分钟级），
+#   而运行时各 stage 已有兜底的命令级快速跳过，无需重建环境。
 .docker-cache-task: &docker-cache-task
   name: 构建依赖缓存镜像
   type: docker:cache
   options:
     dockerfile: cache.dockerfile
     by:
-      - package.json
       - package-lock.json
+      - package.json
+      - cache.dockerfile
       - scripts/_tpl_check.mjs
       - scripts/check.mjs
       - scripts/cleanup-cnb-history.py
@@ -72,10 +80,16 @@
 # 引用缓存镜像（stage 级 image，供 build/install 等阶段复用）：
 .docker-cache-image: &docker-cache-image
   image: $DOCKER_CACHE_IMAGE_NAME
-# docker:cache 按钮专用的精简 volumes（仅网络加速，不遮蔽镜像固化内容）：
+# docker:cache 按钮专用的精简 volumes。
+# 注意：node_modules / 全局包（/usr/local/lib/node_modules）不挂——它们已固化在镜像层，
+# 挂载空卷反而遮蔽。但 ms-playwright 在实测中【未固化进镜像层】（docker:cache 导出时丢弃
+# /root/.cache 这类构建缓存目录），导致 build 阶段容器里 ms-playwright 为空、e2e 脚本又自动
+# 重新下载 300MB。故此处显式挂 ms-playwright 卷，让 install 阶段的 chromium 跨 stage 复用，
+# 消除重复下载。
 .docker-cache-image-vol: &docker-cache-image-vol
   volumes:
     - /root/.npm:copy-on-write
+    - /root/.cache/ms-playwright:copy-on-write
     - /var/cache/apt/archives:copy-on-write
 
 # 密钥仓库地址。CNB 不支持仓库级 Secret 直填，凭据须放在独立的「密钥仓库」，
@@ -294,7 +308,16 @@ $:
             [ "$dry_run" = "true" ]
           script: |
             set -e
-            npx wrangler deploy --dry-run --outdir /tmp/wrangler-dryrun
+            set -o pipefail
+            # 与正式发布一致：wrangler 会回显 bindings 真实资源 ID，脱敏后再打印
+            redact() {
+              sed -E \
+                -e 's/\([0-9a-f]{32}\)/<redacted-kv-id>/g' \
+                -e 's/\([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\)/<redacted-uuid>/g' \
+                -e 's#https://[a-z0-9-]+\.(workers|pages)\.dev#<redacted-worker-url>#g' \
+                -e 's/Current Version ID: [0-9a-f-]+/Current Version ID: <redacted-version-id>/g'
+            }
+            npx wrangler deploy --dry-run --outdir /tmp/wrangler-dryrun 2>&1 | redact
             echo "✓ 干跑通过，未发布到线上"
         - name: 生成临时部署配置（保留远程绑定/变量）
           <<: *docker-cache-image
@@ -314,7 +337,19 @@ $:
             [ "$dry_run" != "true" ]
           script: |
             set -e
-            npx wrangler deploy -c wrangler.deploy.toml
+            set -o pipefail
+            # 脱敏函数：wrangler 默认会把 bindings 的真实资源 ID / 版本 ID / 子域名
+            # 回显到 stdout，而上游 gen-deploy-config.mjs 的「隐藏」只作用于它自己的日志，
+            # 管不到 wrangler 输出。故在此对 wrangler 的 stdout 做统一脱敏后再打印，
+            # 避免隐私 ID 在发布阶段日志里再次暴露。
+            redact() {
+              sed -E \
+                -e 's/\([0-9a-f]{32}\)/<redacted-kv-id>/g' \
+                -e 's/\([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\)/<redacted-uuid>/g' \
+                -e 's#https://[a-z0-9-]+\.(workers|pages)\.dev#<redacted-worker-url>#g' \
+                -e 's/Current Version ID: [0-9a-f-]+/Current Version ID: <redacted-version-id>/g'
+            }
+            npx wrangler deploy -c wrangler.deploy.toml 2>&1 | redact
             rm -f wrangler.deploy.toml
             echo "✓ Workers 部署完成"
 
@@ -371,6 +406,7 @@ $:
           <<: *docker-cache-image
           script: |
             set -e
+            set -o pipefail
             # 优先级：按钮输入 > 密钥仓库变量 > 默认值
             PROJECT="${cf_pages_project:-${CF_PAGES_PROJECT:-cdn-edge-gateway}}"
             TARGET_BRANCH="${cf_pages_branch:-main}"
@@ -378,9 +414,17 @@ $:
             # 部署目录必须是仓库根，不能是 dist/public：
             # Pages 需要根目录的 _worker.js 承载数据面代理与 /__panel/api/*，
             # 只传 dist/public 会得到「静态页能开、API 全 404」的站点。
+            # 脱敏：wrangler pages deploy 会回显部署 URL（含账号子域），过滤后再打印。
+            redact() {
+              sed -E \
+                -e 's/\([0-9a-f]{32}\)/<redacted-kv-id>/g' \
+                -e 's/\([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\)/<redacted-uuid>/g' \
+                -e 's#https://[a-z0-9-]+\.(workers|pages)\.dev#<redacted-worker-url>#g' \
+                -e 's/Current Version ID: [0-9a-f-]+/Current Version ID: <redacted-version-id>/g'
+            }
             npx wrangler pages deploy . \
               --project-name="$PROJECT" \
-              --branch="$TARGET_BRANCH"
+              --branch="$TARGET_BRANCH" 2>&1 | redact
             echo "✓ Pages 部署完成（项目: $PROJECT）"
 
   # ---- 按钮：部署 EdgeOne Pages ----
