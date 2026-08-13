@@ -1771,9 +1771,6 @@ import { el, clear, $ } from './dom.js';
       actionAddSel.value = '';
     });
 
-    // 初始只挂载该规则实际启用的操作卡片（受限模式下只挂白名单内的）
-    activeOpKeys(rule.action).forEach((k) => { if (!allowed || allowed.has(k)) mountOp(k); });
-
     // 折叠：已有规则（带 id）默认折叠，只显示规则名；新建规则默认展开便于立即配置。
     // 点 header 切换展开/折叠；「删除」与「启用」等交互元素 stopPropagation，避免误触折叠。
     const isExisting = !!(rule && rule.id);
@@ -1812,6 +1809,13 @@ import { el, clear, $ } from './dom.js';
     card.querySelector('.rule-head').addEventListener('click', () => card.classList.toggle('collapsed'));
     // 「添加操作」后确保卡片处于展开态并滚动可见（否则折叠态下看不到刚加的操作卡）
     const ensureExpanded = () => card.classList.remove('collapsed');
+
+    // 初始只挂载该规则实际启用的操作卡片（受限模式下只挂白名单内的）。
+    // 必须放在 ensureExpanded 定义之后执行：mountOp 内部同步调用 ensureExpanded()。
+    // 若仍在 card 创建前（原 1775 行）执行，新建规则（reqHeaders/respHeaders 均
+    // truthy → activeOpKeys 非空）会在 const ensureExpanded 声明前访问 → TDZ 崩溃
+    // （报错 Cannot access 'X' before initialization，压缩产物变量名为 W）。
+    activeOpKeys(rule.action).forEach((k) => { if (!allowed || allowed.has(k)) mountOp(k); });
 
     const read = () => {
       // 受限模式：以原始 action 为基底，只覆盖本包允许编辑的字段，其余字段原样保留（不丢数据、不越界）

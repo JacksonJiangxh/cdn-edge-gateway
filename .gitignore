@@ -33,6 +33,6 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/settings.json
-
+.codebuddy/plans/*
 # 本地克隆的外部演示仓库，不纳入版本控制
 next-cnb-eo-demo/

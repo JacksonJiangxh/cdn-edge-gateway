@@ -36,6 +36,7 @@ import { runChecks } from './scripts/check.mjs';
 import { runE2E } from './scripts/e2e-test.mjs';
 import { runFrontendDomTest } from './scripts/test-frontend-dom.mjs';
 import { runFrontendBrowserTest } from './scripts/e2e-browser.mjs';
+import { runBackendUnitTests } from './scripts/test-unit-backend.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const WEB = join(ROOT, 'web');
@@ -686,6 +687,10 @@ async function main() {
   if (!SKIP_VERIFY) {
     // 产物自检：文件完整性 / 入口导出可用 / 平台口径一致性（失败直接 throw）
     await verify();
+    // 单元层：后端核心模块（matcher/rewrite/cachekey/balancer/auth/keyCodec/config）
+    // 直接 import 源码，纯内存、无 KV/网络依赖、秒级完成。先于产物依赖的 e2e，
+    // 作为「构建质量闸门」第一道，把核心逻辑回归挡在最前。
+    await runGuard('后端核心模块单元测试', runBackendUnitTests);
     // 端到端：用真实产物 _worker.js 跑通「健康检查→管理面→登录→鉴权→后台」，
     // 并在 Node 沙箱执行前端 JS 验证 window.API 挂载。runGuard 确保失败即阻断部署。
     await runGuard('端到端 e2e（HTTP 全流程 + 前端可执行性）', runE2E);

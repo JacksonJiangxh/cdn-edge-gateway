@@ -10,6 +10,7 @@
     "postinstall": "node scripts/ensure-playwright-browsers.mjs",
     "check": "node scripts/check.mjs",
     "gen": "node scripts/gen-entries.mjs",
+    "test:unit": "node scripts/test-unit-backend.mjs",
     "test:e2e": "node scripts/e2e-test.mjs",
     "test:frontend:dom": "node scripts/test-frontend-dom.mjs",
     "test:frontend:browser": "node scripts/e2e-browser.mjs",

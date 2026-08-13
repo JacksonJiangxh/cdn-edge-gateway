@@ -261,6 +261,125 @@ async function runHttpFlow(mod, platform, mockKV, mockAssets, useAssets) {
   });
   assert(badLogin.status === 401, `${label} 错误密码登录返回 401`, `got ${badLogin.status}`);
 
+  log(`${label} ▸ 7/7 管理 API CRUD 端到端（站点/源站池/规则/配置）`);
+
+  // ---- 站点：创建（内联单源站自动落成 single 源站）→ 列表 → 规则 → 删除 ----
+  const newHost = `e2e-${platform}-${Date.now()}.test`;
+  const createSite = await fetchAt('/__panel/api/sites/' + newHost, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({
+      host: newHost,
+      enabled: true,
+      origins: [{ engine: 'fetch', scheme: 'https', addr: '1.2.3.4', port: 443 }],
+    }),
+  });
+  const createSiteBody = await createSite.json();
+  assert(
+    createSite.status === 200 && createSiteBody.ok === true,
+    `${label} 创建站点 ${newHost} 成功`,
+    `status=${createSite.status} body=${JSON.stringify(createSiteBody)}`
+  );
+  const createdPoolId = createSiteBody.data?.poolId || (createSiteBody.data?.createdOrigin && createSiteBody.data.createdOrigin.id);
+
+  const listAfterCreate = await fetchAt('/__panel/api/sites', { headers: { Cookie: cookie } });
+  const listAfterCreateBody = await listAfterCreate.json();
+  const found = (listAfterCreateBody.data?.sites || []).some((s) => s.host === newHost);
+  assert(found, `${label} 站点列表包含新建站点 ${newHost}`);
+
+  // 规则保存：PUT /sites/:host/rules
+  const saveRules = await fetchAt('/__panel/api/sites/' + newHost + '/rules', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({
+      rules: [
+        {
+          id: 'rule-e2e-1',
+          priority: 10,
+          enabled: true,
+          stage: 'origin',
+          match: { conditions: [[{ target: 'path', op: 'prefix', values: ['/api'] }]] },
+          action: { poolId: createdPoolId || 'pl_missing', rewrite: { type: 'none' } },
+        },
+      ],
+    }),
+  });
+  const saveRulesBody = await saveRules.json();
+  assert(saveRules.status === 200 && saveRulesBody.ok === true, `${label} 保存站点规则成功`, `status=${saveRules.status} body=${JSON.stringify(saveRulesBody)}`);
+
+  // 删除站点
+  const delSite = await fetchAt('/__panel/api/sites/' + newHost, { method: 'DELETE', headers: { Cookie: cookie } });
+  const delSiteBody = await delSite.json();
+  assert(delSite.status === 200 && delSiteBody.ok === true, `${label} 删除站点 ${newHost} 成功`);
+
+  // ---- 源站池：创建 → 列表 → 更新 → 删除 ----
+  const createPool = await fetchAt('/__panel/api/pools', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({
+      name: 'e2e-pool',
+      kind: 'pool',
+      strategy: 'roundrobin',
+      origins: [
+        { engine: 'fetch', scheme: 'https', addr: '10.0.0.1', port: 443, weight: 1 },
+        { engine: 'fetch', scheme: 'https', addr: '10.0.0.2', port: 443, weight: 1 },
+      ],
+    }),
+  });
+  const createPoolBody = await createPool.json();
+  assert(createPool.status === 200 && createPoolBody.ok === true && createPoolBody.data && createPoolBody.data.id, `${label} 创建源站池成功`, `status=${createPool.status} body=${JSON.stringify(createPoolBody)}`);
+  const poolId = createPoolBody.data.id;
+
+  const listPools = await fetchAt('/__panel/api/pools', { headers: { Cookie: cookie } });
+  const listPoolsBody = await listPools.json();
+  assert(
+    (listPoolsBody.data?.pools || []).some((p) => p.id === poolId),
+    `${label} 源站池列表包含新建池 ${poolId}`
+  );
+
+  const updatePool = await fetchAt('/__panel/api/pools/' + poolId, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ name: 'e2e-pool-renamed', kind: 'pool', strategy: 'chain', origins: [{ engine: 'fetch', scheme: 'https', addr: '10.0.0.9', port: 443 }] }),
+  });
+  const updatePoolBody = await updatePool.json();
+  assert(updatePool.status === 200 && updatePoolBody.ok === true, `${label} 更新源站池成功`);
+
+  const delPool = await fetchAt('/__panel/api/pools/' + poolId, { method: 'DELETE', headers: { Cookie: cookie } });
+  const delPoolBody = await delPool.json();
+  assert(delPool.status === 200 && delPoolBody.ok === true, `${label} 删除源站池 ${poolId} 成功`);
+
+  // ---- 配置：读取 → 修改 → 回读 ----
+  // 注意：本测试全程依赖 /__panel 路由前缀，故不在此改动 adminPath（改动会令
+  // 后续请求路由到错误的 adminPath 前缀）。仅验证「敏感字段剥离」与「常规字段可写回读」。
+  const cfgGet = await fetchAt('/__panel/api/config/global', { headers: { Cookie: cookie } });
+  const cfgGetBody = await cfgGet.json();
+  assert(cfgGet.status === 200 && cfgGetBody.ok === true && cfgGetBody.data, `${label} 读取全局配置成功`);
+  assert(!('passwordHash' in (cfgGetBody.data || {})), `${label} 配置不含 passwordHash（敏感字段已剥离）`);
+
+  const cfgPut = await fetchAt('/__panel/api/config/global', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ configCacheTtl: 120 }),
+  });
+  const cfgPutBody = await cfgPut.json();
+  assert(cfgPut.status === 200 && cfgPutBody.ok === true && cfgPutBody.data && cfgPutBody.data.configCacheTtl === 120, `${label} 保存全局配置（configCacheTtl）成功`, `body=${JSON.stringify(cfgPutBody)}`);
+
+  // 还原 configCacheTtl，避免影响后续轮次 / 真实部署心智
+  await fetchAt('/__panel/api/config/global', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ configCacheTtl: 60 }),
+  });
+
+  // 未登录访问 CRUD 写接口应被拒绝（鉴权闭环延伸到写路径）
+  const anonPut = await fetchAt('/__panel/api/sites/' + newHost, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ host: newHost }),
+  });
+  assert(anonPut.status === 401, `${label} 未登录写入 /sites 返回 401`, `got ${anonPut.status}`);
+
   log(`${label} ▸ KV 写次数: ${mockKV.writes}（管理面配置确实落 KV，未静默降级）`);
 }
 
