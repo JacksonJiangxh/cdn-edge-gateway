@@ -50,6 +50,17 @@ observability = { enabled = true }
 [cache]
 enabled = true
 
+# 智能放置（Smart Placement）
+# 边缘网关是 fetch handler，请求会回源到 KV/Redis 等后端。启用 smart 后，Cloudflare
+# 会按流量分析把 Worker / Pages Functions 调度到离后端更近的位置，降低整体延迟。
+# 仅对 fetch handler 生效（本项目满足）；不设置则默认即 off（离用户最近边缘运行）。
+# 与本项目 assets 绑定无冲突：html_handling = "none"（未开启 run_worker_first），
+# 静态资源仍走边缘缓存，不会被 smart 拖慢。
+# 注意：部署后约 15 分钟 Cloudflare 才开始分析生效；可在 Dashboard 或
+# wrangler API 的 placement_status 查看（SUCCESS / INSUFFICIENT_INVOCATIONS / UNSUPPORTED_APPLICATION）。
+[placement]
+mode = "smart"
+
 #===============================================================================
 # 明文环境变量
 # ----------------------------------------------------------------------------
