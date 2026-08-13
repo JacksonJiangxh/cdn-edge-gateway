@@ -291,8 +291,11 @@ Published edge-cdn (x.xx sec)
 | `CLOUDFLARE_API_TOKEN` | CF Workers / Pages 部署 | CF 控制台生成，需 `Workers Scripts:Edit` 或 `Cloudflare Pages:Edit` 权限 |
 | `CLOUDFLARE_ACCOUNT_ID` | CF 账户 ID | 右侧账号信息里复制 |
 | `EO_SECRET` | EO Pages 部署 | EO 控制台生成的密钥 |
+| `ESA_AK_ID` | ESA Pages 部署 | 阿里云 RAM 控制台 AccessKey ID（ESA 流水线走控制台自动部署，实际上无需此 Secret，详见下文 A4c） |
+| `ESA_AK_SECRET` | ESA Pages 部署 | 阿里云 RAM 控制台 AccessKey Secret（同上，流水线不用） |
 | `CF_PAGES_PROJECT` | 可选，仅「部署 CF Pages」按钮用，CF Pages 项目名 | 默认 `cdn-edge-gateway` |
 | `EO_PAGES_PROJECT` | 可选，EO Pages 项目名 | 默认 `cdn-edge-gateway` |
+| `ESA_PROJECT` | 可选，ESA Pages 项目名（GitHub Variables / CNB 密钥仓库） | 默认 `cdn-edge-gateway` |
 
 **GitHub 怎么设**（仓库 → **Settings → Secrets and variables → Actions**）：
 
@@ -302,9 +305,9 @@ Published edge-cdn (x.xx sec)
 
 **CNB 怎么设**（CNB 不支持仓库内直填 Secret，凭据放**独立密钥仓库**）：
 
-- 建一个密钥仓库（如 `cdn-edge-gateway.yml`），只放上面那 5 个**部署凭据**，由 `.cnb.yml` 的 `imports` 导入。
+- 建一个密钥仓库（如 `cdn-edge-gateway.yml`），只放上面那几个**部署凭据**，由 `.cnb.yml` 的 `imports` 导入。
 - 字段与 GitHub 完全一致（一份密钥文件两边共用）。
-- 在 `.cnb/web_trigger.yml` 声明后，仓库页会渲染按钮：构建校验 / **部署 CF Workers** / **部署 CF Pages** / 部署 EO Pages，点击触发。
+- 在 `.cnb/web_trigger.yml` 声明后，仓库页会渲染按钮：构建校验 / **部署 CF Workers** / **部署 CF Pages** / 部署 EO Pages / 部署 ESA Pages / 清理历史，点击触发。
 
 ##### A4a. 部署 CF Workers（按钮）→【Workers 形态，有 TCP 回源】
 
@@ -325,12 +328,35 @@ Published edge-cdn (x.xx sec)
 
 > **CF Pages / EO Pages 路线不受影响**：`wrangler pages deploy .` 与 `edgeone makers deploy .` 不读取 `wrangler.toml` 的存储绑定段，其 KV/R2/D1 绑定在各自 Dashboard 设，不会被 toml 覆盖；这两路的变量也在 Dashboard 设，不存在 `ADMIN_PATH` 被 toml 覆盖的问题。只有 **CF Workers 路线（A1/A2/A4a）** 需要临时 toml 机制。
 
-##### 流水线通用说明
+##### 流水线通用说明（非交互铁律）
 
+> **原则：流水线（CI/CD 按钮）= 零交互，手动部署 = 可交互。** 任何需要浏览器点 Allow、需要人工在终端输入确认串、或 `xxx login` 这类交互命令，**一律不出现在流水线里**；流水线只做 `check → build → 产物校验 → 给出控制台自动部署指引`。需要交互的发布动作，属于「手动部署」分支（见 [14 ESA 部署](./14-deploy-esa.md) 的方式 B/D），与流水线无关。
+>
 > EO 流水线路径：CNB 用 `tencentcom/deploy-eopages` 镜像，GitHub 用 `npx edgeone makers deploy`，部署目录为仓库根 `.`，均只手动触发、支持 preview/production。若已在 EO 控制台连 Git 自动构建，请关掉自动构建以守住「禁止自动部署」约束。
+> CF 流水线路径：A4a 用 `wrangler deploy`（临时 toml 保留远程绑定），A4b 用 `wrangler pages deploy .`。
+> **ESA 流水线（A4c）走「控制台连接仓库自动部署」，流水线内不调用 esa-cli**（esa-cli 需交互登录，CI 必失败）。
 > 若想本地复现与流水线完全一致的行为：`npm run deploy:cf`（见分支 A1，对应 A4a 的 Workers 按钮）。
 >
 > **⚠️ 若系统设置显示「运行平台 pages」、TCP Socket 不可用**：这是旧代码的平台探测误判（把 Workers 的 Static Assets 绑定 `ASSETS` 错当成 Pages），**不是你点错了按钮**。修复已合入最新代码，只需「把仓库更新到最新 → 重新点一次『部署 CF Workers』按钮」即可恢复（`caps.js` 改用 `CF_PAGES` 等 Pages 专属变量区分，不再凭 `ASSETS` 绑定误判）。详见 [08 FAQ](./08-faq.md)。
+
+##### A4c. 部署 ESA Pages（按钮）→【非交互：esa-cli 发布】
+
+> ESA 官方命令行 `esa-cli` 支持用环境变量 `ESA_ACCESS_KEY_ID` / `ESA_ACCESS_KEY_SECRET` **跳过交互式 login**（与官方「云效 Flow + ESA CLI」教程一致）。因此本项目的 CNB「部署 ESA Pages」按钮与 GitHub `deploy-esa-pages.yml` **都直接调用 esa-cli 非交互发布**，无需控制台自动部署、也无需人工点浏览器。
+
+**流水线按钮做了什么（非交互）：**
+1. 跑 `npm run check`（构建前静态一致性校验）；
+2. 跑 `npm run build`（产出 `_worker.js` + `dist/public/` + 校验 `esa.jsonc` 存在）；
+3. 注入凭据为 `ESA_ACCESS_KEY_ID` / `ESA_ACCESS_KEY_SECRET`（GitHub 来自 Secrets `ESA_AK_ID`/`ESA_AK_SECRET`；CNB 来自密钥仓库同名字段）；
+4. `esa-cli login`（非交互，凭据走环境变量）→ `esa-cli commit` → `esa-cli deploy --name <项目> --assets .`（**目录是仓库根 `.`，不是 `./dist`**）。
+
+**需要准备的凭据（运行期变量不在此列）：**
+- GitHub：Settings → Secrets → Actions 加 `ESA_AK_ID`、`ESA_AK_SECRET`（阿里云 RAM 用户 AccessKey，建议 `AliyunESAFullAccess` 或最小 ESA 权限）。
+- CNB：密钥仓库（如 `cdn-edge-gateway.yml`）加 `ESA_AK_ID`、`ESA_AK_SECRET`，字段与 GitHub 一致。
+- 可选 Variables：`ESA_PROJECT`（项目名，默认 `cdn-edge-gateway`）。
+
+**部署后必须在 ESA 控制台「环境变量」设 `REDIS_URL`**（必填，ESA 禁用厂商 KV，持久化唯一来源；可选 `REDIS_TOKEN`/`REDIS_PREFIX`/`ADMIN_PASSWORD`/`JWT_SECRET`/`CLOUD_PLATFORM=esa`），否则配置无法保存。
+
+> ⚠️ 部署目录必须是**仓库根 `.`**（含 `esa.jsonc`），不能只传 `dist/public`，否则「静态页能开、API 全 404」。
 
 ### 分支 B：EdgeOne —— Makers 部署
 

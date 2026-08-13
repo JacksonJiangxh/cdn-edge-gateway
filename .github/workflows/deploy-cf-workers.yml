@@ -6,6 +6,16 @@
 # 需要的仓库 Secret（Settings → Secrets and variables → Actions）：
 #   CLOUDFLARE_API_TOKEN   —— 需含 Workers Scripts:Edit 权限
 #   CLOUDFLARE_ACCOUNT_ID
+#
+# 部署后需在 Cloudflare 控制台（Workers → 设置 → 变量）补充【运行期环境变量】：
+#   REDIS_URL      —— 必填（仅当不用 CF KV/R2/D1 时）。持久化后端，指向自建
+#                     Webdis/Redis，形如 https://your-webdis.example.com。
+#                     若不填且未绑定 CDN_KV/CDN_R2/CDN_DB，则配置无法保存。
+#   ADMIN_PASSWORD —— 可选。首次初始化管理面密码；不设则首次访问按引导自行设置。
+#   JWT_SECRET     —— 可选但强烈建议。独立高熵密钥（≥8 位），用于登录态签名；
+#                     不设则 auth.js 拒绝签发令牌，登录不可用。
+#   ADMIN_PATH     —— 可选。管理面入口前缀，不设用内置默认 __panel 兜底。
+#   CLOUD_PLATFORM —— 可选。规范值 cf（构建期已烘焙进产物，可不设）。
 
 name: 部署 Cloudflare Workers（手动）
 

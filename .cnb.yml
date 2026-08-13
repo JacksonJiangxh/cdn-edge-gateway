@@ -15,11 +15,18 @@
 # 通过 imports 导入（详见 https://docs.cnb.cool/zh/repo/secret.html）。
 # 地址可用环境变量 CNB_SECRET_ENVS 覆盖，未配置时回退默认路径。
 # 密钥 yml 应包含（一份文件同时喂 CNB 与 GitHub，字段名两边一致）：
+# ── 部署凭据（必须）──
 #   CLOUDFLARE_API_TOKEN        —— CF API Token（Workers:Edit 或 Pages:Edit 权限）
 #   CLOUDFLARE_ACCOUNT_ID       —— CF 账户 ID
-#   CF_PAGES_PROJECT            —— 可选，CF Pages 项目名，默认 cdn-edge-gateway
 #   EO_SECRET                   —— EdgeOne API Token（EO Pages 控制台 → API Token 新建）
-#   EO_PAGES_PROJECT            —— 可选，EO Pages 项目名，默认 cdn-edge-gateway
+#   ESA_AK_ID                   —— 阿里云 AccessKey ID（RAM 控制台创建，建议最小权限）
+#   ESA_AK_SECRET               —— 阿里云 AccessKey Secret
+# ── 部署可选变量（留空则回退默认 cdn-edge-gateway，也可在按钮输入框覆盖）──
+#   CF_PAGES_PROJECT            —— 可选，CF Pages 项目名
+#   EO_PAGES_PROJECT            —— 可选，EO Pages 项目名
+#
+# 注意：运行时业务变量（REDIS_URL / ADMIN_PASSWORD / JWT_SECRET 等）【不进密钥仓库】，
+#       它们属于各厂商控制台的运行期「环境变量」，部署后到控制台设置即可（见下方各 stage 注释）。
 .secret-envs: &secret-envs
   - https://cnb.cool/xzydm/xzsecret/-/blob/main/cdn-edge-gateway.yml
 
@@ -143,6 +150,12 @@ $:
           # 必须先 build：wrangler.toml 的 assets 绑定会把 dist/public/ 作为 CF 静态资产
           # 上传，管理面静态资源由此命中边缘缓存、零函数额度（CF Workers 形态专属）。
           script: npm run build
+        - name: 部署前自检清单
+          script: |
+            echo "── 部署前自检清单（CF 控制台「变量」中设置）──"
+            echo "• REDIS_URL（必填，不绑 KV/R2/D1 时）：指向自建 Webdis/Redis"
+            echo "• ADMIN_PASSWORD（可选）/ JWT_SECRET（强烈建议，≥8 位）"
+            echo "• ADMIN_PATH（可选，不设用默认 __panel）/ CLOUD_PLATFORM（可不设，构建期已烘焙）"
         - name: 校验凭据
           script: |
             set -e
@@ -200,12 +213,21 @@ $:
           # 改管理面入口前缀无需重新构建。部署用内置默认 __panel 兜底，
           # 部署后到管理面把入口前缀改成随机串并存进 KV（最高优先级生效）。
           script: npm run build
+        - name: 部署前自检清单
+          script: |
+            echo "── 部署前自检清单（CF Pages 控制台「环境变量」中设置）──"
+            echo "• REDIS_URL（必填，不绑 KV/R2/D1 时）：指向自建 Webdis/Redis"
+            echo "• ADMIN_PASSWORD（可选）/ JWT_SECRET（强烈建议，≥8 位）"
+            echo "• ADMIN_PATH（可选，不设用默认 __panel）/ CLOUD_PLATFORM（可不设，构建期已烘焙）"
         - name: 校验凭据
           script: |
             set -e
             [ -n "$CLOUDFLARE_API_TOKEN" ] || { echo "✗ 缺少 CLOUDFLARE_API_TOKEN（请检查密钥仓库）"; exit 1; }
             [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || { echo "✗ 缺少 CLOUDFLARE_ACCOUNT_ID"; exit 1; }
             echo "✓ 凭据就绪"
+        # 说明：无需再单独注入 CLOUD_PLATFORM。
+        # 构建期已由 build.mjs 的 esbuild define 把默认值 'cf' 烘焙进 _worker.js，
+        # caps.js 读不到运行时变量时会用它兜底，故 Pages 零配置即可运行。
         - name: 发布到 Pages
           script: |
             set -e
@@ -245,6 +267,12 @@ $:
           # 管理面静态资源使用固定物理路径 /assets，与 ADMIN_PATH 解耦，
           # 改管理面入口前缀无需重新构建。运行时在「环境变量」里配 ADMIN_PATH 即可。
           script: npm run build
+        - name: 部署前自检清单
+          script: |
+            echo "── 部署前自检清单（EO 控制台「环境变量」中设置）──"
+            echo "• REDIS_URL（必填，不用 EO KV 时）：指向自建 Webdis/Redis"
+            echo "• ADMIN_PASSWORD（可选）/ JWT_SECRET（强烈建议，≥8 位）"
+            echo "• ADMIN_PATH（可选，不设用默认 __panel）/ CLOUD_PLATFORM（可不设，薄壳补全）"
         - name: 发布到 EO Pages
           imports: *secret-envs
           image: tencentcom/deploy-eopages:latest
@@ -263,6 +291,69 @@ $:
               -t "$EO_SECRET" \
               -e "$TARGET_ENV"
             echo "✓ EO Pages 部署完成（项目: $PROJECT / 环境: $TARGET_ENV）"
+
+  # ---- 按钮：部署阿里云 ESA Pages ----
+  # 说明：CNB 此前缺 ESA Pages 按钮（GitHub 侧已有 deploy-esa-pages.yml），本次补齐对齐。
+  #
+  # 【流水线非交互】esa-cli 支持用环境变量 ESA_ACCESS_KEY_ID / ESA_ACCESS_KEY_SECRET
+  # 跳过交互式 login（与官方「云效 Flow + ESA CLI」教程一致），故本按钮可直接发布，
+  # 不再退回「控制台连接仓库自动部署」。变量来自密钥仓库的 ESA_AK_ID / ESA_AK_SECRET。
+  #
+  # 重要：阿里云 ESA 的 EdgeKV 按量收费且无免费额度，本项目在 ESA 上统一禁用厂商 KV，
+  #       持久化强制走外置 REDIS_URL（自建 Webdis/Redis）。故发布前必须先在 ESA 控制台
+  #       「环境变量」中设置 REDIS_URL，否则运行时 store.js requireKV 会报错、配置无法保存。
+  #       该变量属运行期配置，不进密钥仓库、不进仓库。
+  web_trigger_deploy_esa_pages:
+    - runner:
+        <<: *runner4
+      docker:
+        <<: *docker-image
+      imports: *secret-envs
+      stages:
+        - name: 确认手动触发
+          script: |
+            echo "触发事件: $CNB_EVENT"
+            echo "分支/提交: $CNB_BRANCH @ $CNB_COMMIT_SHORT"
+            echo "目标: 阿里云 ESA Pages / 环境: ${esa_env:-production}"
+            echo "（流水线非交互：本步骤仅构建产物 + 自检，实际发布由 ESA 控制台连接仓库自动完成）"
+        - name: install
+          script: npm ci
+        - name: check
+          # 与 GitHub deploy-esa-pages.yml 对齐：build 前先做静态一致性检查
+          script: npm run check
+        - name: build
+          # ADMIN_PATH 等是【纯运行时】变量，build 阶段不读取（见 build.mjs）。
+          script: npm run build
+        - name: 部署前自检清单（流水线只读校验，发布在控制台）
+          script: |
+            echo "── 部署前自检清单 ──"
+            echo "• 已在 ESA 控制台设置环境变量 REDIS_URL（必填，ESA EdgeKV 收费已禁用）"
+            echo "• 可选：REDIS_TOKEN / REDIS_PREFIX / ADMIN_PASSWORD / JWT_SECRET"
+            echo "• 可选：CLOUD_PLATFORM=esa（薄壳会强制补，可不设）"
+            echo "── 控制台自动部署是否已就绪？──"
+            echo "• 在 ESA 控制台「边缘计算和 AI → 函数和 Pages → 新建 Pages → 连接 CNB 仓库（根目录）」"
+            echo "  本按钮 push 后 ESA 会自动读 esa.jsonc 构建并部署。"
+        - name: 发布到 ESA Pages（esa-cli 非交互）
+          # 非交互登录：凭据来自密钥仓库的 ESA_AK_ID / ESA_AK_SECRET，映射为 esa-cli 期望的环境变量
+          script: |
+            set -e
+            [ -n "$ESA_AK_ID" ] || { echo "✗ 缺少 ESA_AK_ID（请检查密钥仓库）"; exit 1; }
+            [ -n "$ESA_AK_SECRET" ] || { echo "✗ 缺少 ESA_AK_SECRET（请检查密钥仓库）"; exit 1; }
+            # 优先级：按钮输入 > 密钥仓库变量 > 默认值
+            PROJECT="${esa_pages_project:-${ESA_PROJECT:-cdn-edge-gateway}}"
+            TARGET_ENV="${esa_env:-production}"
+            [ -f esa.jsonc ] || { echo "✗ 缺少 esa.jsonc（ESA Pages 构建入口）"; exit 1; }
+            [ -d dist/public ] || { echo "✗ 缺少 dist/public（构建产物）"; exit 1; }
+            export ESA_ACCESS_KEY_ID="$ESA_AK_ID"
+            export ESA_ACCESS_KEY_SECRET="$ESA_AK_SECRET"
+            npm install -g esa-cli
+            esa-cli login
+            echo "▸ 提交版本..."
+            esa-cli commit
+            echo "▸ 部署到边缘节点... 项目: $PROJECT / 环境: $TARGET_ENV"
+            esa-cli deploy --name "$PROJECT" --assets .
+            echo "✓ ESA Pages 部署完成（项目: $PROJECT / 环境: $TARGET_ENV）"
+            echo "  记得在 ESA 控制台「环境变量」中设置 REDIS_URL 后才能保存配置。"
 
   # ---- 按钮：清理历史流水线记录 ----
   # 目的：删除当前仓库的历史流水线构建日志，只保留最近 keep 条，避免日志堆积。

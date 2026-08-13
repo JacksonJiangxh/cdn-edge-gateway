@@ -7,6 +7,7 @@
   "installCommand": "npm ci",
   "outputDirectory": ".",
   "env": {
-    "NODE_VERSION": "22"
+    "NODE_VERSION": "22",
+    "CLOUD_PLATFORM": "eo"
   }
 }

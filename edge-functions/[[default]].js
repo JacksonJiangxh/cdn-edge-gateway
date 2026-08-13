@@ -26,4 +26,52 @@
 // _worker.js（由 src/entry.js 打包）同时 export default { fetch }（CF Workers 范式）
 // 与 export async function onRequest(context)（Pages/EO 范式）。为与 esa/index.js
 // 薄壳保持对称、避免将来入口约定变化时 EO 链路断裂，这里同时转发两者。
-export { default, onRequest } from '../_worker.js';
+import _worker, { onRequest as _onRequest } from '../_worker.js';
+
+/**
+ * 合并出运行时 env，并强制补齐平台声明（与 esa/index.js 的 resolveEnv 对称）。
+ *
+ * 为什么必须兜底：CLOUD_PLATFORM 缺失会让 caps.js 启动即抛错。CF Workers 侧
+ * 由 wrangler.toml 的 [vars] 随 deploy 注入，但 EO Makers 侧的 edgeone.json
+ * "env" 主要作用于构建期，未必透传到边缘运行时；若只依赖用户在控制台手工
+ * 添加变量，一旦漏配就是全站 500。这里在薄壳内固定补 'eo'，使 EO 部署
+ * 「零手工配置」即可运行；用户若在控制台显式设了值，则以控制台的为准。
+ *
+ * @param {any} passedEnv 平台注入的 env
+ * @returns {Object} 合并后的 env
+ */
+function resolveEnv(passedEnv) {
+  let base = {};
+  if (passedEnv && typeof passedEnv === 'object') {
+    base = passedEnv;
+  } else if (typeof process !== 'undefined' && process.env && typeof process.env === 'object') {
+    base = process.env;
+  }
+  if (!base.CLOUD_PLATFORM) {
+    base = { ...base, CLOUD_PLATFORM: 'eo' };
+  }
+  return base;
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    const resolvedEnv = resolveEnv(env);
+    const waitUntil =
+      ctx && typeof ctx.waitUntil === 'function' ? ctx.waitUntil.bind(ctx) : null;
+    if (_worker && typeof _worker.fetch === 'function') {
+      return _worker.fetch(request, resolvedEnv, { waitUntil });
+    }
+    return _onRequest({ request, env: resolvedEnv, waitUntil });
+  },
+};
+
+export async function onRequest(context) {
+  return _onRequest({
+    request: context.request,
+    env: resolveEnv(context?.env),
+    waitUntil:
+      context && typeof context.waitUntil === 'function'
+        ? context.waitUntil.bind(context)
+        : null,
+  });
+}

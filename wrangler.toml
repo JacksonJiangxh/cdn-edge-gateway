@@ -16,7 +16,23 @@ compatibility_date = "2026-08-11"
 # cloudflare:sockets 由 src/proxy/engines/socketEngine.js 运行时动态 import，
 # 无需 flag；平台不支持时自动降级到 fetch 引擎。
 compatibility_flags = ["nodejs_compat"]
+# keep_vars=true：deploy 时不清除控制台里已有的其它变量/Secret
+# （ADMIN_PASSWORD、JWT_SECRET 等仍只在 Dashboard/CLI 注入，不进本文件）。
 keep_vars = true
+
+#===============================================================================
+# 明文环境变量
+# ----------------------------------------------------------------------------
+# CLOUD_PLATFORM 声明部署厂商，caps.js 靠它判定能力面。
+#
+# 【注意】它并非运行的必要条件：build.mjs 已通过 esbuild define 把默认值 'cf'
+# 烘焙进 _worker.js，即使不设任何变量，CF（Workers / Pages）也能正确判定。
+# 这里保留声明只为两点：一是让厂商标识在 Dashboard 上可见、便于排查；
+# 二是 Workers 形态下 wrangler deploy 会自动带上，属零成本的双保险。
+# 因 keep_vars = true，声明 [vars] 不会覆盖控制台中已存在的其它变量与 Secret。
+#===============================================================================
+[vars]
+CLOUD_PLATFORM = "cf"
 
 #===============================================================================
 # 静态资产绑定（Cloudflare Workers Static Assets）
@@ -151,13 +167,12 @@ enabled = true
 #-------------------------------------------------------------------------------
 
 #-------------------------------------------------------------------------------
-# CLOUD_PLATFORM —— 【必须设置】的明文环境变量，声明部署厂商
+# CLOUD_PLATFORM —— 已在文件顶部的 [vars] 段声明，无需手工设置
 # ----------------------------------------------------------------------------
 # 取值三选一：cf / eo / esa（分别对应 Cloudflare / EdgeOne / 阿里云 ESA）。
 # 本项目不再靠运行时指纹猜测厂商，缺少或非法值会让 detectCaps() 启动时直接报错。
-# 在 Cloudflare 上必须设为 'cf'（含 Workers 与 Pages Functions，二者不再区分）。
-# 注入方式（任选其一，非 Secret）：
-#   CLI： npx wrangler secret put CLOUD_PLATFORM   # 填 cf / eo / esa（secret 类型亦可）
-#   Dashboard：Worker → Settings → Variables → 设为明文变量 CLOUD_PLATFORM = cf
+# 在 Cloudflare 上恒为 'cf'（含 Workers 与 Pages Functions，二者不再区分），
+# 已由顶部 [vars] 固化，wrangler deploy（手动或流水线）都会自动带上。
+# 仅当你要临时覆盖时，才需 Dashboard → Settings → Variables 手工改。
 # 本地开发由 dev 脚本自动注入（默认 eo，--cf 切 cf）；详见 docs/09-local-development.md。
 #-------------------------------------------------------------------------------

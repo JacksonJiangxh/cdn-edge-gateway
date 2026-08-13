@@ -127,39 +127,76 @@ ESA 限制**每个请求最多发 32 个子请求**，且 **Cache 操作与 `fet
 
 ## 6. 部署步骤
 
-### 方式 A：GitHub 连接自动部署（最省心）
-1. fork/推本仓库到 GitHub；
-2. ESA 控制台 → 边缘计算和 AI → 函数和 Pages → 新建 Pages → **连接 GitHub 仓库（根目录）**；
+> **先分清两类操作：**
+> - **流水线部署（CI/CD 按钮 / Actions）= 零交互**。本仓库的 CNB / GitHub「部署 ESA Pages」
+>   按钮通过环境变量 `ESA_ACCESS_KEY_ID` / `ESA_ACCESS_KEY_SECRET` **跳过交互式 login**
+>   （与官方「云效 Flow + ESA CLI」教程一致），直接 `check → build → esa-cli commit → deploy`。
+> - **手动部署 = 可交互**。你在本机终端跑 `esa-cli login`（交互输入 AK/SK）后 `commit + deploy`，
+>   属个人本地操作，命令见方式 B/D。
+> 关键点：流水线发布命令**必须带 `--assets .`（仓库根，含 esa.jsonc）**，不能只传 `./dist`。
+
+### 方式 A：ESA 控制台连接 Git 仓库自动部署（可选，最省心，无需 CLI）
+1. fork/推本仓库到 GitHub 或 CNB；
+2. ESA 控制台 → 边缘计算和 AI → 函数和 Pages → 新建 Pages → **连接 GitHub/CNB 仓库（根目录）**；
 3. ESA 自动读取 `esa.jsonc`（`entry` / `assets` / `buildCommand`）并构建；
 4. **控制台「环境变量」必须设置 `REDIS_URL`**（§3：ESA 禁用厂商 KV，持久化唯一来源）；
 5. 部署后绑定域名或走 ESA 提供的测试域名。
-> 此后每次 push 主分支 ESA 会自动重新构建部署，无需手动操作。
+> 此后每次 push 主分支 ESA 会自动重新构建部署，无需手动操作。与方式 C 的流水线按钮二选一，不要同时开自动部署以免冲突。
 
-### 方式 B：esa-cli 命令行部署（手动 / CI 用）
+### 方式 B：esa-cli 命令行部署（**手动 / 可交互**）
 ```bash
 npm install esa-cli -g        # 全局安装
-esa-cli login                 # AK/SK 登录（RAM 控制台获取，建议 esa-cli 非交互环境变量）
+esa-cli login                 # AK/SK 登录（RAM 控制台获取，交互式，仅本机手动执行）
 npm run build                 # 先构建出 _worker.js 与 dist/public（仓库已带 esa.jsonc）
 esa-cli commit                # 提交为云上版本
-esa-cli deploy                # 部署到边缘节点（选版本/环境）
+esa-cli deploy --name project_name --assets .   # 注意：目录是仓库根 .，不是 ./dist
 esa-cli domain add <domain>   # 绑定域名（须 ESA 子域且已备案）
 ```
 本地调试：`esa-cli dev`（边缘存储 API 不读线上数据，需 `kv.json` 模拟）。
 仓库已加脚本：`npm run deploy:esa`（先 build，再打印上述步骤）。
+> ⚠️ 注意 `esa-cli login` 是**交互命令**，只能在本机手动用，**不能放进流水线**；流水线用方式 C 的环境变量绕过。
 
-### 方式 C：GitHub Actions 流水线（本仓库已内置）
-仓库已提供 `.github/workflows/deploy-esa-pages.yml`（仅 `workflow_dispatch` 手动触发）：
-1. 仓库 **Settings → Secrets → Actions** 添加 `ESA_AK_ID`、`ESA_AK_SECRET`
-   （阿里云 RAM 用户的 AccessKey，建议授权 `AliyunESAFullAccess` 或最小 ESA 权限）；
-2. 可选 **Variables → Actions** 添加 `ESA_PROJECT`（ESA Pages 项目名，默认 `cdn-edge-gateway`）；
-3. 在 **Actions → 部署阿里云 ESA Pages（手动）** 点 Run workflow，确认串填 `deploy`，
-   选环境（production/preview）；
-4. 流水线执行 `npm ci → npm run build → esa-cli login → commit → deploy`；
+### 方式 C：GitHub Actions / CNB 流水线「部署 ESA Pages」按钮（**非交互**，本仓库已内置）
+仓库已提供 `.github/workflows/deploy-esa-pages.yml`（仅 `workflow_dispatch` 手动触发）与
+CNB「部署 ESA Pages」按钮（`.cnb.yml` 的 `web_trigger_deploy_esa_pages`）。两者**都用环境变量
+`ESA_ACCESS_KEY_ID` / `ESA_ACCESS_KEY_SECRET` 非交互登录后直接发布**：
+
+1. GitHub：Settings → Secrets → Actions 加 `ESA_AK_ID`、`ESA_AK_SECRET`（阿里云 RAM 用户 AccessKey，
+   建议 `AliyunESAFullAccess` 或最小 ESA 权限）；CNB：密钥仓库加同名字段。可选 Variables 加
+   `ESA_PROJECT`（项目名，默认 `cdn-edge-gateway`）；
+2. GitHub：在 **Actions → 部署阿里云 ESA Pages（手动）** 点 Run workflow，选环境（production/preview）；
+   CNB：点「🚀 部署 ESA Pages」按钮，填 `esa_env`（默认 production）、`esa_pages_project`（可选）；
+3. 流水线执行 `npm ci → npm run check → npm run build`；
+4. 注入 `ESA_ACCESS_KEY_ID`/`ESA_ACCESS_KEY_SECRET` 后 `esa-cli login`（非交互）→
+   `esa-cli commit` → `esa-cli deploy --name <项目> --assets .`；
 5. **部署前请先在 ESA 控制台「环境变量」设好 `REDIS_URL`**（CI 无法替你设运行期变量）。
-> 若 `esa-cli` 当前版本不支持非交互登录，流水线会给出明确提示——
-> 此时改用「方式 A：控制台连接 GitHub 仓库」即可，无需 Secret。详见该 workflow 注释。
+> 若 `esa-cli` 某版本不支持纯环境变量登录，可在本机用方式 B 的 `esa-cli login` 手动发布，
+> 或改用方式 A 的控制台连接仓库自动部署。
 
-无论 A/B/C，部署目录都是**仓库根目录**（含 `esa.jsonc` + `dist/public`），不是只传 `dist/public`。
+### 方式 D：基于官方 skill 的脚本化部署（esa-cli 驱动，**手动 / 可交互**）
+本仓库已接入阿里云官方 Agent Skills 仓库 `aliyun/alibabacloud-aiops-skills` 中的
+**`alibabacloud-esa-pages-deploy`** skill（项目级软链接：`/workspace/.codebuddy/skills/alibabacloud-esa-pages-deploy`）。
+
+该 skill 描述的是把代码部署到 ESA Functions & Pages。但需注意：**阿里云官方的编程式上传通道
+（`mcp-server-esa` 的 `html_deploy`/`folder_deploy`、以及 SDK 的 `CreateRoutineWithAssetsCodeVersion`）
+底层都会走 OSS 中转上传**。本仓库**刻意不采用 OSS 通道**，而是复用 skill 给出的 `esa-cli` 路径：
+由官方 `esa-cli` 读取 `esa.jsonc`（`entry` + `assets.directory`）完成打包，上传与构建由阿里云后台处理
+（与控制台/GitHub 连接部署是同一通道，**完全不经过 OSS**）。
+
+仓库已在 `scripts/deploy-esa-cli.mjs` 做了项目级接入，并封装为 npm 脚本 `deploy:esa:cli`：
+
+```bash
+# 前置：esa-cli login（AK/SK，需 AliyunESAFullAccess），并开 ER 服务
+npm run deploy:esa:cli                 # 默认 env=production
+npm run deploy:esa:cli staging "hotfix" # 可指定环境/说明
+# 等价手动：npm run build && esa-cli commit --description "..." && esa-cli deploy --environment production
+```
+
+> 与方式 A/B/C 的区别：方式 D 走 `esa-cli`（需 `esa-cli login` 交互），更适合脚本化 / 多环境
+> （preview/staging/production）切换与**本地手动**调用，但仍**不碰 OSS**（由阿里云后台上传）。
+> 部署后仍需在 ESA 控制台**绑定域名/路由并设 `REDIS_URL`**。
+
+无论 A/B/C/D，部署目录都是**仓库根目录**（含 `esa.jsonc` + `dist/public`），不是只传 `dist/public`。
 
 ### 方式 D：基于官方 skill 的脚本化部署（esa-cli 驱动，**不依赖 OSS**）
 本仓库已接入阿里云官方 Agent Skills 仓库 `aliyun/alibabacloud-aiops-skills` 中的

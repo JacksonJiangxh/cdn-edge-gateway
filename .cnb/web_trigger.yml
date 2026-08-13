@@ -69,6 +69,28 @@ branch:
             type: input
             required: false
 
+      # ---------------- 部署阿里云 ESA Pages ----------------
+      - name: 🚀 部署 ESA Pages
+        description: 手动部署到阿里云 ESA Pages（部署目录为仓库根，需先在 ESA 控制台设置 REDIS_URL）
+        event: web_trigger_deploy_esa_pages
+        inputs:
+          esa_env:
+            name: 目标环境
+            description: ESA 默认 production；先确认无误再发正式环境
+            type: select
+            required: true
+            default: production
+            options:
+              - name: production — 正式环境
+                value: production
+              - name: preview — 预览环境
+                value: preview
+          esa_pages_project:
+            name: ESA 项目名
+            description: 留空则用密钥仓库的 ESA_PROJECT，再无则用 cdn-edge-gateway
+            type: input
+            required: false
+
       # ---------------- 清理历史流水线记录 ----------------
       - name: 🧹 清理历史流水线记录
         description: 删除当前仓库的历史流水线构建日志（保留最近 N 条），需确认输入 clean

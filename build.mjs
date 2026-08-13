@@ -413,6 +413,15 @@ const buildOptions = {
   legalComments: 'none',
   charset: 'utf8',
   logLevel: 'info',
+  // 把平台默认值烘焙进产物：caps.js 读不到运行时 CLOUD_PLATFORM 时用它兜底。
+  //
+  // 为什么默认 'cf'：_worker.js 只有 CF（Workers / Pages）会作为入口被【直接】加载；
+  // EO 与 ESA 都经各自薄壳（edge-functions/[[default]].js、esa/index.js）转发，
+  // 薄壳会在调用前把 env.CLOUD_PLATFORM 强制置为 'eo' / 'esa'，优先级高于此默认值。
+  // 于是三平台都无需任何控制台/API 配置即可正确判定厂商。
+  define: {
+    __BUILD_PLATFORM__: JSON.stringify('cf'),
+  },
   banner: {
     js: `// cdn-edge-gateway — built at ${new Date().toISOString()}\n// 构建产物，请勿手动编辑。修改源码请编辑 src/ 目录后重新运行 npm run build`,
   },

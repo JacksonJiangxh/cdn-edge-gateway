@@ -174,6 +174,17 @@ ${dbName}${spec.toField} = "${value}"
 // ADMIN_PATH，运行时 env 层仍会作为兜底生效（src/config/store.js）。
 console.log("✓ ADMIN_PATH 不注入（部署后用管理面修改并存 KV，优先级最高）");
 
+// ---------- 3.5 CLOUD_PLATFORM：无需注入，仅提示 ----------
+// 该变量声明部署厂商。真正的保障在构建期：build.mjs 用 esbuild define 把默认值
+// 'cf' 烘焙进 _worker.js，caps.js 读不到运行时变量时即用它兜底。
+// 基线 wrangler.toml 的 [vars] 只是可选的双保险（本脚本整体复制基线 toml，
+// 有就自动带上），缺失也不影响运行，故这里只提示、不中断流水线。
+if (/^\s*CLOUD_PLATFORM\s*=\s*"(cf|eo|esa)"/m.test(toml)) {
+  console.log('✓ CLOUD_PLATFORM 已随 [vars] 一并注入（构建期另有烘焙默认值兜底）');
+} else {
+  console.log("· CLOUD_PLATFORM 未在 [vars] 中声明——依赖构建期烘焙的默认值，无需处理");
+}
+
 // ---------- 4. 写出临时 toml ----------
 writeFileSync(OUT_TOML, toml);
 console.log(`✓ 已生成临时配置: ${OUT_TOML}`);

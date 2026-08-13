@@ -20,7 +20,9 @@
  *      用 esbuild transform 校验生成的入口文件语法，防止转义/括号问题。
  *      同时校验 web/_stage.gen.js（由 build.mjs 步骤 0 用 esbuild 打包生成、
  *      被 web/app.js import 的产物）的存在性与可解析性，拦截「构建成功但该
- *      产物损坏」的回归。
+ *      产物损坏」的回归。该产物同样被 .gitignore 排除，CI 全新克隆时必然
+ *      缺失，故缺失时由本脚本用 esbuild 直接重建（而非报错要求先跑 build，
+ *      否则 check → build 的流水线顺序会形成「先有鸡还是先有蛋」的死锁）。
  *
  * 用法：
  *   node scripts/check.mjs        # 全量静态检查，异常即非零退出
@@ -63,12 +65,33 @@ const SCAN_TARGETS = [
 const GENERATED_ENTRIES = ['web/_stage.entry.js', 'web/_app.entry.js'];
 
 /**
- * 期望由构建自动生成但【需 esbuild bundle 才能重建】的产物。
+ * 期望由构建自动生成、且【需 esbuild bundle 才能重建】的产物。
+ *
  * web/_stage.gen.js 由 build.mjs 的 buildStageGen() 用 esbuild 打包 _stage.entry.js
- * 生成，并被 web/app.js import。它无法用简单 writeFile 重建，缺失时应提示运行
- * `npm run build`，而非像 GENERATED_ENTRIES 那样自动重建。
+ * 生成，并被 web/app.js import。它被 .gitignore 排除，因此 CI（CNB / GitHub
+ * Actions）全新克隆后必然不存在——而流水线顺序是 check → build，若此处直接
+ * 报错要求「先跑 npm run build」，check 将永远无法通过（本地能过只是因为残留
+ * 了上次构建的产物）。故缺失时在此用 esbuild 重建，逻辑与 buildStageGen() 一致。
  */
 const GENERATED_BUNDLE = ['web/_stage.gen.js'];
+
+/**
+ * 重建 web/_stage.gen.js —— 与 build.mjs 的 buildStageGen() 保持同构。
+ * 从 web/_stage.entry.js（由 gen-entries.mjs 生成）打包出 ESM 产物。
+ */
+async function rebuildStageGen() {
+  await esbuild.build({
+    entryPoints: [join(ROOT, 'web/_stage.entry.js')],
+    outfile: join(ROOT, 'web/_stage.gen.js'),
+    bundle: true,
+    format: 'esm',
+    target: 'es2022',
+    platform: 'browser',
+    minify: false,
+    write: true,
+    legalComments: 'none',
+  });
+}
 
 /** 递归收集目录下需扫描的文件 */
 function collectFiles(target) {
@@ -121,8 +144,12 @@ function scanFile(rel, problems) {
   }
 }
 
-/** 扫描入口是否可被 esbuild 解析 */
-async function checkEntryParseable(problems) {
+/**
+ * 扫描入口是否可被 esbuild 解析。
+ * @param {string[]} problems 问题收集数组
+ * @param {boolean} [quiet] 是否静默（build 内部调用时避免重复日志）
+ */
+async function checkEntryParseable(problems, quiet = false) {
   for (const rel of GENERATED_ENTRIES) {
     const abs = join(ROOT, rel);
     if (!existsSync(abs)) {
@@ -136,13 +163,23 @@ async function checkEntryParseable(problems) {
       problems.push(`${rel} 语法解析失败：${e.message}`);
     }
   }
-  // 由 esbuild bundle 生成的产物（_stage.gen.js）：缺失需跑完整 build 才能重建，
-  // 故不做自动重建，仅校验存在性 + 可解析性，拦截「构建成功但该产物损坏」。
+  // 由 esbuild bundle 生成的产物（_stage.gen.js）：被 .gitignore 排除，CI 全新
+  // 克隆后必然缺失。此处按需重建（而非报错），再校验可解析性，既保证 check 在
+  // 干净仓库可独立通过，又能继续拦截「产物存在但已损坏」的回归。
   for (const rel of GENERATED_BUNDLE) {
     const abs = join(ROOT, rel);
     if (!existsSync(abs)) {
-      problems.push(`${rel} 缺失——请运行 npm run build（build 步骤 0 用 esbuild 生成）`);
-      continue;
+      try {
+        await rebuildStageGen();
+      } catch (e) {
+        problems.push(`${rel} 缺失且重建失败：${e.message}`);
+        continue;
+      }
+      if (!existsSync(abs)) {
+        problems.push(`${rel} 缺失——重建未产出文件，请运行 npm run build 排查`);
+        continue;
+      }
+      if (!quiet) console.log(`  ✓ 已自动重建缺失的 ${rel}`);
     }
     const src = readFileSync(abs, 'utf8');
     try {
@@ -179,7 +216,7 @@ export async function runChecks({ quiet = false } = {}) {
   }
 
   if (!quiet) console.log('▸ 前端入口可解析性检查...');
-  await checkEntryParseable(local);
+  await checkEntryParseable(local, quiet);
 
   return local;
 }
@@ -191,7 +228,7 @@ async function main() {
   if (problems.length) {
     console.error('\n✗ 检查未通过：');
     for (const p of problems) console.error(`  - ${p}`);
-    console.error('\n修复建议：将 CLOUD_PLATFORM 写入处改为规范值 cf|eo|esa（caps.js 运行时会兼容旧别名，但仓库内建议统一规范写法）；前端入口请运行 npm run build 生成。');
+    console.error('\n修复建议：将 CLOUD_PLATFORM 写入处改为规范值 cf|eo|esa（caps.js 运行时会兼容旧别名，但仓库内建议统一规范写法）；前端入口/产物本脚本会自动重建，若重建失败请检查 web/ 与 src/config/stages.js 的语法。');
     process.exit(1);
   }
 

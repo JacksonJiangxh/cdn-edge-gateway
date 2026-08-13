@@ -29,6 +29,14 @@
 export const VALID_PLATFORMS = ['cf', 'eo', 'esa'];
 
 /**
+ * 构建期由 esbuild `define` 注入的平台默认值（规范值 cf|eo|esa）。
+ * 直接 import 源码运行（单元测试等）时该标识符不存在，故所有读取处
+ * 必须用 typeof 守卫。
+ * @type {string|undefined}
+ */
+/* global __BUILD_PLATFORM__ */
+
+/**
  * isolate 内存预算默认上限（字节）。统一按 128MB 假设规划。
  * 实际值可由运行时环境变量 MEM_BUDGET_BYTES 覆盖（见 platform/memBudget.js）。
  * 预留 64KB 给运行时自身开销（编译后代码、栈、V8 内部），应用内存按此值管理。
@@ -198,7 +206,19 @@ function looksLikeR2(binding) {
  * @throws {Error} 未设置或取值非法时
  */
 function readPlatform(env) {
-  const declared = (readEnvVar(env, 'CLOUD_PLATFORM') || '').toLowerCase().trim();
+  // 优先级：运行时 env / process.env > 构建期烘焙的默认值。
+  //
+  // __BUILD_PLATFORM__ 由 build.mjs 通过 esbuild define 注入（未注入时为 undefined，
+  // 例如 vitest 直接 import 源码的场景），值为构建目标平台的规范值。
+  // 这样 CF Workers/Pages 无需任何控制台变量即可运行——与 EO/ESA 薄壳里
+  // 硬编码平台声明的做法等价，只是 CF 没有薄壳，故改在构建期烘焙进产物。
+  // 运行时显式设置的 CLOUD_PLATFORM 仍然优先，保留「同一份产物临时改判」的能力。
+  // 用 typeof 守卫读取，未注入时不会抛 ReferenceError（部分运行时对未声明
+  // 标识符的裸访问会抛错，故不能直接写 __BUILD_PLATFORM__ || ''）。
+  const baked = typeof __BUILD_PLATFORM__ === 'string' ? __BUILD_PLATFORM__ : '';
+  const declared = (readEnvVar(env, 'CLOUD_PLATFORM') || baked || '')
+    .toLowerCase()
+    .trim();
   if (!declared) {
     throw new Error(
       '[caps] 必须设置环境变量 CLOUD_PLATFORM 以声明部署厂商，' +
