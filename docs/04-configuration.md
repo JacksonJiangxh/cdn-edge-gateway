@@ -273,7 +273,7 @@ conditions: [
 >   - **路径 B 响应头委托**：网关下发 `CDN-Cache-Control`，由 EO 边缘按头缓存（`edgeTtl` 决定 TTL）——所有 EO 请求都享受。
 >   - **路径 A 同站 fetch 委托节点缓存**：对「无自定义回源 Host 的可缓存请求」，边缘函数内 `fetch(同站加速域名)`（HOST 与 host 头一致）走 EO 节点缓存，**命中零函数调用、未命中由 EO 按平台源站组回源**。需预先在 EO 控制台配好源站组 + 回源 Host 重写（见 `docs/07-eo-origin-host.md`）。
 >
-> **本项目已自动遵循「最前端 CDN 为最终依据」的分层铁律**（`src/proxy/headers.js` 的 `buildClientHeaders`）：可缓存响应自动下发 `Cache-Control: public, max-age=1800, immutable`（浏览器 30 分钟）+ `CDN-Cache-Control: public, max-age=15552000`（边缘半年），并**主动剥离源站带回的 `set-cookie`/`pragma`/`no-store`/`private`/`expires=0`**；开启 `cache.enabled` 但未给 TTL 时回落到半年/30 分钟默认（常量 `TIER_CDN_DEFAULT_EDGE_TTL`/`TIER_CDN_DEFAULT_BROWSER_TTL`）。即模板开箱即符合铁律，CF/EO 面板规则是把最前端权威再钉死一层。详见部署文档「分层缓存架构部署方案」。
+> **本项目已自动遵循「最前端 CDN 为最终依据」的分层铁律**（`src/proxy/headers.js` 的 `buildClientHeaders`）：可缓存响应**三个头均同时携带 `max-age` + `s-maxage`**（万无一失，避免任一消费方只看其一而漏判）——`Cache-Control: public, max-age=1800, immutable, s-maxage=15552000`（浏览器 30 分 + 边缘半年）、`CDN-Cache-Control: public, max-age=15552000, s-maxage=15552000`（标准头，三平台通用）、**仅 CF 额外下发** `Cloudflare-CDN-Cache-Control: public, max-age=15552000, s-maxage=15552000`（CF 专有、消费后不透传浏览器）；并**主动剥离源站带回的 `set-cookie`/`pragma`/`no-store`/`private`/`expires=0`**。开启 `cache.enabled` 但未给 TTL 时回落到半年/30 分钟默认（常量 `TIER_CDN_DEFAULT_EDGE_TTL`/`TIER_CDN_DEFAULT_BROWSER_TTL`）。即模板开箱即符合铁律。注意：**CF 上因开启了 Workers Cache，`wrangler.toml` 的 `[cache] enabled = true` 会让 zone 级 Cache Rules / Cache Response Rules 被绕过**，故 CF 上本项目头就是唯一权威、面板规则钉不上去（EO 的站点规则作用于真正的 CDN 层、仍有效）。详见部署文档「分层缓存架构部署方案」。
 >
 > 因此「缓存」是**可控的头设置 / 同站 fetch 委托让边缘去缓存**，不是本程序自己存。这也带来一个 EO 下的限制：`cacheGen` 整站清除只作用于 `caches.default`（CF），**EO 下无法主动按键清除**，只能等 TTL 自然过期或用 `Cache-Tag` + 平台 purge。
 

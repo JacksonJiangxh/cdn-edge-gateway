@@ -137,14 +137,27 @@ export function buildClientHeaders(ctx, originResp, policy, ops) {
 
   // ---- 2. Cache-Control / CDN-Cache-Control（分层缓存铁律）----
   // 路径：浏览器 → 最前端 CDN(CF/EO) → 本项目(Worker/Makers) → 源站。
-  // 本项目处于「函数层」，其下发的响应头是最前端的兜底依据：
-  //   - 浏览器侧：Cache-Control: public, max-age=<browserTtl>, immutable
-  //   - 边缘侧：  CDN-Cache-Control: public, max-age=<edgeTtl>（独立维度，不混入 Cache-Control）
-  //   - 主动剥离源站带回的不缓存信号（Set-Cookie/Pragma/no-store/private/Expires=0），
-  //     保证「最前端 CDN 为最终依据」——即便 CF/EO 面板规则漏设，这里也兜底清掉。
+  // 本项目处于「函数层」，其下发的响应头是最前端的兜底依据。
+  //
+  // 跨平台头策略（三平台通用）：
+  //   - Cache-Control       : public, max-age=<browserTtl>, immutable, s-maxage=<edgeTtl>
+  //                           （浏览器 max-age + 边缘 s-maxage 同头给出，避免任一消费方只看其一而漏判）
+  //   - CDN-Cache-Control   : public, max-age=<edgeTtl>, s-maxage=<edgeTtl>
+  //                           （RFC 9213 标准头，CF/EO/ESA 均消费；会被透传浏览器但浏览器忽略，无害）
   // 注：immutable 只给浏览器（Cache-Control），不写进 CDN-Cache-Control（边缘不需要）。
+  //
+  // Cloudflare 专属增强：
+  //   CF 的 Workers Cache 会绕过 zone 级 Cache Rules，且 CF 额外支持专有头
+  //   Cloudflare-CDN-Cache-Control（与 CDN-Cache-Control 语义一致，但 CF 消费后
+  //   不向浏览器透传）。当平台 == 'cf' 时额外下发该头，使边缘 TTL 仅在 CF 内部可见、
+  //   彻底不泄漏给下游。该头为 CF 专有，EO/ESA 不认识，故仅 CF 下发。
+  //
+  // 核心前提：三个头均同时携带 max-age 与 s-maxage，确保各平台无论按哪个头/
+  // 哪个字段消费都能拿到正确 TTL（CF Workers Cache 按 RFC 9111 透传 Cache-Control；
+  // 标准 CDN-Cache-Control / Cloudflare-CDN-Cache-Control 供各 CDN 边缘决策）。
   const status = originResp.status;
   const statusTtl = policy?.statusTtl?.[String(status)];
+  const isCf = ctx?.caps?.platform === 'cf';
 
   // 剥离源站带回的一切「不缓存」信号（兜底，确保可缓存内容真被边缘缓存）
   for (const bad of ['set-cookie', 'pragma', 'no-store', 'private']) {
@@ -152,10 +165,13 @@ export function buildClientHeaders(ctx, originResp, policy, ops) {
   }
   if (out.get('expires') === '0') out.delete('expires');
 
-  // 统一下发边缘缓存头：CDN-Cache-Control 只给边缘，不含浏览器 max-age
-  const setEdgeCacheControl = (maxAge, swr) => {
+  // 统一下发边缘缓存头。三个头（CF 时含 Cloudflare-CDN-Cache-Control）均带
+  // max-age + s-maxage，保证万无一失。swr 可选追加 stale-while-revalidate。
+  const setEdgeCacheControl = (edgeTtl, swr) => {
     const tail = swr ? `, stale-while-revalidate=${swr}` : '';
-    out.set('CDN-Cache-Control', `public, max-age=${maxAge}${tail}`);
+    const edgeVal = `public, max-age=${edgeTtl}, s-maxage=${edgeTtl}${tail}`;
+    out.set('CDN-Cache-Control', edgeVal);
+    if (isCf) out.set('Cloudflare-CDN-Cache-Control', edgeVal);
   };
 
   if (statusTtl !== undefined) {
@@ -166,6 +182,7 @@ export function buildClientHeaders(ctx, originResp, policy, ops) {
     // 错误响应绝不允许被浏览器或中间层缓存
     out.set('Cache-Control', 'no-store');
     out.set('CDN-Cache-Control', 'no-store');
+    if (isCf) out.set('Cloudflare-CDN-Cache-Control', 'no-store');
   } else if (policy?.enabled && policy.mode !== 'origin') {
     // mode === 'origin' 表示遵循源站缓存策略，此时完全不改写缓存头
     // TTL 取配置值；若为 0 则回落到分层铁律默认值（边缘半年 / 浏览器 30 分钟）

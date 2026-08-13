@@ -36,6 +36,83 @@ import {
   MATCH_OPERATORS,
   deepClone,
 } from './defaults.js';
+// 阶段字典：落库「按阶段裁剪 action 字段」的唯一真相源（与前端 web/app.js 同构副本一致）。
+import { STAGE_OPS, normalizeStage, STAGE_ORDER } from './stages.js';
+
+/**
+ * op（STAGE_OPS.allowedOps 里的项）→ 落库 action 对象里的字段名。
+ * 用于「按阶段裁剪」：某阶段 allowedOps 不含的 op，其对应字段不写进落库 action，
+ * 消除「全字段空壳」冗余（例如 respHeaders 阶段的规则不再带 cache/rewrite 空壳）。
+ *
+ * 注意：所有下表列出的字段都是「阶段专属 op 字段」——仅当对应阶段的 allowedOps 包含该 op
+ * 时才落库（见 buildActionByStage）。不存在「全局始终落库」的 action 字段：
+ *   - clientIpHeader / followRedirect / originTimeoutMs 看似跨阶段，实则只在 origin 阶段
+ *     （failover.js 构造回源请求头 / 回源跟随重定向 / 回源超时）被消费，故只归入 origin.allowedOps，
+ *     非 origin 阶段的规则不会落库这三个字段（与「全局字段」的旧认知不同）。
+ */
+export const STAGE_OP_FIELDS = {
+  rewrite: 'rewrite',
+  redirect: 'redirect',
+  forceHttps: ['forceHttps', 'forceHttpsStatus'],  // terminate 阶段：强制 HTTPS + 状态码
+  directResponse: 'directResponse',
+  reqHeaders: 'reqHeaders',
+  respHeaders: 'respHeaders',
+  cache: 'cache',
+  hostHeader: 'hostHeader',
+  originConn: ['engine', 'scheme', 'port'],
+  targetPool: ['poolId', 'inlineOrigins'],
+  // 回源级配置：同属 Origin 阶段（与 hostHeader/originConn/targetPool 一样由 allowedOps 约束），
+  // 不是「全局字段」——它们只在回源阶段（构造回源请求头 / 回源跟随重定向 / 回源超时）消费。
+  clientIp: 'clientIpHeader',
+  followRedirect: 'followRedirect',
+  originTimeout: 'originTimeoutMs',
+};
+
+/** 返回某阶段「允许落库的 action 字段名」集合（仅含阶段专属 op 字段，不含全局字段）。 */
+function ownedFieldsForStage(stage) {
+  const ops = (STAGE_OPS[stage] && STAGE_OPS[stage].allowedOps) || [];
+  const set = new Set();
+  for (const op of ops) {
+    const f = STAGE_OP_FIELDS[op];
+    if (Array.isArray(f)) f.forEach((x) => set.add(x));
+    else if (f) set.add(f);
+  }
+  return set;
+}
+
+/** 所有「阶段专属 op」对应的 action 字段名全集（用于区分「阶段专属」vs「全局」字段）。 */
+const STAGE_OWNED_FIELDS = (() => {
+  const s = new Set();
+  for (const f of Object.values(STAGE_OP_FIELDS)) {
+    if (Array.isArray(f)) f.forEach((x) => s.add(x));
+    else s.add(f);
+  }
+  return s;
+})();
+
+/**
+ * 按 rule.stage 的 allowedOps 裁剪落库 action：
+ *  - 阶段专属字段（STAGE_OWNED_FIELDS 全部项，含 clientIpHeader / followRedirect /
+ *    originTimeoutMs）：仅当本阶段 allowedOps 包含该 op 才写入，否则跳过（消除全字段空壳冗余）。
+ *  - 不存在「全局始终落库」的 action 字段：clientIpHeader 等只在 origin 阶段落库，其它阶段跳过。
+ * 读取方（前端 headerEditor 等、后端 applyXxx 的 `if (!ops) return` 兜底）均已兼容「字段缺失」。
+ * @param {object} a 原始 action（未用，预留扩展）
+ * @param {object} normed 已规范化后的各字段值
+ * @param {string} stage 规则所属阶段（rule.stage）
+ * @returns {object} 裁剪后的 action
+ */
+function buildActionByStage(a, normed, stage) {
+  // 无旧数据，全部以最新为准：不兼容「缺省 stage 反推兜底」。缺省/非法 stage 直接回退到
+  // 'cache' 并按阶段裁剪（绝不写全字段），保持落库结构纯净。
+  const ns = normalizeStage(stage) || 'cache';
+  const owned = ownedFieldsForStage(ns);
+  const out = {};
+  for (const [k, v] of Object.entries(normed)) {
+    if (STAGE_OWNED_FIELDS.has(k) && !owned.has(k)) continue; // 本阶段不含该 op → 不落库
+    out[k] = v;
+  }
+  return out;
+}
 import { DEFAULT_RETRY_ON, CONFIG_VERSION } from '../contracts.js';
 // node:crypto 在 build.mjs 的 EXTERNAL_MODULES 中（CF/EO nodejs_compat 与 Node 均提供），
 // 用于 webcrypto.getRandomValues 兜底；edge worker 中优先用 globalThis.crypto（WebCrypto）。
@@ -625,25 +702,17 @@ export function normRule(input, idx) {
       match: {
         conditions: conds.value,
       },
-      action: {
-        poolId: str(a.poolId, '', 64),
-        inlineOrigins: normRuleInlineOrigins(a.inlineOrigins, label),
-        rewrite: rw.value,
-        cache: normCachePolicy(a.cache),
-        reqHeaders: rq.value,
-        respHeaders: rp.value,
-        hostHeader: { mode: ahMode, custom: ahCustom },
-        redirect: rd.value,
-        directResponse: normDirectResponse(a.directResponse),
+      action: buildActionByStage(a, {
+        rewrite: rw.value, cache: normCachePolicy(a.cache), reqHeaders: rq.value,
+        respHeaders: rp.value, hostHeader: { mode: ahMode, custom: ahCustom },
+        redirect: rd.value, directResponse: normDirectResponse(a.directResponse),
         clientIpHeader: cip.value,
-        forceHttps: bool(a.forceHttps, false),
-        forceHttpsStatus: int(a.forceHttpsStatus, 301, 301, 308),
+        forceHttps: bool(a.forceHttps, false), forceHttpsStatus: int(a.forceHttpsStatus, 301, 301, 308),
         followRedirect: bool(a.followRedirect, false),
         originTimeoutMs: int(a.originTimeoutMs, 0, 0, 120000),
-        engine: aEngine,
-        scheme: aScheme,
-        port: aPort,
-      },
+        engine: aEngine, scheme: aScheme, port: aPort,
+        poolId: str(a.poolId, '', 64), inlineOrigins: normRuleInlineOrigins(a.inlineOrigins, label),
+      }, input.stage),
     },
     errors,
   };
@@ -663,6 +732,60 @@ export function validateRule(input) {
     r.value.priority = 0;
   }
   return { ok: r.errors.length === 0, value: r.value, errors: r.errors };
+}
+
+/**
+ * 校验「全站通用（兜底）规则」的 stages 映射结构。
+ *
+ * 全站兜底规则是「阶段→默认动作」映射（见 store.getGlobalRules）：每个阶段恰好 1 条、
+ * 无条件、无 priority。本函数对每阶段的值做规范化校验，复用 normRule 的字段级校验
+ * 与 buildActionByStage 的阶段裁剪，保证落库结构与站点规则同构、无非法字段。
+ *
+ * @param {any} input 期望 { stages?: Record<string, any> }；也兼容直接传 stages 对象。
+ *   - 未知 stage key 会被忽略（不参与落库）。
+ *   - 某阶段缺失则保留内置默认（调用方应以 DEFAULT_GLOBAL_RULES 兜底补全）。
+ * @param {import('./defaults.js').DEFAULT_GLOBAL_RULES} [base] 补全基线（缺失阶段用它的同阶段值）
+ * @returns {{ ok: boolean, value: Record<string, any>, errors: string[] }}
+ */
+export function validateGlobalRulesStages(input, base) {
+  const errors = [];
+  // 顶层结构必须是对象（{stages} 或直接 stages 映射），数组/字符串/null 一律拒绝。
+  if (!isObj(input) || Array.isArray(input)) {
+    return { ok: false, value: {}, errors: ['全站规则结构应为对象 { stages: { 阶段: 默认动作 } }，而非数组/字符串'] };
+  }
+  const rawStages = isObj(input.stages) ? input.stages : input;
+  /** @type {Record<string, any>} */
+  const out = {};
+  for (const stage of STAGE_ORDER) {
+    const v = rawStages[stage];
+    if (v === undefined || v === null) {
+      // 缺失阶段：用基线补足（若有）
+      if (base && isObj(base[stage])) out[stage] = deepClone(base[stage]);
+      continue;
+    }
+    if (!isObj(v)) {
+      errors.push(`全站规则阶段 ${stage} 必须是对象`);
+      if (base && isObj(base[stage])) out[stage] = deepClone(base[stage]);
+      continue;
+    }
+    // 复用 normRule：把单阶段值包成一个伪规则，规范化后裁剪回该阶段字段，
+    // 使全站兜底与站点规则共享同一套字段校验/裁剪逻辑，避免重复实现。
+    const r = normRule({ stage, action: { [stage]: v } }, 0);
+    if (r.errors.length) {
+      errors.push(...r.errors.map((e) => `全站规则[${stage}] ${e}`));
+    }
+    if (r.value) {
+      // 嵌套型阶段（rewrite/redirect/reqHeaders/respHeaders/cache）的裁剪结果在
+      // action[stage] 里；扁平型阶段（terminate/origin）的字段直接展开在 action 顶层，
+      // 故按其 stage 键是否出现在 action 上来区分取值方式。
+      const clipped = (stage in r.value.action) ? r.value.action[stage] : r.value.action;
+      if (clipped !== undefined) out[stage] = clipped;
+      else if (base && isObj(base[stage])) out[stage] = deepClone(base[stage]);
+    } else if (base && isObj(base[stage])) {
+      out[stage] = deepClone(base[stage]);
+    }
+  }
+  return { ok: errors.length === 0, value: out, errors };
 }
 
 /**

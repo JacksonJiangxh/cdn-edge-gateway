@@ -26,9 +26,12 @@ import {
   DEFAULT_GLOBAL,
   DEFAULT_SITE_INDEX,
   DEFAULT_POOL_INDEX,
+  DEFAULT_GLOBAL_RULES,
   cloneGlobal,
+  cloneGlobalRules,
   deepClone,
 } from './defaults.js';
+import { STAGE_ORDER } from './stages.js';
 import { validateGlobal } from './schema.js';
 import { registerDomain, allocBytes, releaseBytes, syncEntries } from '../platform/memBudget.js';
 
@@ -848,23 +851,68 @@ export async function listPools(ctx) {
 const K_GLOBAL_RULES = 'cfg:global_rules';
 
 /**
- * 读取全站通用规则（兜底规则，对任何站点生效，优先级最低）。
- * @param {import('../contracts.js').Ctx} ctx
- * @returns {Promise<import('../contracts.js').Rule[]>}
+ * 把旧的「全站通用规则 Rule[]」结构迁移成新的「阶段→默认动作」映射。
+ * 旧数据每阶段可能有多条带 conditions 的规则，这里取每阶段「第一条」的 action
+ * 对应阶段字段作为兜底（无条件的默认动作语义），丢弃匹配条件。
+ * @param {{rules?: any[]}} data 旧结构
+ * @returns {Record<string, any>} stages 映射
  */
-export async function getGlobalRules(ctx) {
-  const data = await readJson(ctx, K_GLOBAL_RULES);
-  if (!data || !Array.isArray(data.rules)) return [];
-  return data.rules;
+function migrateGlobalRulesFromArray(data) {
+  /** @type {Record<string, any>} */
+  const stages = {};
+  const rules = Array.isArray(data.rules) ? data.rules : [];
+  for (const stage of STAGE_ORDER) {
+    const first = rules.find((r) => r && r.stage === stage && r.action);
+    stages[stage] = first ? deepClone(first.action[stage]) : cloneGlobalRules()[stage];
+  }
+  return stages;
 }
 
 /**
- * 覆盖写入全站通用规则。
+ * 读取全站通用（兜底）规则：阶段→默认动作映射，每个阶段 1 条、无条件。
+ *
+ * 兜底语义：KV 为空时写入内置保守默认（DEFAULT_GLOBAL_RULES）并返回，之后用户可改。
+ * 旧版 Rule[] 结构会被一次性迁移为 stages 映射并写回，保证灰度无中断。
  * @param {import('../contracts.js').Ctx} ctx
- * @param {import('../contracts.js').Rule[]} rules
+ * @returns {Promise<Record<string, any>>} 键为 STAGE_ORDER，值为各阶段默认 action
  */
-export async function putGlobalRules(ctx, rules) {
-  await writeJson(ctx, K_GLOBAL_RULES, { rules: Array.isArray(rules) ? rules : [] });
+export async function getGlobalRules(ctx) {
+  const data = await readJson(ctx, K_GLOBAL_RULES);
+  // 旧结构：{ rules: [...] } —— 迁移后写回
+  if (data && Array.isArray(data.rules)) {
+    const stages = migrateGlobalRulesFromArray(data);
+    try {
+      await writeJson(ctx, K_GLOBAL_RULES, { stages });
+      invalidateMemCache();
+      await bumpVersion(ctx);
+    } catch (err) {
+      console.error('[store] 全站规则旧结构迁移写回失败（忽略，仍返回映射）:', err?.message);
+    }
+    return deepClone(stages);
+  }
+  // 新结构：{ stages: {...} }
+  if (data && data.stages && typeof data.stages === 'object') {
+    return deepClone(data.stages);
+  }
+  // 空值：落盘内置默认并返回（幂等由调用方并发容忍，失败不影响返回）
+  const def = cloneGlobalRules();
+  try {
+    await writeJson(ctx, K_GLOBAL_RULES, { stages: def });
+    invalidateMemCache();
+    await bumpVersion(ctx);
+  } catch (err) {
+    console.error('[store] 全站规则默认落盘失败（忽略，仍返回默认）:', err?.message);
+  }
+  return deepClone(def);
+}
+
+/**
+ * 覆盖写入全站通用（兜底）规则：阶段→默认动作映射。
+ * @param {import('../contracts.js').Ctx} ctx
+ * @param {Record<string, any>} stages 键为 STAGE_ORDER，值为各阶段默认 action
+ */
+export async function putGlobalRules(ctx, stages) {
+  await writeJson(ctx, K_GLOBAL_RULES, { stages: stages && typeof stages === 'object' ? stages : {} });
   invalidateMemCache();
   await bumpVersion(ctx);
 }

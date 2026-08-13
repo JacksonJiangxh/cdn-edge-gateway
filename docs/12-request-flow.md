@@ -99,9 +99,17 @@
    │             evalCondition: target 支持 origin/originAddr(header/cookie/query/path/host/ext...)
    │        命中即停 → ctx.debug.ruleId=rule.id, rule=该规则
    │
-   ├─ ④.2 全站通用规则兜底
-   │     ├─ 站点已命中 → 跳过本步, ruleSource='site'
-   │     └─ 站点未命中 → getGlobalRules 同 ④.1 逻辑匹配 → 命中标 global，否则 rule=null
+   ├─ ④.2 全站通用规则兜底（阶段→默认动作映射，无条件、每阶段 1 条）
+   │     读取 getGlobalRules → 新阶段映射 { rewrite, redirect, terminate, reqHeaders, origin, cache, respHeaders }
+   │     每个阶段的值即「该阶段默认动作」。合并规则：站点 action 优先，全站仅补全站点缺失的字段——
+   │        effAction = deepClone(siteRule.action)
+   │        for stage in STAGE_ORDER:
+   │           for field in globalStages[stage]:
+   │              if effAction[field] === undefined: effAction[field] = globalStages[stage][field]
+   │     - 站点命中规则 → ruleSource='site'，但未被站点覆盖的阶段仍会被全站默认值补全
+   │     - 站点未命中 → 全部阶段取全站默认（ruleSource='global'）
+   │     注：全站兜底**不再跑 matchRule**（原模型对全站 Rule[] 再做一次条件匹配），改为 O(7) 阶段索引补全，
+   │         零匹配开销；KV 空时写入内置保守默认值（见 defaults.DEFAULT_GLOBAL_RULES）落盘，用户可改。
    │
    │   ④.3 ~ ④.7 是「规则匹配结果」按 action 类别细分的最小任务包（对标 Cloudflare 流量序列）
    │       每个类别独立成节点，按代码真实生效顺序串接；未命中的 action 字段直接跳过。

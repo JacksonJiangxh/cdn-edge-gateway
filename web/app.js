@@ -408,13 +408,39 @@ import { el, clear, $ } from './dom.js';
     const flow = el('div', { class: 'seq-flow' });
     wrap.appendChild(flow);
 
-    // 预取全站通用规则（兜底），用于各阶段「站点未设置→回落全站兜底」的标注与跳转
-    let GLOBAL_RULES = [];
+    // 预取全站通用（兜底）规则：新阶段→默认动作映射（每阶段 1 条、无条件）。
+    // 用于各阶段「站点未设置→回落全站兜底」的标注与跳转。GLOBAL_STAGES 键为
+    // STAGE_ORDER，值为该阶段的默认 action 片段（如 cache 阶段值为 CachePolicy 对象）。
+    let GLOBAL_STAGES = {};
     try {
       const gr = await API.rules.global().catch(() => null);
-      GLOBAL_RULES = (gr && gr.rules) || [];
-    } catch { GLOBAL_RULES = []; }
-    GLOBAL_RULES = GLOBAL_RULES.slice().sort((a, b) => (b.priority || 0) - (a.priority || 0));
+      GLOBAL_STAGES = (gr && gr.stages) || {};
+    } catch { GLOBAL_STAGES = {}; }
+
+    // 全站兜底编辑器中，每个阶段仅允许编辑「该阶段拥有的动作」（与后端
+    // buildActionByStage 的 ownedFields 一一对应）。注意 redirect 属独立 stage，
+    // 故 terminate 阶段只允许 forceHttps / directResponse，避免把 redirect 误并入 terminate。
+    const GLOBAL_STAGE_OPS = {
+      rewrite: ['rewrite'],
+      redirect: ['redirect'],
+      terminate: ['forceHttps', 'directResponse'],
+      reqHeaders: ['reqHeaders'],
+      origin: ['hostHeader', 'clientIp', 'followRedirect', 'originTimeout', 'originConn'],
+      cache: ['cache'],
+      respHeaders: ['respHeaders'],
+    };
+    // 嵌套型阶段：stages[stage] 的值是该阶段的 action 片段（{type:'none'} 等），
+    // 而 terminate / origin 是「扁平 action 字段」直接作为 value。
+    const NESTED_STAGES = new Set(['rewrite', 'redirect', 'reqHeaders', 'respHeaders', 'cache']);
+    // 把 stages[stage] 的值包成 buildRuleCard 期望的 rule.action
+    function globalStageToAction(stage, value) {
+      if (NESTED_STAGES.has(stage)) return { [stage]: value && typeof value === 'object' ? value : {} };
+      return value && typeof value === 'object' ? { ...value } : {};
+    }
+    // 从 buildRuleCard.read() 的 action 还原出 stages[stage] 的值
+    function actionToGlobalStage(stage, action) {
+      return NESTED_STAGES.has(stage) ? (action[stage] || {}) : (action || {});
+    }
 
     // 汇总一条规则的动作子阶段（用于序列展示）
     function ruleSubs(r) {
@@ -445,7 +471,7 @@ import { el, clear, $ } from './dom.js';
 
     // 渲染单个站点的完整序列（draggable=true 时规则可拖拽）
     // 严格按「①→⑱」18 个阶段顺序；阶段间相互独立（AND），阶段内规则集是 OR（按「顺序」从上到下匹配，顺序 1 最先，命中即跳出本阶段）。
-    // 某阶段站点无规则时，回落全站通用规则（GLOBAL_RULES）作为实际生效，卡片显示「回落全站兜底」。
+    // 某阶段站点无规则时，回落全站通用规则（GLOBAL_STAGES 阶段映射）作为实际生效，卡片显示「回落全站兜底」。
     function renderSite(site, draggable) {
       const rules = (site.rules || [])
         .slice()
@@ -455,17 +481,16 @@ import { el, clear, $ } from './dom.js';
       const sec = site.security || {};
 
       // 统一渲染一个「规则引擎型」阶段：以 rule.stage 为唯一索引聚合本阶段规则；
-      // 本站无该阶段规则时，回落全站通用规则（GLOBAL_RULES）中同阶段规则。
+      // 本站无该阶段规则时，回落全站通用规则（GLOBAL_STAGES[no] 阶段映射中同阶段默认动作）。
       function renderRuleStage(no, icon, title, stageSummary, _matchFn, opts) {
         const matched = rules.filter((r) => ruleStage(r) === no);
-        const globalMatched = GLOBAL_RULES.filter((r) => ruleStage(r) === no);
         const hasSite = matched.length > 0;
-        const hasGlobal = !hasSite && globalMatched.length > 0;
+        const hasGlobal = !hasSite && !!GLOBAL_STAGES[no];
         const badge = hasSite ? `${matched.length} 条` : (hasGlobal ? '回落全站兜底' : '未配置');
         const summary = hasSite
           ? `${matched.length} 条规则（按优先级从上到下匹配，命中即跳出本阶段）；${stageSummary}`
           : (hasGlobal
-            ? `本站无设置 → 实际生效为「全站通用规则」${globalMatched.length} 条（点击前往编辑）`
+            ? `本站无设置 → 实际生效为「全站兜底默认」该阶段默认动作（点击前往编辑）`
             : `本站无设置，且无全站兜底；${stageSummary}`);
         // 修复：只要该阶段属于「规则引擎型」阶段（有 opts），无论本站是否已配置，
         // 都允许点开抽屉——未配置时打开即是一条空白规则待新建，而不是点了没反应。
@@ -478,8 +503,9 @@ import { el, clear, $ } from './dom.js';
         if (hasSite && matched.length) {
           flow.appendChild(el('div', { class: 'seq-rule-list' }, matched.map((r) => {
             const condCount = (r.match && r.match.conditions || []).reduce((n, g) => n + g.length, 0);
-            const idx = rules.indexOf(r);
-            const node = seqRuleInPack(r, ruleSubs(r), condCount, site.host, draggable, ruleStage(r), idx + 1);
+            const idx = rules.indexOf(r);          // 全局下标：用于拖拽定位（保存时按全站 priority 重排）
+            const stageIdx = matched.indexOf(r);   // 阶段内相对序号：展示用（每个阶段只消费自己阶段的规则集）
+            const node = seqRuleInPack(r, ruleSubs(r), condCount, site.host, draggable, ruleStage(r), stageIdx + 1);
             if (draggable && idx >= 0) ruleNodes.push({ node, index: idx });
             return node;
           })));
@@ -571,13 +597,13 @@ import { el, clear, $ } from './dom.js';
       // 池覆盖本质属于 ⑨ Origin Rules 阶段（action.poolId），统一以 ruleStage 索引，
       // 不再从 action 现场反推，与流量序列其它阶段一致。
       const ovrPool = rules.find((r) => ruleStage(r) === 'origin' && r.action && r.action.poolId);
-      const globalOv = !ovrPool && GLOBAL_RULES.find((r) => ruleStage(r) === 'origin' && r.action && r.action.poolId);
+      const globalOv = !ovrPool && GLOBAL_STAGES['origin'] && GLOBAL_STAGES['origin'].poolId;
       flow.appendChild(seqGroup('⑩', '确定实际源站', '沿用 ③ 首要分流结果，或被 origin 阶段命中的规则覆盖（运行时推导，无独立配置项）'));
       flow.appendChild(seqStage('🧭', '⑩ 实际源站',
         ovrPool
           ? `存在站点规则覆盖 → ${poolName(ovrPool.action.poolId)}（命中该规则时生效）`
           : (globalOv
-            ? `站点无覆盖 → 回落全站兜底 → ${poolName(globalOv.action.poolId)}`
+            ? `站点无覆盖 → 回落全站兜底 → ${poolName(globalOv)}`
             : `无规则覆盖 → 沿用 ③ 的 ${site.poolId ? poolName(site.poolId) : '未配置'}`),
         '推导', null, null, null));
 
@@ -604,7 +630,7 @@ import { el, clear, $ } from './dom.js';
       // 回源连接参数（clientIp/超时/跟随3xx、engine/scheme/port）均属 ⑨ Origin Rules 阶段，
       // 统一以 ruleStage 索引，不再从 action 现场反推。
       const connRule = rules.find((r) => ruleStage(r) === 'origin');
-      const gConnRule = !connRule && GLOBAL_RULES.find((r) => ruleStage(r) === 'origin');
+      const gConnRule = !connRule && GLOBAL_STAGES['origin'] && (GLOBAL_STAGES['origin'].clientIpHeader || GLOBAL_STAGES['origin'].followRedirect || GLOBAL_STAGES['origin'].originTimeoutMs || GLOBAL_STAGES['origin'].engine || GLOBAL_STAGES['origin'].scheme || GLOBAL_STAGES['origin'].port);
       flow.appendChild(seqGroup('⑭', '回源循环 requestWithFailover（真正发出回源请求）', '逐个源站尝试；rewrite/origin/reqHeaders 各阶段规则在此对每个源站落地；回源连接参数受规则 clientIp / 超时 / 跟随3xx 影响。可干预：源站地址、策略、故障转移。'));
       flow.appendChild(seqStage('🗄️', '⑭ 源站与故障转移',
         pool
@@ -738,28 +764,32 @@ import { el, clear, $ } from './dom.js';
       wireRuleDrag(ruleNodes, rules, site);
     };
 
-    // 全站通用规则（兜底）视图：对所有站点生效、优先级最低
+    // 全站通用（兜底）规则视图：新阶段→默认动作映射（每阶段 1 条、无条件、无优先级）。
+    // 它展示「每个阶段默认如何消费」，站点某阶段无设置时即实际生效这些默认动作。
     function renderGlobal() {
-      const gRules = GLOBAL_RULES.slice();
-      // 全站通用规则视图：同样按 18 阶段展示，每阶段列出属于该阶段的全局规则（OR：从上到下匹配）
-      // 全站规则是兜底默认，无更上级兜底；点击阶段或规则进入全局规则编辑器。
+      // 全站通用规则视图：同样按 18 阶段展示，每阶段展示该阶段的默认动作（单条）。
+      // 全站规则是兜底默认，无更上级兜底；点击阶段进入全局规则编辑器（编辑该阶段默认 action）。
       function gStage(no, icon, title, stageSummary, _matchFn) {
-        const matched = gRules.filter((r) => ruleStage(r) === no);
-        const summary = matched.length
-          ? `${matched.length} 条规则（按优先级从上到下匹配，命中即跳出本阶段）；${stageSummary}`
-          : `未配置；${stageSummary}`;
-        flow.appendChild(seqStage(icon, `${no} ${title}`, summary, matched.length ? `${matched.length} 条` : '未配置', 'sec-rules',
+        // 兜底默认动作：取已落盘的全站阶段值（后端保证 KV 空时落盘内置默认，故一般不空）。
+        const value = GLOBAL_STAGES[no] || {};
+        const isBuiltin = !GLOBAL_STAGES[no];
+        const subs = ruleSubs({ action: globalStageToAction(no, value) });
+        const summary = subs.length
+          ? `默认动作：${subs.join('、')}；${stageSummary}`
+          : `默认空操作（不干预）；${stageSummary}`;
+        flow.appendChild(seqStage(icon, `${no} ${title}`, summary, isBuiltin ? '内置默认' : '已配置', 'sec-rules',
           () => openGlobalRulesDrawer(no, { ...STAGE_OPS[no], stage: no }), '全站通用规则编辑器'));
-        if (matched.length) {
-          flow.appendChild(el('div', { class: 'seq-rule-list' }, matched.map((r) => {
-            const condCount = (r.match && r.match.conditions || []).reduce((n, g) => n + g.length, 0);
-            const node = seqRuleInPack(r, ruleSubs(r), condCount, '__global__', false, ruleStage(r), matched.indexOf(r) + 1);
-            return node;
-          })));
+        if (subs.length) {
+          flow.appendChild(el('div', { class: 'seq-rule-list' }, [
+            seqRuleInPack(
+              { id: '__global_' + no, name: isBuiltin ? '内置默认（可改）' : '全站兜底默认', action: globalStageToAction(no, value) },
+              subs, 0, '__global__', false, no, 1,
+            ),
+          ]));
         }
       }
 
-      flow.appendChild(seqGroup('全站', '全站通用规则（兜底默认）', '以下规则对任何站点都生效，仅当站点自身规则未命中时才触发，相当于全局默认设置。按 18 阶段分布，每个阶段内部按优先级降序 OR 匹配。'));
+      flow.appendChild(seqGroup('全站', '全站通用规则（兜底默认）', '新阶段→默认动作映射，每个阶段恰好 1 条、无条件、无优先级。以下规则对任何站点都生效，仅当站点自身规则未命中（该阶段字段缺失）时才触发，相当于全局默认设置。点击阶段即可编辑该阶段的默认动作。'));
 
       flow.appendChild(seqStage('🛰️', '① 匹配站点', '全站规则不参与匹配站点，仅作为兜底作用于已命中的站点。', '—', null, null, null));
 
@@ -1468,6 +1498,10 @@ import { el, clear, $ } from './dom.js';
   }
 
   // 构建单条规则卡片（可视化规则引擎）
+  // 测试钩子载体：供 scripts/test-frontend-dom.mjs 在 jsdom 中直接读取 OP_BUILDERS，
+  // 验证「规则保存时 read() 汇总结构」等回归点。生产环境不依赖它。
+  let _OP_BUILDERS = null;
+
   function buildRuleCard(rule, poolOptions, site, opts) {
     opts = opts || {};
     // allowedOps：受限模式下，只允许添加/编辑这些操作（一个最小任务包一个抽屉，禁止越界）。
@@ -1541,10 +1575,14 @@ import { el, clear, $ } from './dom.js';
     }
 
     // 每个操作的自包含构建器：返回 { node, read }，node 由 mountOp 负责加「移除」按钮。
-    const OP_BUILDERS = {
+    // 提升为可见性：赋值给外层 _OP_BUILDERS，使末尾测试钩子可访问（见文件底部）
+    _OP_BUILDERS = {
       cache(a) {
         const ed = cacheEditor(a.cache);
-        return opNode('cache', '缓存配置', 'EO：节点缓存 TTL、缓存模式、自定义 Cache Key', [ed.root], () => ed.read());
+        // 与 reqHeaders/respHeaders/rewrite 同理：cacheEditor.read() 返回扁平结构，
+        // 必须包成 { cache: {...} } 才能被汇总 read() 的 Object.assign(action, r()) 正确合并
+        // （后端 normRule 从 a.cache 读取嵌套字段）。
+        return opNode('cache', '缓存配置', 'EO：节点缓存 TTL、缓存模式、自定义 Cache Key', [ed.root], () => ({ cache: ed.read() }));
       },
       forceHttps(a) {
         const en = el('input', { type: 'checkbox', checked: !!a.forceHttps });
@@ -1622,11 +1660,14 @@ import { el, clear, $ } from './dom.js';
       },
       reqHeaders(a) {
         const ed = headerEditor(a.reqHeaders);
-        return opNode('reqHeaders', '回源请求头', '转发到源站前修改', [ed.root], () => ed.read());
+        // 注意：汇总 read() 用 Object.assign(action, r()) 合并各 op，
+        // 必须返回嵌套结构 { reqHeaders: {set, remove} }（与其它 op 一致），
+        // 不能返回扁平 {set, remove}——否则会被挂到 action 顶层，后端 schema 不识别而丢失。
+        return opNode('reqHeaders', '回源请求头', '转发到源站前修改', [ed.root], () => ({ reqHeaders: ed.read() }));
       },
       respHeaders(a) {
         const ed = headerEditor(a.respHeaders);
-        return opNode('respHeaders', '节点响应头', '返回给客户端前修改', [ed.root], () => ed.read());
+        return opNode('respHeaders', '节点响应头', '返回给客户端前修改', [ed.root], () => ({ respHeaders: ed.read() }));
       },
       hostHeader(a) {
         const hh = a.hostHeader || { mode: 'inherit', custom: '' };
@@ -1663,7 +1704,10 @@ import { el, clear, $ } from './dom.js';
       },
       rewrite(a) {
         const ed = rewriteEditor(a.rewrite);
-        return opNode('rewrite', '路径重写', '改写回源 URL 路径', [ed.root], () => ed.read());
+        // 与 reqHeaders/respHeaders 同理：汇总 read() 用 Object.assign(action, r()) 合并，
+        // 必须返回嵌套结构 { rewrite: {...} }（后端 normRule 从 a.rewrite 读取）。
+        // rewriteEditor.read() 本身返回扁平 {type,value,...} 不能直挂 action 顶层。
+        return opNode('rewrite', '路径重写', '改写回源 URL 路径', [ed.root], () => ({ rewrite: ed.read() }));
       },
       followRedirect(a) {
         const en = el('input', { type: 'checkbox', checked: !!a.followRedirect });
@@ -1737,7 +1781,7 @@ import { el, clear, $ } from './dom.js';
 
     // 挂载一个操作卡片（已挂载则展开定位，不重复添加）
     function mountOp(key) {
-      if (!OP_BUILDERS[key]) return;
+      if (!_OP_BUILDERS[key]) return;
       // 受限模式：不允许挂载白名单之外的操作，杜绝越界
       if (allowed && !allowed.has(key)) return;
       if (mounted.has(key)) {
@@ -1745,7 +1789,7 @@ import { el, clear, $ } from './dom.js';
         if (n) n.classList.remove('collapsed');
         return;
       }
-      const built = OP_BUILDERS[key](rule.action);
+      const built = _OP_BUILDERS[key](rule.action);
       mounted.add(key);
       opReaders.push(built.read);
       const removeBtn = el('button', { class: 'btn btn-sm btn-danger op-remove', text: '移除' });
@@ -1851,59 +1895,83 @@ import { el, clear, $ } from './dom.js';
 
   // 全站通用规则（兜底）编辑器：规则对所有站点生效，仅当站点自身规则未命中时触发
   async function openGlobalRulesDrawer(stage, opts) {
-    // 方案 B：全站通用规则编辑器也按阶段受限，不再提供「完整编辑器」。
-    // stage/opts 缺省时回落到 cache（缓存阶段），确保任何入口都不会打开无限制的完整编辑器。
+    // 全站通用规则编辑器：新阶段→默认动作映射，编辑「该阶段恰好 1 条」的默认动作。
+    // stage/opts 缺省时回落到 cache（缓存阶段），确保任何入口都不会打开越界编辑器。
     const effStage = stage && STAGE_OPS[stage] ? stage : 'cache';
-    const effOpts = opts && STAGE_OPS[effStage] ? { ...STAGE_OPS[effStage], stage: effStage } : { ...STAGE_OPS['cache'], stage: 'cache' };
-    let rules = [];
-    try {
-      const data = await API.rules.global();
-      rules = (data && data.rules) || [];
-    } catch (e) {
-      toast('读取全站通用规则失败：' + (e && e.message ? e.message : '未知错误'), 'err');
-      return;
+    // 仅允许编辑本阶段拥有的动作（与后端 buildActionByStage 的 ownedFields 对应）。
+    // 注意 terminate 阶段剔除 redirect（redirect 是独立 stage），否则会误并入 terminate。
+    const effOpts = {
+      ...STAGE_OPS[effStage],
+      stage: effStage,
+      allowedOps: (GLOBAL_STAGE_OPS[effStage] || STAGE_OPS[effStage].allowedOps || []).slice(),
+      hideTargetPool: true,
+    };
+    // 读取全站阶段映射（优先用已预取的 GLOBAL_STAGES，缺失再拉一次保证新鲜）
+    let stages = GLOBAL_STAGES || {};
+    if (!stages[effStage]) {
+      try {
+        const data = await API.rules.global();
+        stages = (data && data.stages) || {};
+      } catch (e) {
+        toast('读取全站通用规则失败：' + (e && e.message ? e.message : '未知错误'), 'err');
+        return;
+      }
     }
     const poolOptions = buildPoolOptions();
 
-    // 受限抽屉只展示属于本阶段（rule.stage === effStage）的全局规则，避免把其它阶段混进来误改
-    const allRules = rules.slice();
-    const shownRules = allRules.filter((r) => ruleStage(r) === effStage);
+    // 该阶段现有默认动作（单条），包装成一条「规则」交给 buildRuleCard 编辑。
+    const stageValue = stages[effStage] || {};
+    const baseRule = {
+      id: '__global__',
+      priority: 0,
+      enabled: true,
+      name: '全站兜底默认',
+      note: '内置保守默认，可自由修改。',
+      match: { conditions: [] },
+      action: globalStageToAction(effStage, stageValue),
+    };
 
     const rulesBox = el('div', { class: 'rules-box' });
-    const ruleReaders = [];
-    const makeCard = (r) => {
-      const { card, read } = buildRuleCard(r, poolOptions, null, effOpts);
-      ruleReaders.push(read);
-      rulesBox.appendChild(card);
+    const { card, read } = buildRuleCard(baseRule, poolOptions, null, effOpts);
+    rulesBox.appendChild(card);
+
+    const resetBtn = el('button', { class: 'btn btn-sm', text: '↺ 恢复该阶段内置默认' });
+    resetBtn.onclick = () => {
+      // 重建一张「空默认」卡片（buildRuleCard(null) 生成各 op 默认空动作），保存时后端
+      // validateGlobalRulesStages 会用内置 DEFAULT_GLOBAL_RULES[effStage] 补全为该阶段保守默认。
+      rulesBox.innerHTML = '';
+      const rebuilt = buildRuleCard(null, poolOptions, null, effOpts);
+      rulesBox.appendChild(rebuilt.card);
+      rebuiltCardRead = rebuilt.read;
+      toast('已恢复该阶段内置默认，记得点保存', 'ok');
     };
-    shownRules.forEach(makeCard);
+    let rebuiltCardRead = null;
 
-    const addRuleBtn = el('button', { class: 'btn btn-sm', text: '+ 添加规则' });
-    addRuleBtn.onclick = () => makeCard(null);
-
-    const emptyHint = el('p', { class: 'empty' }, '暂无属于本任务包的全站通用规则，点击「+ 添加规则」新建一条。');
-    emptyHint.style.display = shownRules.length ? 'none' : '';
+    const hint = el('p', { class: 'hint' },
+      '全站兜底默认动作：对任何站点都生效，仅当某站点的自身规则在该阶段无设置时才触发，相当于全局默认设置（EO 的全局规则概念）。本抽屉只编辑「' + effOpts.title + '」这一阶段的默认动作（每阶段恰好 1 条、无条件），保存即覆盖该阶段默认值。');
 
     const body = el('div', { class: 'drawer-body' }, [
-      el('p', { class: 'hint' }, '全站通用规则对任何站点都生效，仅当某站点的自身规则未命中时才触发，相当于全局默认设置（EO 的全局规则概念）。本抽屉只管理「' + effOpts.title + '」这一最小任务包的规则，只能添加/编辑该包允许的动作类型，不会越界到其它包。'),
-      el('div', { class: 'subhead' }, [el('span', {}, '全站通用规则 · ' + effOpts.title), addRuleBtn]),
-      emptyHint,
+      hint,
+      el('div', { class: 'subhead' }, [el('span', {}, '全站兜底默认 · ' + effOpts.title), resetBtn]),
       rulesBox,
     ]);
 
     const onSave = async () => {
-      const edited = [];
-      for (const read of ruleReaders) {
-        const r = read();
-        if (r) edited.push(r);
+      const editedAction = (rebuiltCardRead || read)();
+      const nextStages = { ...stages };
+      nextStages[effStage] = actionToGlobalStage(effStage, editedAction.action || {});
+      try {
+        await API.rules.saveGlobal({ stages: nextStages });
+        toast('已保存全站兜底默认', 'ok');
+        // 同步本地缓存，避免保存后回看仍是旧值
+        GLOBAL_STAGES = nextStages;
+        refreshData();
+      } catch (e) {
+        toast('保存失败：' + (e && e.message ? e.message : '未知错误'), 'err');
       }
-      // 受限抽屉只动了属于本阶段的规则，其余全局规则原样保留，避免误删其它阶段的规则
-      const editedIds = new Set(edited.map((r) => r.id));
-      const kept = allRules.filter((r) => !editedIds.has(r.id) && ruleStage(r) !== effStage);
-      await API.rules.saveGlobal(kept.concat(edited));
     };
 
-    openDrawer('全站通用规则（兜底）', '以下规则对所有站点生效，仅当站点自身规则未命中时触发（全局默认设置）', body, onSave);
+    openDrawer('全站兜底默认 · ' + effOpts.title, '编辑该阶段对所有站点生效的默认动作（兜底）', body, onSave);
   }
 
   // ⑫ 缓存键阶段的专属抽屉：只编辑「站点缓存代次 cacheGen」，不与 ① 站点基础抽屉重复联动。
@@ -3373,6 +3441,17 @@ import { el, clear, $ } from './dom.js';
       console.error('[boot] fatal:', e && e.message || e);
       showLogin();
     }
+  }
+
+  // ── 测试钩子（仅测试环境使用，生产不依赖）──────────────────────────────
+  // 供 scripts/test-frontend-dom.mjs 在 jsdom 中直接调用内部函数，验证
+  // 「规则保存时 read() 汇总结构」等回归点（见本文件 OP_BUILDERS 的 read() 契约）。
+  // 仅在 window.__ENABLE_TEST_HOOK__ 被显式置 true 时挂载，避免任何生产副作用。
+  if (typeof window !== 'undefined' && window.__ENABLE_TEST_HOOK__) {
+    window.__TEST__ = {
+      getOp(key) { return _OP_BUILDERS ? _OP_BUILDERS[key] : null; },
+      headerEditor, cacheEditor, rewriteEditor, el,
+    };
   }
 
   if (document.readyState === 'loading') {

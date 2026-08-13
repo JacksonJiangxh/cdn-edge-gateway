@@ -67,7 +67,7 @@
  * KV Key 命名规范 —— 所有模块必须遵守
  *
  *   cfg:global                全局配置 GlobalConfig
- *   cfg:global_rules          全站通用（兜底）规则 Rule[]
+ *   cfg:global_rules          全站通用（兜底）规则 { stages: {阶段→默认动作} }
  *   site:{host}               站点配置 Site（host 全小写）
  *   site:_index               站点索引 { hosts: string[], wildcards: {pattern,host}[] }
  *   pool:{poolId}             源站池 OriginPool
@@ -131,6 +131,29 @@
  * @property {boolean} enabled
  * @property {RuleMatch}  match
  * @property {RuleAction} action
+ */
+
+/**
+ * 全站通用（兜底）规则：阶段 → 默认动作 映射。
+ *
+ * 与站点 Rule[] 不同，全站规则**无条件、无优先级、每阶段恰好 1 条**——它只是
+ * 「每个阶段默认如何消费」的默认值。KV 为空时由程序写入一套保守默认（见
+ * defaults.DEFAULT_GLOBAL_RULES）落盘，之后用户可在管理面自由修改。
+ *
+ * 运行时：站点某阶段无命中（规则字段缺失）时，直接取本映射对应 stage 的默认
+ * action 补全，不再对全站规则跑条件匹配（避免 O(N) 扫描、保证最坏 O(7)）。
+ *
+ * keys 取自 stages.STAGE_ORDER，常见包括：
+ *   rewrite / redirect / terminate / reqHeaders / origin / cache / respHeaders
+ *
+ * @typedef {Object} GlobalRulesStages
+ * @property {Rewrite}            [rewrite]     默认重写（通常为空操作 {type:'none'}）
+ * @property {Redirect}           [redirect]    默认重定向（通常为空操作 {type:'none'}）
+ * @property {Terminate}          [terminate]   默认终止类动作（forceHttps 等）
+ * @property {HeaderOps}          [reqHeaders]  默认请求头操作（通常为空操作）
+ * @property {Origin}             [origin]      默认回源配置（hostHeader 等）
+ * @property {CachePolicy}        [cache]       默认缓存策略（默认不缓存）
+ * @property {HeaderOps}          [respHeaders] 默认响应头操作（通常为空操作）
  */
 
 /**

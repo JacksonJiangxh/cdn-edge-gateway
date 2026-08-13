@@ -3,7 +3,8 @@
  * 后端核心模块单元测试（零依赖，手写 node:assert）
  * ----------------------------------------------------------------------------
  * 覆盖：matcher / rewrite / cachekey / balancer(strategy+circuit+failover) /
- *       security/auth / platform/keyCodec / config(defaults+schema+stages)
+ *       security/auth / platform/keyCodec / config(defaults+schema+stages) /
+ *       proxy/headers(buildClientHeaders 三平台缓存头策略)
  *
  * 运行：node scripts/test-unit-backend.mjs
  * 退出码：全部通过 0；有失败非 0。
@@ -12,6 +13,10 @@
  */
 
 import assert from 'node:assert/strict';
+
+import {
+  buildClientHeaders,
+} from '../src/proxy/headers.js';
 
 import {
   buildMatchSubject,
@@ -54,6 +59,8 @@ import {
   DEFAULT_POOL,
   DEFAULT_RULE,
   DEFAULT_RULE_ACTION,
+  DEFAULT_GLOBAL_RULES,
+  cloneGlobalRules,
   POOL_KINDS,
   MATCH_TARGETS,
   MATCH_OPERATORS,
@@ -67,6 +74,7 @@ import {
   validateSite,
   validatePool,
   validateGlobal,
+  validateGlobalRulesStages,
 } from '../src/config/schema.js';
 
 import {
@@ -77,6 +85,7 @@ import {
 } from '../src/config/stages.js';
 
 import { DEFAULT_RETRY_ON, CONFIG_VERSION } from '../src/contracts.js';
+import { STAGE_OP_FIELDS } from '../src/config/schema.js';
 
 // ----------------------------------------------------------------------------
 // 测试运行器（极简 TAP 风格，零依赖）
@@ -105,7 +114,7 @@ export async function runBackendUnitTests() {
   let passed = 0;
   let failed = 0;
   const failures = [];
-  console.log('后端单元测试（matcher/rewrite/cachekey/balancer/auth/keyCodec/config）...');
+  console.log('后端单元测试（matcher/rewrite/cachekey/balancer/auth/keyCodec/config/headers）...');
   for (const [name, fn, isAsync] of _queue) {
     try {
       if (isAsync) await fn();
@@ -678,6 +687,7 @@ test('validateGlobal: 平台能力联动（d1 在无 D1 平台被拦截）', () 
 
 test('normRule / validateRule: 完整规则规范化 + 默认值补全', () => {
   const input = {
+    stage: 'rewrite',
     priority: 10,
     enabled: true,
     match: { conditions: [[{ target: 'path', op: 'prefix', values: ['/api'] }]] },
@@ -689,6 +699,62 @@ test('normRule / validateRule: 完整规则规范化 + 默认值补全', () => {
   assert.equal(r.value.action.rewrite.type, 'prefix');
   assert.equal(r.value.action.rewrite.value, '/v1');
   assert.ok(r.value.id, '应自动生成 id');
+});
+
+test('normRule: 按阶段裁剪落库（去冗余）—— 只写本阶段 allowedOps 的字段', () => {
+  // respHeaders 阶段：只配了删除响应头，不应落库 cache/rewrite/redirect 等空壳
+  const respRule = normRule({
+    stage: 'respHeaders',
+    match: { conditions: [] },
+    action: { respHeaders: { set: {}, remove: ['cache-control'] } },
+  }, 0).value;
+  assert.ok(respRule.action.respHeaders && respRule.action.respHeaders.remove[0] === 'cache-control', 'respHeaders 阶段保留 respHeaders 字段');
+  assert.equal(respRule.action.cache, undefined, 'respHeaders 阶段不落库 cache 空壳');
+  assert.equal(respRule.action.rewrite, undefined, 'respHeaders 阶段不落库 rewrite 空壳');
+  assert.equal(respRule.action.redirect, undefined, 'respHeaders 阶段不落库 redirect 空壳');
+  assert.equal(respRule.action.reqHeaders, undefined, 'respHeaders 阶段不落库 reqHeaders 空壳');
+
+  // cache 阶段：只配了缓存，不应落库 respHeaders/rewrite 等空壳
+  const cacheRule = normRule({
+    stage: 'cache',
+    match: { conditions: [[{ target: 'extension', op: 'equal', values: ['js'] }]] },
+    action: { cache: { enabled: true, mode: 'ttl', edgeTtl: 3600 } },
+  }, 0).value;
+  assert.ok(cacheRule.action.cache && cacheRule.action.cache.edgeTtl === 3600, 'cache 阶段保留 cache 字段');
+  assert.equal(cacheRule.action.respHeaders, undefined, 'cache 阶段不落库 respHeaders 空壳');
+  assert.equal(cacheRule.action.rewrite, undefined, 'cache 阶段不落库 rewrite 空壳');
+
+  // 回源级字段（clientIpHeader / followRedirect / originTimeoutMs）属于 Origin 阶段，
+  // 非 origin 阶段不落库（它们只在回源阶段消费，不是「全局字段」）。
+  const withClientIp = normRule({
+    stage: 'respHeaders',
+    match: { conditions: [] },
+    action: { respHeaders: { set: {}, remove: ['x'] }, clientIpHeader: { enabled: true, name: 'X-Real-IP' } },
+  }, 0).value;
+  assert.equal(withClientIp.action.clientIpHeader, undefined, 'clientIpHeader 是 origin 阶段专属，respHeaders 阶段不落库');
+
+  // origin 阶段：保留全部回源级字段（含 clientIp / followRedirect / originTimeout）
+  const originRule = normRule({
+    stage: 'origin',
+    match: { conditions: [] },
+    action: {
+      targetPool: 'pl_1',
+      clientIpHeader: { enabled: true, name: 'X-Real-IP' },
+      followRedirect: true,
+      originTimeoutMs: 5000,
+    },
+  }, 0).value;
+  assert.equal(originRule.action.clientIpHeader && originRule.action.clientIpHeader.name, 'X-Real-IP', 'origin 阶段保留 clientIpHeader');
+  assert.equal(originRule.action.followRedirect, true, 'origin 阶段保留 followRedirect');
+  assert.equal(originRule.action.originTimeoutMs, 5000, 'origin 阶段保留 originTimeoutMs');
+  assert.equal(originRule.action.respHeaders, undefined, 'origin 阶段不落库 respHeaders 空壳');
+
+  // 缺省 stage：无旧数据，统一回退到 cache 阶段裁剪（绝不写全字段，不兼容反推兜底）。
+  const legacy = normRule({
+    match: { conditions: [] },
+    action: { rewrite: { type: 'prefix', value: '/v1' } },
+  }, 0).value;
+  assert.equal(legacy.action.rewrite, undefined, '缺省 stage 回退 cache 阶段裁剪，rewrite 字段被裁（无反推兜底）');
 });
 
 test('normRule: 非法 target/op 被拒绝并收集错误', () => {
@@ -805,17 +871,57 @@ test('normalizeStage: 英文名 / 旧带圈数字别名 / 非法值', () => {
   assert.equal(normalizeStage(''), null);
 });
 
-test('STAGE_OPS match(a) 反映各阶段归属语义', () => {
-  // rewrite 阶段：有非空 rewrite
-  assert.equal(STAGE_OPS.rewrite.match({ rewrite: { type: 'prefix', value: '/x' } }), true);
-  assert.equal(STAGE_OPS.rewrite.match({ rewrite: { type: 'none' } }), false);
-  // respHeaders 阶段：有 set 或 remove
-  assert.equal(STAGE_OPS.respHeaders.match({ respHeaders: { set: { 'X-A': '1' } } }), true);
-  assert.equal(STAGE_OPS.respHeaders.match({ respHeaders: { set: {} } }), false);
-  // origin 阶段：poolId / hostHeader 非默认
-  assert.equal(STAGE_OPS.origin.match({ poolId: 'pl_1' }), true);
-  assert.equal(STAGE_OPS.origin.match({ hostHeader: { mode: 'custom', custom: 'x' } }), true);
-  assert.equal(STAGE_OPS.origin.match({ hostHeader: { mode: 'accel' } }), false); // inherit/accel 不算越界
+test('STAGE_OPS allowedOps 收敛各阶段归属（无反推，全部以 stage 为准）', () => {
+  // 阶段归属完全由 rule.stage 决定，allowedOps 是「该阶段表单能配哪些 op」的权威约束；
+  // 不存在由 action 反推 stage 的兜底逻辑（无旧数据，无需兼容）。
+  assert.deepEqual(STAGE_OPS.rewrite.allowedOps, ['rewrite']);
+  assert.deepEqual(STAGE_OPS.respHeaders.allowedOps, ['respHeaders']);
+  assert.ok(!STAGE_OPS.rewrite.match, 'rewrite 阶段已无 match 反推函数');
+  assert.ok(!STAGE_OPS.respHeaders.match, 'respHeaders 阶段已无 match 反推函数');
+  // origin 阶段含回源级 op（clientIp / followRedirect / originTimeout）
+  assert.ok(STAGE_OPS.origin.allowedOps.includes('clientIp'), 'origin 阶段允许 clientIp 透传');
+  assert.ok(STAGE_OPS.origin.allowedOps.includes('followRedirect'), 'origin 阶段允许回源跟随重定向');
+  assert.ok(STAGE_OPS.origin.allowedOps.includes('originTimeout'), 'origin 阶段允许回源超时');
+});
+
+test('origin.allowedOps 仅含 op 级 key，不得混入 originConn 的子字段', () => {
+  // 根因防护：engine / scheme / port 是 originConn 这个 op 的「子字段」
+  // （前端 originConn 卡片内渲染、read() 一并返回；后端 STAGE_OP_FIELDS.originConn
+  // 落库时写入）。allowedOps 是 op 级白名单，必须与前端 ACTION_GROUPS 的 value 对齐。
+  // 若误把 engine/scheme/port 当独立 op 列进 allowedOps，前端受限模式下拉会与白名单错位 → 空。
+  const ops = STAGE_OPS.origin.allowedOps;
+  for (const bad of ['engine', 'scheme', 'port']) {
+    assert.ok(!ops.includes(bad), `origin.allowedOps 不应含子字段 ${bad}（它属于 originConn op）`);
+  }
+  // originConn 这个承载三字段的 op 本身必须在白名单内，否则前端「回源连接参数」卡片无法添加
+  assert.ok(ops.includes('originConn'), 'origin.allowedOps 必须含 originConn（承载 engine/scheme/port 的卡片）');
+});
+
+test('白名单里的 op 全部是合法 op（不得混入任何 op 的子字段）', () => {
+  // 通用防护：防止再次把「某 op 的子字段」误当成独立 op 塞进 allowedOps
+  // （典型翻车：engine/scheme/port 是 originConn 的子字段，不是独立 op；
+  //  poolId/inlineOrigins 是 targetPool 的子字段）。
+  // 注意：很多 op 的「字段名」与「op key」同名（如 rewrite、reqHeaders），
+  // 所以判断「子字段混入」必须只看「字段值为数组的那些子字段」，而非所有字段名。
+  const legalOps = new Set(Object.keys(STAGE_OP_FIELDS));
+  // 子字段 = 「字段值为数组」且「字段名 ≠ op key 自身」的那些（op key 与字段同名是合法的，不算子字段）
+  const subFields = new Set(
+    Object.entries(STAGE_OP_FIELDS).flatMap(([opKey, v]) =>
+      Array.isArray(v) ? v.filter((f) => f !== opKey) : []
+    )
+  );
+  const allAllowed = new Set(Object.values(STAGE_OPS).flatMap((s) => s.allowedOps));
+  for (const op of allAllowed) {
+    assert.ok(legalOps.has(op), `allowedOps 含未知 op：${op}（应属于 STAGE_OP_FIELDS 的 key）`);
+    assert.ok(!subFields.has(op), `allowedOps 含子字段 ${op}（它属于某个 op 的子字段，不能当独立 op）`);
+  }
+});
+
+test('每个 op 至少被一个阶段接纳（无孤儿 op 永远落不了库）', () => {
+  const allAllowed = new Set(Object.values(STAGE_OPS).flatMap((s) => s.allowedOps));
+  for (const op of Object.keys(STAGE_OP_FIELDS)) {
+    assert.ok(allAllowed.has(op), `op ${op} 未出现在任何阶段的 allowedOps 中 → 该 op 字段永远无法落库`);
+  }
 });
 
 // ============================================================================
@@ -825,6 +931,205 @@ test('DEFAULT_RETRY_ON 默认状态吗集合 / CONFIG_VERSION 存在', () => {
   assert.deepEqual([...DEFAULT_RETRY_ON], [500, 502, 503, 504, 522, 524]);
   assert.equal(typeof CONFIG_VERSION, 'string');
 });
+
+// ============================================================================
+console.log('\n[headers/cache-control] buildClientHeaders 三平台缓存头策略');
+
+/**
+ * 构造带平台标识的 ctx（buildClientHeaders 依赖 ctx.caps.platform 决定
+ * 是否额外下发 Cloudflare-CDN-Cache-Control）。
+ * @param {('cf'|'eo'|'esa'|string)} platform
+ */
+function makeCacheCtx(platform = 'eo') {
+  return makeCtx({ ctx: { caps: { platform } } });
+}
+
+/** 构造一个源站响应；默认带会污染缓存的 set-cookie / no-store，用于验证剥离逻辑。 */
+function makeOriginResp(status = 200, headers = { 'set-cookie': 'sid=1', 'cache-control': 'no-store, private' }) {
+  return new Response('ok', { status, headers });
+}
+
+/** 把 Cache-Control 头按指令拆分，便于断言是否含 max-age / s-maxage / immutable / no-store。 */
+function ccDirectives(h) {
+  return new Set(
+    (h || '')
+      .toLowerCase()
+      .split(',')
+      .map((s) => s.trim().split('=')[0].trim())
+  );
+}
+
+test('可缓存（CF）：三个头均含 max-age + s-maxage，且额外下发 Cloudflare-CDN-Cache-Control', () => {
+  const ctx = makeCacheCtx('cf');
+  const out = buildClientHeaders(
+    ctx,
+    makeOriginResp(200),
+    { enabled: true, edgeTtl: 15552000, browserTtl: 1800 },
+    0
+  );
+  const cc = out.get('cache-control');
+  const cdn = out.get('cdn-cache-control');
+  const cfcdn = out.get('cloudflare-cdn-cache-control');
+
+  // 三个头都要存在
+  assert.ok(cc, 'Cache-Control 应存在');
+  assert.ok(cdn, 'CDN-Cache-Control 应存在');
+  assert.ok(cfcdn, 'CF 平台应额外下发 Cloudflare-CDN-Cache-Control');
+
+  // 三个头均同时含 max-age 与 s-maxage（万无一失）
+  for (const h of [cc, cdn, cfcdn]) {
+    const d = ccDirectives(h);
+    assert.ok(d.has('max-age'), `头应包含 max-age: ${h}`);
+    assert.ok(d.has('s-maxage'), `头应包含 s-maxage: ${h}`);
+  }
+
+  // 源站带回的 set-cookie / no-store / private 已被剥离
+  assert.equal(out.get('set-cookie'), null, 'set-cookie 应被剥离');
+  assert.ok(!ccDirectives(cc).has('no-store'), 'Cache-Control 不应含 no-store');
+  assert.ok(!ccDirectives(cc).has('private'), 'Cache-Control 不应含 private');
+
+  // 浏览器侧 max-age=1800、边缘 s-maxage=15552000
+  assert.ok(/max-age=1800/.test(cc), 'Cache-Control 浏览器 max-age 应为 1800');
+  assert.ok(/s-maxage=15552000/.test(cc), 'Cache-Control 边缘 s-maxage 应为 15552000');
+  assert.ok(/max-age=15552000/.test(cdn), 'CDN-Cache-Control max-age 应为 15552000');
+  assert.ok(/s-maxage=15552000/.test(cdn), 'CDN-Cache-Control s-maxage 应为 15552000');
+});
+
+test('可缓存（EO / ESA）：仅 Cache-Control + CDN-Cache-Control，无 Cloudflare 专有头', () => {
+  for (const platform of ['eo', 'esa']) {
+    const ctx = makeCacheCtx(platform);
+    const out = buildClientHeaders(
+      ctx,
+      makeOriginResp(200),
+      { enabled: true, edgeTtl: 15552000, browserTtl: 1800 },
+      0
+    );
+    assert.ok(out.get('cache-control'), `${platform}: Cache-Control 应存在`);
+    assert.ok(out.get('cdn-cache-control'), `${platform}: CDN-Cache-Control 应存在`);
+    assert.equal(out.get('cloudflare-cdn-cache-control'), null, `${platform}: 不应下发 Cloudflare-CDN-Cache-Control`);
+    // 仍满足三头（此处两标准头）均含 max-age + s-maxage
+    assert.ok(/max-age=1800/.test(out.get('cache-control')), `${platform}: Cache-Control 含 max-age`);
+    assert.ok(/s-maxage=15552000/.test(out.get('cache-control')), `${platform}: Cache-Control 含 s-maxage`);
+    assert.ok(/s-maxage=15552000/.test(out.get('cdn-cache-control')), `${platform}: CDN-Cache-Control 含 s-maxage`);
+  }
+});
+
+test('TTL 回落默认：edgeTtl/browserTtl 为 0 时使用常量默认（半年/30分钟）', () => {
+  const ctx = makeCacheCtx('cf');
+  const out = buildClientHeaders(ctx, makeOriginResp(200), { enabled: true, edgeTtl: 0, browserTtl: 0 }, 0);
+  const cc = out.get('cache-control');
+  const cdn = out.get('cdn-cache-control');
+  assert.ok(/max-age=1800/.test(cc), '浏览器应回落到默认 1800');
+  assert.ok(/s-maxage=15552000/.test(cc), '边缘应回落到默认 15552000');
+  assert.ok(/max-age=15552000/.test(cdn), 'CDN-Cache-Control 应回落到默认 15552000');
+});
+
+test('browserTtl < 0：Cache-Control 不下发 max-age（仅 s-maxage，交浏览器/源站决定）', () => {
+  const ctx = makeCacheCtx('cf');
+  const out = buildClientHeaders(ctx, makeOriginResp(200), { enabled: true, edgeTtl: 100, browserTtl: -1 }, 0);
+  const cc = out.get('cache-control');
+  assert.ok(!/max-age=/.test(cc) && /s-maxage=100/.test(cc), `应仅带 s-maxage=100: ${cc}`);
+  // 边缘头仍带 max-age
+  assert.ok(/max-age=100/.test(out.get('cdn-cache-control')), 'CDN-Cache-Control 仍应带 max-age');
+});
+
+test('statusTtl：错误状态码被短时间边缘缓存（s-maxage=statusTtl，浏览器 max-age=0）', () => {
+  const ctx = makeCacheCtx('cf');
+  const out = buildClientHeaders(ctx, makeOriginResp(404), { enabled: true, edgeTtl: 15552000, browserTtl: 1800, statusTtl: { '404': 60 } }, 0);
+  const cc = out.get('cache-control');
+  assert.ok(/max-age=0/.test(cc), '404 时浏览器 max-age 应为 0');
+  assert.ok(/s-maxage=60/.test(cc), '404 时边缘 s-maxage 应为 statusTtl=60');
+  assert.ok(/s-maxage=60/.test(out.get('cdn-cache-control')), 'CDN-Cache-Control 应同步 statusTtl');
+  assert.ok(out.get('cloudflare-cdn-cache-control'), 'CF 下 404 也应下发 Cloudflare-CDN-Cache-Control');
+});
+
+test('NO_CACHE_STATUS：错误响应三头均为 no-store（含 CF 专有头）', () => {
+  const ctx = makeCacheCtx('cf');
+  const out = buildClientHeaders(ctx, makeOriginResp(500), { enabled: true, edgeTtl: 15552000, browserTtl: 1800 }, 0);
+  assert.equal(out.get('cache-control'), 'no-store', '500 应为 no-store');
+  assert.equal(out.get('cdn-cache-control'), 'no-store', 'CDN-Cache-Control 应为 no-store');
+  assert.equal(out.get('cloudflare-cdn-cache-control'), 'no-store', 'CF 下 500 专有头也应为 no-store');
+});
+
+test('mode=origin：完全不改写缓存头（源站 no-store 透传，不下发 CDN 头）', () => {
+  const ctx = makeCacheCtx('cf');
+  const out = buildClientHeaders(ctx, makeOriginResp(200), { enabled: true, mode: 'origin', edgeTtl: 100, browserTtl: 10 }, 0);
+  // 源站头（小写）原样保留
+  assert.ok(/no-store/.test(out.get('cache-control')), '源站 no-store 应透传');
+  assert.equal(out.get('cdn-cache-control'), null, 'origin 模式不应下发 CDN-Cache-Control');
+  assert.equal(out.get('cloudflare-cdn-cache-control'), null, 'origin 模式不应下发 Cloudflare-CDN-Cache-Control');
+});
+
+// ============================================================================
+console.log('\n[config/global-rules] 全站兜底规则（阶段→默认动作映射）');
+
+test('DEFAULT_GLOBAL_RULES 覆盖全部 STAGE_ORDER 且为阶段映射结构', () => {
+  assert.deepEqual(Object.keys(DEFAULT_GLOBAL_RULES).sort(), [...STAGE_ORDER].sort(), 'DEFAULT_GLOBAL_RULES 键应等于 STAGE_ORDER');
+  // 安全基线：默认强制 HTTPS（301）
+  assert.equal(DEFAULT_GLOBAL_RULES.terminate.forceHttps, true);
+  assert.equal(DEFAULT_GLOBAL_RULES.terminate.forceHttpsStatus, 301);
+  // 安全基线：默认不缓存
+  assert.equal(DEFAULT_GLOBAL_RULES.cache.enabled, false);
+  // 默认空操作：rewrite 不重写、redirect 关闭、reqHeaders/respHeaders 不增删
+  assert.equal(DEFAULT_GLOBAL_RULES.rewrite.type, 'none');
+  assert.equal(DEFAULT_GLOBAL_RULES.redirect.enabled, false, '默认不应开启重定向');
+  assert.ok(Array.isArray(DEFAULT_GLOBAL_RULES.reqHeaders.remove));
+  assert.ok(Array.isArray(DEFAULT_GLOBAL_RULES.respHeaders.remove));
+});
+
+test('cloneGlobalRules 返回独立深拷贝（修改副本不影响原对象）', () => {
+  const a = cloneGlobalRules();
+  const b = cloneGlobalRules();
+  assert.notEqual(a, b, '应为不同对象');
+  // 修改副本的内部字段，原对象不受影响
+  a.cache.enabled = true;
+  a.terminate.forceHttps = false;
+  assert.equal(b.cache.enabled, false, '修改副本不应影响原对象 cache.enabled');
+  assert.equal(b.terminate.forceHttps, true, '修改副本不应影响原对象 forceHttps');
+});
+
+test('validateGlobalRulesStages: 合法 stages 原样通过校验', () => {
+  const input = cloneGlobalRules();
+  const r = validateGlobalRulesStages(input);
+  assert.equal(r.ok, true, `合法 stages 应校验通过，但得到: ${r.errors.join('; ')}`);
+  assert.deepEqual(Object.keys(r.value).sort(), [...STAGE_ORDER].sort(), '校验后保留全部阶段');
+  // 不应保留冗余字段（value 仅含合法 stage 的 action 片段）
+  for (const stage of STAGE_ORDER) {
+    assert.ok(r.value[stage] !== undefined, `${stage} 应有默认动作`);
+  }
+});
+
+test('validateGlobalRulesStages: 未知 stage key 被忽略，缺失阶段用 base 补全', () => {
+  const input = {
+    rewrite: { type: 'prefix', value: '/v1' },
+    __bogus: { foo: 'bar' }, // 未知 key，应被忽略
+    // 故意缺失 redirect / reqHeaders 等，应由 base 补全
+  };
+  const r = validateGlobalRulesStages(input, cloneGlobalRules());
+  assert.equal(r.ok, true, `缺失+未知 key 应仍通过校验，但得到: ${r.errors.join('; ')}`);
+  assert.equal(r.value.__bogus, undefined, '未知 stage key 应被丢弃');
+  assert.equal(r.value.rewrite.type, 'prefix', '已知 stage 的合法值应保留');
+  // 缺失阶段应用 base（DEFAULT_GLOBAL_RULES）补全
+  assert.equal(r.value.redirect.enabled, false, '缺失 redirect 应由 base 补全为默认关闭重定向');
+  assert.equal(r.value.cache.enabled, false, '缺失 cache 应由 base 补全为默认不缓存');
+});
+
+test('validateGlobalRulesStages: 某阶段非法值被拒绝并收集错误', () => {
+  const input = {
+    rewrite: { type: 'none' },
+    cache: 'not-an-object', // cache 应为 CachePolicy 对象，非法
+  };
+  const r = validateGlobalRulesStages(input, cloneGlobalRules());
+  assert.equal(r.ok, false, '非法字段应校验失败');
+  assert.ok(r.errors.some((e) => /cache/.test(e)), '错误应指向 cache 阶段');
+});
+
+test('validateGlobalRulesStages: 顶层非法类型（数组/字符串）被拒', () => {
+  assert.equal(validateGlobalRulesStages([]).ok, false, '数组应被拒');
+  assert.equal(validateGlobalRulesStages('x').ok, false, '字符串应被拒');
+  assert.equal(validateGlobalRulesStages(null).ok, false, 'null 应被拒');
+});
+
 
 // ============================================================================
 // 直接运行入口（node scripts/test-unit-backend.mjs）

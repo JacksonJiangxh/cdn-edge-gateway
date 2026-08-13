@@ -255,6 +255,55 @@ export const DEFAULT_RULE = Object.freeze({
 });
 
 // ----------------------------------------------------------------------------
+// 全站兜底规则（阶段 → 默认动作 映射）
+// ----------------------------------------------------------------------------
+
+/**
+ * 全站级兜底规则：每个阶段恰好 1 条、无条件、无 priority，就是该阶段的「默认动作」。
+ *
+ * 它不再是一份带条件匹配的 Rule[]（那样每阶段可多条、需跑 matchRule），而是「阶段→action」
+ * 直接映射：运行时站点某阶段无命中，直接取这里对应 stage 的 action 即可，零匹配开销。
+ *
+ * 设计原则（安全优先、保守默认）：
+ *   - rewrite / redirect：默认不重写、不重定向（空操作）。
+ *   - terminate：默认强制 HTTPS（301）——这是 CDN 网关的推荐安全基线，不改用户内容。
+ *   - reqHeaders / respHeaders：默认不增删任何头部（空操作）。
+ *   - origin：默认不改动回源 Host（inherit）、透传真实客户端 IP 关闭、沿用源站超时与重定向策略。
+ *   - cache：默认不缓存（见 DEFAULT_CACHE_POLICY 说明，避免误缓存动态内容 / 登录态）。
+ *
+ * KV 中没有全站规则时，store.getGlobalRules 会把这套默认值**写入落盘**，之后用户可在
+ * 管理面自由修改，并非定死在代码里。
+ *
+ * @type {Readonly<Record<string, any>>}
+ */
+export const DEFAULT_GLOBAL_RULES = Object.freeze({
+  rewrite: deepUnfreeze(DEFAULT_RULE_ACTION.rewrite),
+  redirect: deepUnfreeze(DEFAULT_REDIRECT),
+  terminate: Object.freeze({
+    forceHttps: true,
+    forceHttpsStatus: 301,
+    directResponse: deepUnfreeze(DEFAULT_DIRECT_RESPONSE),
+  }),
+  reqHeaders: deepUnfreeze(DEFAULT_HEADER_OPS),
+  origin: Object.freeze({
+    hostHeader: deepUnfreeze(DEFAULT_HOST_HEADER),
+    clientIpHeader: deepUnfreeze(DEFAULT_CLIENT_IP_HEADER),
+    followRedirect: false,
+    originTimeoutMs: 0,
+  }),
+  cache: deepUnfreeze(DEFAULT_CACHE_POLICY),
+  respHeaders: deepUnfreeze(DEFAULT_HEADER_OPS),
+});
+
+/**
+ * 生成一份可写全站兜底规则默认值（阶段映射深拷贝）。
+ * @returns {Record<string, any>} 新对象，键为 STAGE_ORDER，值为各阶段默认 action
+ */
+export function cloneGlobalRules() {
+  return deepUnfreeze(DEFAULT_GLOBAL_RULES);
+}
+
+// ----------------------------------------------------------------------------
 // 安全策略
 // ----------------------------------------------------------------------------
 

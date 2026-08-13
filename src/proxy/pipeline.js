@@ -25,7 +25,8 @@ import { buildCacheKey, shouldBypassCache } from './cachekey.js';
 import { buildOriginUrl, resolveHostHeader, mergeRewrite, mergeHeaderOps } from './rewrite.js';
 import { getPool, getGlobal, getGlobalRules } from '../config/store.js';
 import { renderDisguise } from './disguise.js';
-import { PRODUCT_NAME, DEFAULT_FAILOVER } from '../config/defaults.js';
+import { PRODUCT_NAME, DEFAULT_FAILOVER, deepClone } from '../config/defaults.js';
+import { STAGE_ORDER } from '../config/stages.js';
 import { cacheMatch, cachePut, isCacheable } from '../platform/cache.js';
 import { checkSecurity } from '../security/guard.js';
 import { checkGlobalRateLimit } from '../security/ratelimit.js';
@@ -148,23 +149,32 @@ async function runPipeline(ctx) {
   ctx.origin = primaryOriginActual; // 注入规则引擎匹配维度
 
   // ---- 4. 匹配规则（此时 ctx.origin 已就绪，规则可匹配 origin / originAddr）----
-  let rule = matchRule(site, ctx);
 
-  // ---- 4.1 全站通用规则（兜底）----
-  // 站点自身规则未命中时，回退到「全站通用规则」：对所有站点生效、优先级最低，
-  // 相当于 EO 的全局默认规则。命中即采用，并标记为兜底来源（stats 可区分）。
-  let ruleSource = 'site';
-  if (!rule) {
-    try {
-      const globalRules = await getGlobalRules(ctx);
-      if (Array.isArray(globalRules) && globalRules.length > 0) {
-        rule = matchRule({ rules: globalRules }, ctx);
-        if (rule) ruleSource = 'global';
-      }
-    } catch {
-      // 读取兜底规则失败时不影响站点自身逻辑
+  // 站点规则：条件匹配取单条（含各阶段 action 字段）。
+  const siteRule = matchRule(site, ctx);
+
+  // 全站通用（兜底）规则：新阶段→默认动作映射（每阶段 1 条、无条件）。
+  // 读不到或异常时退化为空映射（站点规则仍生效，仅无全站兜底补全）。
+  let globalStages = {};
+  try {
+    globalStages = (await getGlobalRules(ctx)) || {};
+  } catch {
+    // 读取兜底规则失败时不影响站点自身逻辑
+  }
+
+  // 合并：站点某阶段字段缺失时，用全站兜底对应 stage 补全；
+  // 站点命中则用站点字段（站点优先），全站仅补足「站点未覆盖的阶段」。
+  const effAction = {};
+  if (siteRule && siteRule.action) Object.assign(effAction, deepClone(siteRule.action));
+  for (const stage of STAGE_ORDER) {
+    const g = globalStages[stage];
+    if (!g || typeof g !== 'object') continue;
+    for (const [k, v] of Object.entries(g)) {
+      if (effAction[k] === undefined) effAction[k] = deepClone(v);
     }
   }
+  const rule = { action: effAction, _source: siteRule ? 'site' : 'global' };
+  const ruleSource = rule._source;
 
   // ---- 4.5 终止型动作 ----
   // 这三类动作不回源，命中即返回。顺序有讲究：

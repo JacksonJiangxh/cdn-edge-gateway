@@ -168,7 +168,7 @@ function makeApiStub() {
       save: async () => ({}),
     },
     rules: {
-      global: async () => ({ rules: [] }),
+      global: async () => ({ stages: {} }),
       saveGlobal: async () => ({}),
     },
     kv: {
@@ -221,6 +221,9 @@ export async function runFrontendDomTest() {
     beforeParse(window) {
       window.__BASE__ = '/__panel';
       window.__PLATFORM__ = 'cf';
+      // 开启前端内部测试钩子（web/app.js 仅在 __ENABLE_TEST_HOOK__=true 时挂载 window.__TEST__），
+      // 供用例 D 直接断言 OP_BUILDERS.read() 的返回结构（规则保存汇总回归）。
+      window.__ENABLE_TEST_HOOK__ = true;
       window.API = makeApiStub();
       // jsdom 未实现 scrollIntoView（浏览器原生支持）；打桩避免 app.js 在
       // mountOp 挂载操作卡后调用 scrollIntoView 时抛 TypeError 造成假失败。
@@ -391,6 +394,61 @@ export async function runFrontendDomTest() {
       doc.getElementById('drawer-close').click();
       await sleep(60);
       assert(doc.getElementById('drawer').hidden === true, '「修改请求头」抽屉已关闭');
+    }
+  }
+
+  // ── 用例 D：规则保存 read() 汇总结构回归 ───────────────────────────────
+  // 复现 bug：OP_BUILDERS.cache/reqHeaders/respHeaders/rewrite 的 read() 曾返回扁平
+  // 结构 {enabled,edgeTtl,...} / {set,remove} / {type,value,...}，经 buildRuleCard 的
+  // Object.assign(action, r()) 被挂到 action 顶层，后端 normRule 只从 action.cache /
+  // action.respHeaders / action.reqHeaders / action.rewrite 读取嵌套字段，导致头操作/
+  // 缓存配置/路径重写在保存时被静默丢弃（用户在后台「只保留删除项」时尤为明显）。
+  // 修复后这些 op 的 read() 必须返回正确的嵌套结构，且删除项/值不丢。
+  console.log('▸ 用例 D：规则保存 read() 汇总结构回归（头/缓存/重写丢失修复）');
+  {
+    const T = window.__TEST__;
+    assert(!!T, '测试钩子 window.__TEST__ 已挂载（__ENABLE_TEST_HOOK__=true）', 'app.js 未导出 __TEST__');
+    if (T) {
+      // respHeaders：用户真实场景——只填删除项，不填修改项（你遇到的 bug）
+      const resp = T.getOp('respHeaders')({ respHeaders: { set: {}, remove: ['cache-control'] } }).read();
+      assert(
+        'respHeaders' in resp && Array.isArray(resp.respHeaders.remove) && resp.respHeaders.remove[0] === 'cache-control' && !('remove' in resp),
+        'respHeaders.read() 返回 {respHeaders:{remove:["cache-control"]}}（删除项不丢，不再扁平挂顶层）',
+        JSON.stringify(resp)
+      );
+
+      // reqHeaders：修改 + 删除并存
+      const req = T.getOp('reqHeaders')({ reqHeaders: { set: { 'X-A': '1' }, remove: ['X-B'] } }).read();
+      assert(
+        'reqHeaders' in req && req.reqHeaders.set['X-A'] === '1' && req.reqHeaders.remove[0] === 'X-B',
+        'reqHeaders.read() 返回 {reqHeaders:{set,remove}}（增+删都不丢）',
+        JSON.stringify(req)
+      );
+
+      // cache：手动改 TTL（模板默认看不出，手动改暴露 bug）
+      const cache = T.getOp('cache')({ cache: { enabled: true, mode: 'ttl', edgeTtl: 123, browserTtl: 45 } }).read();
+      assert(
+        'cache' in cache && cache.cache.edgeTtl === 123 && cache.cache.browserTtl === 45,
+        'cache.read() 返回 {cache:{edgeTtl,browserTtl}}（缓存配置不丢）',
+        JSON.stringify(cache)
+      );
+
+      // rewrite：路径重写
+      const rw = T.getOp('rewrite')({ rewrite: { type: 'path', value: '/new' } }).read();
+      assert(
+        'rewrite' in rw && rw.rewrite.value === '/new',
+        'rewrite.read() 返回 {rewrite:{value}}（重写不丢）',
+        JSON.stringify(rw)
+      );
+
+      // 回归对照：确认嵌套字段确实在 action.<op> 下，而非被挂到 action 顶层
+      // （此处断言 resp 顶层绝不出现扁平 set/remove，否则 Object.assign 会丢字段）
+      const flatCheck = T.getOp('respHeaders')({ respHeaders: { set: { a: '1' }, remove: ['b'] } }).read();
+      assert(
+        !('set' in flatCheck) && !('remove' in flatCheck),
+        'respHeaders.read() 不再返回扁平 {set,remove}（扁平会被后端 normRule 丢弃）',
+        JSON.stringify(flatCheck)
+      );
     }
   }
 

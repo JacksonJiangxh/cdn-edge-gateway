@@ -1,15 +1,16 @@
 import { ok, fail } from '../../utils/response.js';
 import { ERROR_CODES } from '../../contracts.js';
 import { getGlobalRules, putGlobalRules } from '../../config/store.js';
-import { validateRule } from '../../config/schema.js';
+import { validateGlobalRulesStages } from '../../config/schema.js';
+import { DEFAULT_GLOBAL_RULES } from '../../config/defaults.js';
 
-/** GET /rules/global —— 读取全站通用（兜底）规则 */
+/** GET /rules/global —— 读取全站通用（兜底）规则（阶段→默认动作映射） */
 export async function listGlobal(ctx) {
-  const rules = await getGlobalRules(ctx);
-  return ok({ rules });
+  const stages = await getGlobalRules(ctx);
+  return ok({ stages });
 }
 
-/** PUT /rules/global —— 覆盖写入全站通用（兜底）规则 */
+/** PUT /rules/global —— 覆盖写入全站通用（兜底）规则（阶段→默认动作映射） */
 export async function putGlobal(ctx) {
   let body;
   try {
@@ -17,19 +18,15 @@ export async function putGlobal(ctx) {
   } catch {
     return fail(ERROR_CODES.BAD_REQUEST, '请求体不是合法的 JSON', 400);
   }
-  if (!Array.isArray(body)) {
-    return fail(ERROR_CODES.BAD_REQUEST, '请求体应为规则数组', 400);
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    return fail(ERROR_CODES.BAD_REQUEST, '请求体应为 { stages: {...} } 对象', 400);
   }
 
-  const normalized = [];
-  for (let i = 0; i < body.length; i++) {
-    const res = validateRule(body[i]);
-    if (!res.ok) {
-      return fail(ERROR_CODES.BAD_REQUEST, `第 ${i + 1} 条规则校验失败: ${res.errors.join('; ')}`, 400);
-    }
-    normalized.push(res.value);
+  const res = validateGlobalRulesStages(body, DEFAULT_GLOBAL_RULES);
+  if (!res.ok) {
+    return fail(ERROR_CODES.BAD_REQUEST, `全站规则校验失败: ${res.errors.join('; ')}`, 400);
   }
 
-  await putGlobalRules(ctx, normalized);
-  return ok({ rules: normalized });
+  await putGlobalRules(ctx, res.value);
+  return ok({ stages: res.value });
 }

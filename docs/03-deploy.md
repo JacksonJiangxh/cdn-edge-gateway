@@ -192,7 +192,7 @@ KV 中管理面保存的值  >  内置默认 __panel
 - **CF Pages**：Settings → Cache / Functions，把对应 Cache 开关设为 **Enabled**（Pages 不读 `wrangler.toml` 的 `[cache]`，需在面板开）。
 - **EO**：控制台对应缓存开关设为 **Enabled**。配置生效约 1–2 分钟。
 
-> ⚠️ CF Workers 的 `[cache]` 平台级缓存与代码层 `caches.default`（`src/platform/cache.js`）是两层机制：平台层命中时直接返回、不进函数；清除缓存需同时顾及两层（代码层按 URL 删，平台层用 Cache-Tag / API purge）。详见 [06 缓存策略](./06-cache-strategy.md)。
+> ⚠️ CF Workers 的 `[cache]` 平台级缓存（Workers Cache / Smart Cache）与代码层 `caches.default`（`src/platform/cache.js`）是两层机制：平台层命中时直接返回、不进函数；清除缓存需同时顾及两层（代码层按 URL 删，平台层用 Cache-Tag / API purge）。**注意**：Workers Cache 会绕过 zone 级所有 Cache Rules / Cache Response Rules，故 CF 上**实际生效的缓存头就是本项目 `buildClientHeaders` 透传的值**，zone 面板规则对绑定本 Worker 的自定义域名不生效。详见 [06 缓存策略](./06-cache-strategy.md)。
 
 ---
 

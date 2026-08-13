@@ -26,17 +26,21 @@
 
 ## 一、跨厂商缓存头语义差异（必读，否则会写错规则）
 
-| 厂商 | 读 `CDN-Cache-Control`? | 读 `Cache-Control` 内 `s-maxage`? | 读 `max-age`? | 本项目是否介于中间 |
-|---|---|---|---|---|
-| **Cloudflare** | ✅ 读（且受 Cache Response Rules / `cloudflare_only` 开关影响） | ✅ | ✅（浏览器+边缘都看） | ✅ 走本项目 |
-| **EdgeOne** | ✅ 读（按 `CDN-Cache-Control` 委托边缘缓存） | ✅ | ✅ | ✅ 走本项目 |
-| **AWS CloudFront** | ❌ **不读**（官方文档仅认 `Cache-Control` / `Expires`） | ✅ | ✅ | ❌ 直接源站 |
-| **阿里云 ESA** | ⚠️ 保守按 `Cache-Control` 处理（控制台可改写出站头） | ✅ | ✅ | ❌ 直接源站 |
+| 厂商 | 读 `CDN-Cache-Control`? | 读 `Cloudflare-CDN-Cache-Control`? | 读 `Cache-Control` 内 `s-maxage`? | 读 `max-age`? | 本项目是否介于中间 |
+|---|---|---|---|---|---|
+| **Cloudflare** | ✅ 读（且受 Cache Response Rules / `cloudflare_only` 开关影响，**但 Workers Cache 开启时被绕过**） | ✅ 读（CF 专有，消费后**不透传浏览器**） | ✅ | ✅（浏览器+边缘都看） | ✅ 走本项目 |
+| **EdgeOne** | ✅ 读（按 `CDN-Cache-Control` 委托边缘缓存） | ❌ 不认识（专有头） | ✅ | ✅ | ✅ 走本项目 |
+| **AWS CloudFront** | ❌ **不读**（官方文档仅认 `Cache-Control` / `Expires`） | ❌ 不认识 | ✅ | ✅ | ❌ 直接源站 |
+| **阿里云 ESA** | ⚠️ 保守按 `Cache-Control` 处理（控制台可改写出站头） | ❌ 不认识 | ✅ | ✅ | ❌ 直接源站 |
 
 **结论与坑**：
-- `CDN-Cache-Control` 是 **RFC 标准头**，CF/EO 都读；但 **CloudFront 明确不读**，只认 `Cache-Control`。
-- 所以**可缓存内容必须同时在 `Cache-Control` 里带 `s-maxage`**（CloudFront/ESA 读得着），并在 `CDN-Cache-Control` 里带 `max-age`（CF/EO 边缘读得着）。本项目已同时下发两者。
-- `immutable` 只给浏览器（`Cache-Control`），不要写进 `CDN-Cache-Control`。
+- `CDN-Cache-Control` 是 **RFC 9213 标准头**，CF/EO 都读；但 **CloudFront 明确不读**，只认 `Cache-Control`。
+- `Cloudflare-CDN-Cache-Control` 是 **Cloudflare 专有变体**，语义与 `CDN-Cache-Control` 完全一致，但 CF 消费后**不对浏览器透传**（更干净，边缘 TTL 不外泄）；与 `CDN-Cache-Control` 并存时 CF 只认前者、仅把后者透传下游。因它是 CF 专有、其他平台不认识，本项目**仅在 `CLOUD_PLATFORM=cf` 时额外下发**，三平台通用性不受影响。
+- **本项目下发策略（万无一失）**：三个头（`Cache-Control` + `CDN-Cache-Control` + CF 时 `Cloudflare-CDN-Cache-Control`）**均同时携带 `max-age` 与 `s-maxage`**，确保各平台无论按哪个头 / 哪个字段消费都能拿到正确 TTL：
+  - `Cache-Control`：`public, max-age=<浏览器TTL>, immutable, s-maxage=<边缘TTL>`（浏览器+CloudFront/ESA/EO 都能读到）
+  - `CDN-Cache-Control`：`public, max-age=<边缘TTL>, s-maxage=<边缘TTL>`（CF/EO 边缘读）
+  - `Cloudflare-CDN-Cache-Control`（仅 CF）：同 `CDN-Cache-Control` 值（CF 边缘读、不外泄）
+- `immutable` 只给浏览器（`Cache-Control`），不要写进两个 `*-CDN-Cache-Control` 头（边缘不需要）。
 - `s-maxage` 浏览器忽略、只给共享缓存（CDN/边缘）看；`max-age` 浏览器和 CDN 都看。
 
 ---
@@ -45,12 +49,22 @@
 
 `src/proxy/headers.js` 的 `buildClientHeaders` 在可缓存响应时**自动遵循分层铁律**，模板开箱即用：
 
-- 浏览器：`Cache-Control: public, max-age=1800, immutable, s-maxage=15552000`
-- 边缘：`CDN-Cache-Control: public, max-age=15552000`
+- 浏览器 + 三平台通用：`Cache-Control: public, max-age=1800, immutable, s-maxage=15552000`（含浏览器 max-age + 边缘 s-maxage）
+- 边缘（标准头，三平台通用）：`CDN-Cache-Control: public, max-age=15552000, s-maxage=15552000`
+- 边缘（**仅 CF 额外下发**，专有头、不外泄浏览器）：`Cloudflare-CDN-Cache-Control: public, max-age=15552000, s-maxage=15552000`
 - **兜底剥离**源站带回的 `set-cookie` / `pragma` / `no-store` / `private` / `expires=0`
 - TTL 回落默认（开启 `cache.enabled` 未给 TTL 时）：`edgeTtl=15552000s(半年)` / `browserTtl=1800s(30分钟)`（常量 `TIER_CDN_DEFAULT_EDGE_TTL` / `TIER_CDN_DEFAULT_BROWSER_TTL`）
 
 > 本项目下发的头对 **CF/EO 生效**（它们走本项目）；对 **CloudFront/ESA 不生效**（它们直接源站，只看源站头 + 控制台规则）。
+
+### 全站兜底规则（cfg:global_rules）的默认缓存策略
+
+全站兜底规则是「阶段 → 默认动作」映射（见 `src/config/defaults.js` 的 `DEFAULT_GLOBAL_RULES`）。其中 `cache` 阶段默认值为 `DEFAULT_CACHE_POLICY`：
+
+- `cache.enabled = false`：**默认不缓存**——避免误缓存动态内容 / 登录态。即在没有任何站点规则或源站策略覆盖时，全站兜底层面的缓存动作是"不缓存"。
+- 当站点规则命中或源站 `cache` 字段开启时，按既有铁律 `DEFAULT_POLICY < 源站.cache < 规则 action.cache` 覆盖（见下文第四节）。
+
+> KV 中 `cfg:global_rules` 为空时，后端会将上述内置保守默认（含 `cache.enabled=false`）写入落盘，之后用户可在管理面自由修改，并非定死。
 
 ---
 
@@ -58,19 +72,36 @@
 
 ### A. Cloudflare（走本项目）
 
+> ⚠️ **CF Workers Cache 的硬约束（易踩坑）**：本项目 `wrangler.toml` 顶层 `[cache] enabled = true` 开启了 **Workers Cache（Smart Cache）**。CF 官方明确：**Worker 是 zoneless 实体，zone 级别的 Cache Rules / Cache Response Rules / Page Rules / cache level 等，对 Workers Cache 一律不生效（被彻底绕过）**。Worker 返回的 `Cache-Control` 按 RFC 9111 被 Cloudflare 原样透传给浏览器；`Edge TTL`/`Browser TTL` 也只作用于传统源站路径，对 Worker 无效。
+>
+> 实测佐证：在 zone 上设 Cache Rule「边缘3月/浏览器30分」+ Worker 返回 `Cache-Control: max-age=1天, s-maxage=1月`，浏览器看到的仍是 **Worker 的值**（zone 规则没生效）；**只有当 Worker 不返回 `Cache-Control` 时**，请求才会回退到 zone 正常缓存流程、zone 规则才有机会介入。结论：**在开启 Workers Cache 的 Worker 自定义域名上，"最前端 CDN 为最终依据"不成立，Worker 代码（`buildClientHeaders`）才是 CF 上的唯一缓存权威**。
+>
+> 因此 CF 侧**不要依赖 Cache Rules / Cache Response Rules 去覆盖或兜底 Worker 头**——它们不会生效，只会制造"规则设了却没生效"的错觉。
+
 **DNS**：`cdn.example.com` CNAME 橙云（Proxied）。
 **Worker**：部署 `_worker.js` → Custom Domain 绑 `cdn.example.com`；Settings → Cache → "Cache responses from fetch handlers" = Enabled。
 
-**① Cache Rules（请求/命中侧）**：
-- 可缓存（`/img/*`、`/static/*`）：`Cache eligibility = Eligible`、`Edge TTL = Override, 15552000s(半年)`、`Browser TTL = Override, 1800s(30分钟)`、`Origin Cache-Control = Ignore if present`（否决源站 `no-store`/`private`）。
-- 必进函数（`/api/*`、`/__panel/*`）：`Cache eligibility = Bypass`。
+**① 本项目层（CF 上的唯一权威，见第二节 `buildClientHeaders`）**：
+- 可缓存路径自动下发 `Cache-Control: public, max-age=1800, immutable`（浏览器30分）+ `CDN-Cache-Control: public, max-age=15552000`（边缘半年）+ 剥离 `set-cookie`/`pragma`/`no-store`/`private`，并按 `cacheGen` 在 CF 上附加 `Cache-Tag`（配合按标签 purge）。**按 RFC 9111 原样透传，无需 zone 规则介入。**
+- 不可缓存路径（`/api/*`、`/__panel/*`、管理面、动态内容）由本项目在策略里标记 `enabled=false` 或 `mode=noCache`，自动下 `no-store`。
 
-**② Cache Response Rules（响应侧）**：
-- **`cloudflare_only`（仅 Cloudflare 边缘生效）开关 = 关闭**：开启后改写头只作用边缘、不下发浏览器，违背"最前端 CDN 为最终依据"。
-- 可缓存路径：设 `Cache-Control: public, max-age=1800, immutable`、`CDN-Cache-Control: public, max-age=15552000`、加 `Cache-Tag: assets`、**移除 `Set-Cookie`/`Pragma`/`no-store`/`private`**。
-- 不可缓存路径：`Cache-Control: no-store`。
+**② Cache Rules / Cache Response Rules（zone 级，对 Workers Cache 不生效，仅作记录、不要指望它）**：
+- 若坚持在面板配置，仅建议对**确实走传统源站（非 Worker）**的子域名生效；对绑定了本 Worker 的自定义域名，这些规则会被绕过。
+- 不要依赖 `cloudflare_only` 开关或 `Origin Cache-Control = Ignore` 去否决 Worker 头——它们对本 Worker 无效。若想让 zone 规则接管，反而应**关闭** `wrangler.toml` 的 `[cache] enabled`（见 `docs/03-deploy.md` 第 191 行），让请求回退到 zone 正常缓存流程（代价是失去 Workers Smart Cache 优化）。
 
-**③ 本项目层**：自动下发（见第二节），CF 上作兜底。
+**📌 实测复盘（踩坑记录）**：
+> 部署环境：`wrangler.toml` 已开 `[cache] enabled = true`；Worker 经自定义域名 `cdn.example.com` 对外；zone 面板配了 Cache Rule + Cache Response Rule，均设「边缘 3 个月 / 浏览器 30 分钟」。
+>
+> | 测试 | Worker 响应头 | 浏览器实际看到 | 解释 |
+> |---|---|---|---|
+> | ① | `Cache-Control: max-age=86400, s-maxage=2592000`（浏览器1天/边缘1月） | **`max-age=1天, s-maxage=1月`（Worker 的值）** | Workers Cache 开启 → zone 的 Edge/Browser TTL 被绕过；Worker 头按 RFC 9111 原样透传。CF 上的 Cache Rule / Cache Response Rule「看起来没生效」其实是因为它们根本不作用于 Workers Cache。 |
+> | ② | **Worker 强制删除 `Cache-Control`** | **`max-age=30分, s-maxage=3月`（Cache Rule 的值）** | Worker 不返回缓存指令 → Workers Cache 无可遵循的 RFC 指令、不缓存 → 请求回退到 zone 正常缓存流程 → 此时 zone 的 Cache Rules / Cache Response Rules 才介入生成下游头。 |
+>
+> 关键两点：
+> 1. **不是 OCC 问题**。OCC 只在「zone 缓存 + 真实源站」场景生效；此处是「Worker 当源站 + Workers Cache」，走的是 CF 独立的 Workers Cache 层，zone 规则一律被绕过。
+> 2. **请求走哪条路径，由 Worker 是否返回 `Cache-Control` 决定**：有头→Workers Cache 透传（zone 规则失效）；无头→回退 zone 流程（zone 规则生效）。这正是「规则时灵时不灵」错觉的来源。
+>
+> 结论与本方案一致：**CF 上直接在本项目 `buildClientHeaders` 里把想要的 `Cache-Control` + `CDN-Cache-Control` 下发到位即可**，不要寄望于面板规则去覆盖/兜底——它们对开了 Workers Cache 的 Worker 不生效。
 
 ---
 
@@ -128,7 +159,7 @@ ESA 控制台可"配置缓存节点 HTTP 响应头"改写出站头，遵循 `Cac
 
 | 平台 | ① 最前端 CDN 层（最终下发） | ② 本项目（仅 CF/EO） | ③ 源站（CloudFront/ESA 的关键输入） |
 |---|---|---|---|
-| **CF** | Cache Response Rules（改头+剥 `no-store`，`cloudflare_only`=关）+ Cache Rules（Edge/Browser TTL） | `buildClientHeaders` 兜底 | 头被 `Origin Cache-Control=Ignore` 否决 |
+| **CF** | **Workers Cache 绕过所有 zone 级规则，无最前端 zone 权威**；实际生效的「最前端」即本项目 `buildClientHeaders` 透传的头（RFC 9111） | `buildClientHeaders` 为**唯一权威**（非兜底） | Worker 即源站，源站头就是 Worker 头；zone Cache Rules/Cache Response Rules 对其不生效 |
 | **EO** | 站点规则（节点 TTL + 响应头改写剥离） | Makers 函数返回头（路径 B） | 头被站点规则改写/剥离 |
 | **CloudFront** | Cache Policy(自定义锁死 TTL, 忽略源站) + Response Headers Policy(覆盖下发头) | 无（直接源站） | 被忽略/覆盖，**不依赖源站头** |
 | **ESA** | 站点缓存规则(忽略源站) + 响应头改写 | 无（直接源站） | 被忽略/覆盖，**不依赖源站头** |
@@ -198,22 +229,14 @@ CF 的 Worker 可直接作为 `cdn.example.com` 的「源」，因此 CDN 层与
 **部署步骤**
 1. `npm run build && npx wrangler deploy` 部署 `_worker.js`。
 2. **Settings → Domains & Routes → Add Custom Domain** 绑 `cdn.example.com`（CF 自动加 DNS + 橙云）。
-3. **Settings → Cache → "Cache responses from fetch handlers" = Enabled**。
-4. **Cache Rules（请求/命中侧，决定"存不存/存多久"）**：`Rules → Cache Rules`：
-   - 可缓存路径（`/img/*`、`/static/*`）：`Cache eligibility = Eligible`、`Edge TTL = Override, 15552000s（半年）`、`Browser TTL = Override, 1800s（30 分钟）`、`Origin Cache-Control = Ignore if present`（用规则说了算，否决源站 `no-store`/`private`，否则源站禁缓存头会让边缘不存）。
-   - 必进函数（`/api/*`、`/__panel/*`）：`Cache eligibility = Bypass`（永远回源进 Worker，不缓存）。
-5. **Cache Response Rules（响应侧，决定"下发给客户端的头长什么样"）**：`Rules → Cache Rules → Cache Response Rules`：
-   - **`cloudflare_only`（仅 Cloudflare 边缘生效）开关必须「关闭」**——开启后改写的头只作用在边缘、不下发给浏览器，违背「以最前端 CDN 响应为主」原则。
-   - 可缓存路径（状态 200 且 `/img/*`、`/static/*`）完整头设置：
-     - `Cache-Control: public, max-age=1800, immutable`（下发给浏览器：允许缓存、30 分钟、内容不变勿发条件请求）
-     - `CDN-Cache-Control: public, max-age=15552000`（给 CF 边缘看：半年）
-     - `Cache-Tag: img-assets`（供按标签精确 purge）
-     - **移除**源站可能带回的 `Set-Cookie` / `Pragma` / `no-store` / `private`（清掉一切不缓存信号，确保边缘真存）
-   - 不可缓存路径（状态非 200 或 `/api/*`）：`Cache-Control: no-store`（确保不落边缘、必回源）
-6. **本项目 Worker（兜底/跨平台头）**：`src/proxy/cache.js` 已对可缓存响应下发 `Cache-Control` + `CDN-Cache-Control`。CF 上这套头的角色降为**兜底**——若 Cache Response Rules 未命中（如新路径），由代码头接住；EO 上则**完全依赖**这套头（见下）。代码侧无需为 CF 改逻辑，但需保证：可缓存响应带 `public`、不带 `no-store`；不可缓存响应带 `no-store`。
-7. 函数内 `requestWithFailover` 选 `origin-1/2.net` 回源即可（本项目已就绪）。
+3. **Settings → Cache → "Cache responses from fetch handlers" = Enabled**（即 `wrangler.toml` 的 `[cache] enabled = true`，部署即生效）。
+4. **Cache Rules / Cache Response Rules（zone 级）—— 对本 Worker 不生效，跳过或仅作记录**：
+   - 因 Workers Cache 绕过所有 zone 级缓存规则（见本节顶部警告），以下规则**对绑定本 Worker 的自定义域名无效**，配置它们只会造成"设了却没生效"的错觉。
+   - 若仍想显式配置以便审计，可记下：可缓存路径 `Cache eligibility = Eligible`、必进函数路径（`/api/*`、`/__panel/*`）`Cache eligibility = Bypass`；但真正的「存不存/存多久/头长什么样」由 **Worker 代码**决定（见第 6 步）。
+5. **本项目 Worker（CF 上的唯一缓存权威）**：`src/proxy/cache.js` 的 `buildClientHeaders` 已对可缓存响应下发 `Cache-Control: public, max-age=1800, immutable` + `CDN-Cache-Control: public, max-age=15552000`，并剥离 `set-cookie`/`pragma`/`no-store`/`private`、按 `cacheGen` 附加 `Cache-Tag`。这套头按 RFC 9111 **原样透传**给浏览器与边缘，是 CF 上实际生效的缓存策略；EO/CloudFront/ESA 同理或以其最前端规则为准。代码侧无需为 CF 改逻辑，但需保证：可缓存响应带 `public`、不带 `no-store`；不可缓存响应带 `no-store`。
+6. 函数内 `requestWithFailover` 选 `origin-1/2.net` 回源即可（本项目已就绪）。
 
-> CF 上「函数当源」是标准姿势：可缓存请求命中 CDN 边缘直接返回、零 Worker 调用；未命中才回源进函数做 LB。
+> CF 上「函数当源 + 开启 Workers Cache」是标准姿势：可缓存请求命中 **Workers Cache（平台层 Smart Cache）** 直接返回、零 Worker 调用；未命中才回源进函数做 LB。**注意平台层命中时不经过 Worker，zone 的 Cache Rules 也不会介入**——这正是 Worker 代码头成为唯一权威的原因。若要让 zone 规则接管，需关闭 `[cache] enabled`（见 `docs/03-deploy.md`），但会失去 Smart Cache 优化。
 
 ### B. EdgeOne（三层域名，需中间函数域名）
 

@@ -137,12 +137,31 @@ curl -X PUT "http://127.0.0.1:8799/__panel/api/sites/img.example.com" \
 
 对所有站点生效的兜底规则，独立于各站点规则、优先级最低。
 
+全站规则采用「**阶段 → 默认动作**」映射结构（每阶段恰好 1 条、无条件、无 priority），而非带条件匹配的数组：
+
+```json
+{
+  "stages": {
+    "rewrite":    { "type": "none" },
+    "redirect":   { "type": "none" },
+    "terminate":  { "forceHttps": true, "forceHttpsStatus": 301, "directResponse": { "enabled": false } },
+    "reqHeaders": { "add": [], "remove": [], "set": [] },
+    "origin":     { "hostHeader": { "mode": "inherit" }, "clientIpHeader": { "enabled": false }, "followRedirect": false, "originTimeoutMs": 0 },
+    "cache":      { "enabled": false, "edgeTtl": 0, "browserTtl": 0, "staleWhileRevalidate": 0 },
+    "respHeaders":{ "add": [], "remove": [], "set": [] }
+  }
+}
+```
+
+> KV 中 `cfg:global_rules` 为空时，后端自动写入上述内置保守默认落盘，之后用户可在管理面自由修改（非定死）。
+> 旧版 `{ rules: [...] }` 数组结构会在首次读取时一次性迁移为 `stages` 映射并写回。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/rules/global` | 列出全站通用规则（兜底默认） |
-| `PUT` | `/rules/global` | 全量更新全站通用规则（按 `priority` 降序固化） |
+| `GET` | `/rules/global` | 读取全站通用（兜底）规则，返回 `{ stages: {...} }` |
+| `PUT` | `/rules/global` | 全量更新全站通用规则，请求体为 `{ stages: {...} }`（仅接受合法阶段 key，每阶段 1 条默认动作） |
 
-> 管理面入口：「站点选择」里选「全站通用规则（兜底默认）」，同样按 18 阶段展示并编辑。
+> 管理面入口：「站点选择」里选「全站通用规则（兜底默认）」，同样按 18 阶段展示并编辑每个阶段的默认动作。
 
 ---
 

@@ -51,8 +51,7 @@ export function normalizeStage(s) {
  * 阶段字典。
  * 每个阶段含：title（中文展示名）、en（英文标识/抽屉归属）、icon、order（序号）、
  * allowedOps（该阶段允许添加的 action 列表——「下拉列表由阶段字段决定、不会出现跨阶段
- * action」的落点）、hideTargetPool（受限抽屉是否隐藏目标源站选择）、
- * match(a)（由 action 反推归属的判定，仅作历史兜底）。
+ * action」的落点）、hideTargetPool（受限抽屉是否隐藏目标源站选择）。
  *
  * match 口径即全链路真相：前端 STAGE_OPS 必须与此处逐字一致（由 build.mjs 校验）。
  */
@@ -66,7 +65,6 @@ export const STAGE_OPS = {
     allowedOps: ['rewrite'],
     hideTargetPool: true,
     // inherit 是「不改动回源 Host」的默认值，不能算 Origin Rules —— 否则每条规则都会被误判进 origin 越界。
-    match: (a) => !!(a.rewrite && a.rewrite.type && a.rewrite.type !== 'none'),
   },
   redirect: {
     title: '重定向规则',
@@ -76,7 +74,6 @@ export const STAGE_OPS = {
     order: 2,
     allowedOps: ['redirect'],
     hideTargetPool: true,
-    match: (a) => !!(a.redirect && a.redirect.enabled),
   },
   terminate: {
     title: '强制 HTTPS / 直接响应（终止型）',
@@ -86,7 +83,6 @@ export const STAGE_OPS = {
     order: 3,
     allowedOps: ['forceHttps', 'directResponse'],
     hideTargetPool: true,
-    match: (a) => !!(a.forceHttps || (a.directResponse && a.directResponse.enabled)),
   },
   reqHeaders: {
     title: '修改请求头',
@@ -96,7 +92,6 @@ export const STAGE_OPS = {
     order: 4,
     allowedOps: ['reqHeaders'],
     hideTargetPool: true,
-    match: (a) => { const h = a.reqHeaders || {}; return !!(h.set && Object.keys(h.set).length) || !!(h.remove && h.remove.length); },
   },
   origin: {
     title: 'Origin Rules（回源规则）',
@@ -104,14 +99,16 @@ export const STAGE_OPS = {
     owner: '路由规则抽屉 · Origin Rules',
     icon: '🔀',
     order: 5,
-    allowedOps: ['hostHeader', 'originConn', 'targetPool'],
+    allowedOps: ['hostHeader', 'originConn', 'targetPool', 'clientIp', 'followRedirect', 'originTimeout'],
     hideTargetPool: false,
     // inherit 是「不改动回源 Host」的默认值，schema 给每条规则都补 inherit，
     // 绝不能算 Origin Rules —— 否则每条规则都会被误判进 origin 越界。
     // accel 是「跟随加速（平台默认）」，也非 Origin Rules 显式改写。
-    match: (a) => !!(a.poolId || (a.inlineOrigins || []).length
-      || (a.hostHeader && a.hostHeader.mode && a.hostHeader.mode !== 'accel' && a.hostHeader.mode !== 'inherit')
-      || a.engine || a.scheme || Number(a.port) > 0),
+    // 注意：engine / scheme / port 不是独立 op，而是 originConn 这个 op 的「子字段」
+    // （前端 originConn 卡片内渲染，前端 read() 一并返回；
+    //  后端 STAGE_OP_FIELDS.originConn = ['engine','scheme','port'] 落库时一并写入）。
+    // 因此 allowedOps 只列到 op 粒度（originConn），不要列 engine/scheme/port，
+    // 否则会与前端 ACTION_GROUPS 的 value 错位，导致受限模式下拉为空。
   },
   cache: {
     title: 'Cache Rules（缓存规则）',
@@ -121,7 +118,6 @@ export const STAGE_OPS = {
     order: 6,
     allowedOps: ['cache'],
     hideTargetPool: true,
-    match: (a) => !!(a.cache && (a.cache.enabled || a.cache.mode === 'noCache')),
   },
   respHeaders: {
     title: '改写响应头 / Response Cache Rule',
@@ -131,6 +127,5 @@ export const STAGE_OPS = {
     order: 7,
     allowedOps: ['respHeaders'],
     hideTargetPool: true,
-    match: (a) => { const h = a.respHeaders || {}; return !!(h.set && Object.keys(h.set).length) || !!(h.remove && h.remove.length); },
   },
 };
