@@ -32,15 +32,17 @@ RUN export DEBIAN_FRONTEND=noninteractive \
  && echo "✓ 系统共享库已固化进镜像"
 
 # ---------- 2) npm ci 项目依赖 ----------
-# 仅 COPY 两个清单即可（npm ci 按 lock 全量解析），不引入源码，构建更快。
-COPY package.json package-lock.json ./
+# 必须 COPY 整个上下文：postinstall（scripts/ensure-playwright-browsers.mjs）
+# 依赖 scripts/ 目录，缺失会导致 npm ci 失败。
+COPY . .
 RUN npm ci \
  && echo "✓ node_modules 已固化进镜像"
 
 # ---------- 3) Playwright chromium 二进制 ----------
+# 注意：chromium 已由上面 npm ci 的 postinstall（scripts/ensure-playwright-browsers.mjs，
+# 在 root 环境走 --with-deps）装好，默认落在 /root/.cache/ms-playwright。
+# 这里仅声明浏览器缓存路径（与脚本默认一致），无需重复下载。
 ENV PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
-RUN npx playwright install chromium \
- && echo "✓ chromium 二进制已固化进镜像（${PLAYWRIGHT_BROWSERS_PATH}）"
 
 # ---------- 4) 全局 esa-cli（ESA 按钮复用） ----------
 RUN npm install -g esa-cli \
