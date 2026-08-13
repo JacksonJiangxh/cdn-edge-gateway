@@ -23,7 +23,7 @@
  * ============================================================================
  */
 
-import { getGlobal } from '../config/store.js';
+import { getGlobal, onGlobalChange } from '../config/store.js';
 import {
   registerDomain,
   allocBytes,
@@ -118,6 +118,29 @@ registerDomain('stats', {
   estimateBytes: estimateBucketBytes,
   evict: evictStats,
   allowAggressiveEvict: true,
+});
+
+// ============================================================================
+// 全局配置变更 → 统计运行时重载（ProxySQL: LOAD ... TO RUNTIME）
+// ----------------------------------------------------------------------------
+// 当用户在管理面切换「数据统计引擎」(statsDriver) 或开关统计 (statsEnabled) 时，
+// getGlobal 会通过 onGlobalChange 通知此处。我们据此把当前 isolate 的内存聚合
+// 桶清空：下次 flush 会用新 driver 落盘；若切换到 'none'/关闭，则丢弃不落盘。
+// 这保证「改统计引擎」立即在本 isolate 生效，而不必重新部署。清桶是安全的——
+// 聚合数据本就是可容忍丢失的趋势数据（见文件头「已知的可接受损失」）。
+// 注意：仅当 statsDriver / statsEnabled 真正变化时才清桶，避免每次配置变更都丢数据。
+// ============================================================================
+onGlobalChange((next, prev) => {
+  const nextDriver = next?.statsDriver;
+  const prevDriver = prev?.statsDriver;
+  const nextEnabled = next?.statsEnabled !== false;
+  const prevEnabled = prev?.statsEnabled !== false;
+  if (nextDriver !== prevDriver || nextEnabled !== prevEnabled) {
+    console.log(
+      `[stats] 运行时节统计引擎切换: ${prevDriver ?? 'kv'} → ${nextDriver ?? 'kv'}, enabled=${nextEnabled}`
+    );
+    resetCollector();
+  }
 });
 
 /** 每个 host 最多记录多少个不同的 originId。 */

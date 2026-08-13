@@ -191,6 +191,65 @@ async function checkEntryParseable(problems, quiet = false) {
 }
 
 /**
+ * 跨平台「平台开关 vs 运行时变量」护栏。
+ *
+ * Cloudflare 的 assets / preview_urls / observability / [cache] 是【平台级开关】，
+ * 不是运行时 env。若被误写入 [vars] 段，wrangler 会注入成 env.assets /
+ * env.preview_urls / env.observability，既无意义又污染变量页面（见 2026-08 部署事故）。
+ * EdgeOne 的 edgeone.json 的 env 只应含真变量，同样不得混入开关类键。
+ * 本检查在 CI 静态阶段拦截这类退化，确保「开关永远在顶层、变量永远在 [vars]/控制台」。
+ *
+ * @param {string[]} problems 问题收集数组
+ */
+function checkPlatformSwitches(problems) {
+  // ---- CF：wrangler.toml 平台开关不得出现在 [vars] 段内 ----
+  const wf = join(ROOT, 'wrangler.toml');
+  if (existsSync(wf)) {
+    const lines = readFileSync(wf, 'utf8').split('\n');
+    const SWITCH_KEYS = ['assets', 'preview_urls', 'observability', 'cache'];
+    let inVars = false;
+    for (let i = 0; i < lines.length; i++) {
+      const raw = lines[i];
+      const head = raw.trim();
+      if (/^\[vars\]/.test(head)) { inVars = true; continue; }
+      // 遇到任意其它顶层表（[xxx]）离开 vars 段
+      if (/^\[[^\]]+\]/.test(head) && !/^\[vars\]/.test(head)) { inVars = false; continue; }
+      if (!inVars) continue;
+      const m = head.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+      if (m && SWITCH_KEYS.includes(m[1])) {
+        problems.push(
+          `wrangler.toml:${i + 1}  平台开关 "${m[1]}" 误写入 [vars] 段——它应位于顶层（不是运行时 env），否则会被注入成 env.${m[1]}`
+        );
+      }
+    }
+  }
+
+  // ---- EO：edgeone.json 的 env 只含白名单真变量 ----
+  const ef = join(ROOT, 'edgeone.json');
+  if (existsSync(ef)) {
+    try {
+      const envObj = JSON.parse(readFileSync(ef, 'utf8')).env || {};
+      const ALLOWED = new Set(['NODE_VERSION', 'CLOUD_PLATFORM']);
+      const SWITCH_LIKE = ['assets', 'preview_urls', 'observability', 'cache', 'compatibility_date', 'compatibility_flags'];
+      for (const k of Object.keys(envObj)) {
+        if (SWITCH_LIKE.includes(k)) {
+          problems.push(
+            `edgeone.json  env."${k}" 是平台开关/配置项，不应放在 edgeone.json 的 env（EO 无此类顶层开关，且 env 只用于运行时变量）`
+          );
+        }
+        if (!ALLOWED.has(k)) {
+          problems.push(
+            `edgeone.json  env."${k}" 不在白名单（${[...ALLOWED].join('|')}）——若确为运行时变量请补入白名单，否则勿放进 env`
+          );
+        }
+      }
+    } catch (e) {
+      problems.push(`edgeone.json 解析失败：${e.message}`);
+    }
+  }
+}
+
+/**
  * 执行静态一致性检查（供 build.mjs / scripts/check.mjs 复用）。
  * 不主动 process.exit；返回问题数组（空 = 通过）。
  * @param {Object} [opts]
@@ -202,6 +261,9 @@ export async function runChecks({ quiet = false } = {}) {
   if (!quiet) console.log('▸ 平台口径静态检查（CLOUD_PLATFORM 应恒为 cf|eo|esa）...');
   const files = SCAN_TARGETS.flatMap(collectFiles);
   for (const rel of files) scanFile(rel, local);
+
+  if (!quiet) console.log('▸ 平台开关 vs 运行时变量 护栏...');
+  checkPlatformSwitches(local);
 
   // 入口缺失则自动重建（构建期中间产物，不提交）
   let rebuilt = false;

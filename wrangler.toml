@@ -21,6 +21,36 @@ compatibility_flags = ["nodejs_compat"]
 keep_vars = true
 
 #===============================================================================
+# ⚠️ 平台功能开关区（顶层字段，【不是】 [vars] 环境变量，严禁移入 [vars]）
+# ----------------------------------------------------------------------------
+# assets / preview_urls / observability / [cache] 均为 Cloudflare 平台级开关，
+# 不是运行时 env。wrangler 只在【顶层】识别它们；一旦写在 [vars] 段之后/之内，
+# TOML 语法会把这些字段归并进 [vars] 表，被注入成 env.assets / env.preview_urls /
+# env.observability（无意义、且污染变量页面）。
+# 因此本区【必须位于 [vars] 段之前】。scripts/gen-deploy-config.mjs 生成部署用
+# 临时 toml 时也会主动剥离任何位置的这几项、再以顶层格式重写，双保险防误当变量。
+#===============================================================================
+assets = { directory = "./dist/public", binding = "ASSETS", html_handling = "none", not_found_handling = "none" }
+
+# 显式关闭 Preview URLs，避免 workers.dev 路由下被默认开启（见部署日志 WARNING）。
+preview_urls = false
+
+# 开启可观测性（日志 + 追踪）。部署日志曾显示远程此项为 true 被本地默认 false 覆盖，
+# 此处显式开启，使 wrangler deploy 保留/恢复该设置（与远程原值一致）。
+observability = { enabled = true }
+
+# 开启 Cloudflare Workers Cache（面板 "Cache" 开关的 toml 等价项）。
+# 作用：为 fetch handler 返回的 HTTP 响应设置【默认缓存行为】，
+#       命中时 CF 边缘直接返回缓存响应，不进 Worker 代码，不消耗 CPU。
+# 注意：本项目 src/platform/cache.js 已用 caches.default API 自行管理边缘缓存，
+#       与平台级 Smart Cache 是两套机制。开启后平台默认缓存可能在代码逻辑之外
+#       按响应头（Cache-Control / CDN-Cache-Control）缓存 fetch 响应；
+#       代码里的缓存键/主动清除逻辑不受影响，但清除需同时顾及两层。
+#       若只想用代码层缓存、关闭平台默认缓存，改 enabled = false。
+[cache]
+enabled = true
+
+#===============================================================================
 # 明文环境变量
 # ----------------------------------------------------------------------------
 # CLOUD_PLATFORM 声明部署厂商，caps.js 靠它判定能力面。
@@ -54,25 +84,8 @@ CLOUD_PLATFORM = "cf"
 #   - 纯 Dashboard 粘贴 _worker.js（不走 wrangler）时不会上传资产，
 #     ctx.env.ASSETS 为 undefined，adminPage.js 自动回退到 ui.gen.js 内联兜底，仍可运行。
 #===============================================================================
-assets = { directory = "./dist/public", binding = "ASSETS", html_handling = "none", not_found_handling = "none" }
-
-# 显式关闭 Preview URLs，避免 workers.dev 路由下被默认开启（见部署日志 WARNING）。
-preview_urls = false
-
-# 开启可观测性（日志 + 追踪）。部署日志曾显示远程此项为 true 被本地默认 false 覆盖，
-# 此处显式开启，使 wrangler deploy 保留/恢复该设置（与远程原值一致）。
-observability = { enabled = true }
-
-# 开启 Cloudflare Workers Cache（面板 "Cache" 开关的 toml 等价项）。
-# 作用：为 fetch handler 返回的 HTTP 响应设置【默认缓存行为】，
-#       命中时 CF 边缘直接返回缓存响应，不进 Worker 代码，不消耗 CPU。
-# 注意：本项目 src/platform/cache.js 已用 caches.default API 自行管理边缘缓存，
-#       与平台级 Smart Cache 是两套机制。开启后平台默认缓存可能在代码逻辑之外
-#       按响应头（Cache-Control / CDN-Cache-Control）缓存 fetch 响应；
-#       代码里的缓存键/主动清除逻辑不受影响，但清除需同时顾及两层。
-#       若只想用代码层缓存、关闭平台默认缓存，改 enabled = false。
-[cache]
-enabled = true
+# （注：上述 assets 的字段定义已上移到文件顶部「平台功能开关区」，位于 [vars] 段之前，
+#  以保证它被识别为顶层平台开关而非运行时变量。）
 
 #===============================================================================
 # 部署职责划分（toml 与可视化并行，但同一操作只由一边负责，不重复）

@@ -117,6 +117,22 @@ function fetchRemoteBindings(scriptName) {
 let toml = readFileSync(BASE_TOML, "utf8");
 toml = toml.replace(/\n# === AUTO-APPENDED-BINDINGS[\s\S]*$/u, "");
 
+// ---------- 1.5 剥离平台开关，避免被误当作 [vars] 环境变量 ----------
+// assets / preview_urls / observability 是 wrangler 顶层【平台功能开关】，
+// 不是运行时环境变量。若基线 toml 把它们写在 [vars] 段内（历史版本曾如此），
+// wrangler 会把它们以 env.assets / env.preview_urls / env.observability 形式
+// 注入 Worker，既无意义又会污染变量页面。
+// 这里统一从复制的基线中剥离这三行（含其顶层与 [vars] 内两种写法），
+// 再在文件末尾以【规范顶层格式】重写，确保它们永远位于顶层、永不混入 [vars]。
+toml = toml
+  .replace(/^\s*assets\s*=[\s\S]*?\}\s*$/m, "")       // 顶层 assets = { ... }
+  .replace(/^\s*preview_urls\s*=\s*(true|false)\s*$/m, "")
+  .replace(/^\s*observability\s*=[\s\S]*?\}\s*$/m, "")
+  // 兜底：若它们曾被写进 [vars] 段（行内形式），也一并剥离
+  .replace(/^\s*assets\s*=.*$/m, "")
+  .replace(/^\s*preview_urls\s*=.*$/m, "")
+  .replace(/^\s*observability\s*=.*$/m, "");
+
 // ---------- 2. 按类型拉远程真实绑定（保留该类型下全部绑定） ----------
 const scriptName = getScriptName();
 const remote = fetchRemoteBindings(scriptName);
@@ -184,6 +200,16 @@ if (/^\s*CLOUD_PLATFORM\s*=\s*"(cf|eo|esa)"/m.test(toml)) {
 } else {
   console.log("· CLOUD_PLATFORM 未在 [vars] 中声明——依赖构建期烘焙的默认值，无需处理");
 }
+
+// ---------- 3.6 平台开关：以规范顶层格式重写（绝不在 [vars] 内） ----------
+// 这些不是环境变量，是 wrangler 顶层配置项。assets 为构建产物静态层必需，
+// preview_urls 显式关闭避免 workers.dev 下被默认开启，observability 开启日志追踪。
+toml += `
+# === 平台功能开关（顶层，非 [vars] 环境变量） ===
+assets = { directory = "./dist/public", binding = "ASSETS", html_handling = "none", not_found_handling = "none" }
+preview_urls = false
+observability = { enabled = true }
+`;
 
 // ---------- 4. 写出临时 toml ----------
 writeFileSync(OUT_TOML, toml);

@@ -9,5 +9,6 @@
   "env": {
     "NODE_VERSION": "22",
     "CLOUD_PLATFORM": "eo"
-  }
+  },
+  "_comment_env": "env 只放【运行时真变量】（NODE_VERSION / CLOUD_PLATFORM）。EdgeOne Makers 无 Cloudflare 那种顶层平台开关（assets/preview_urls/observability/cache），请勿把任何开关类字段塞进 env——若误加会被当变量注入且无意义。其它变量（ADMIN_PASSWORD/JWT_SECRET/REDIS_URL 等）在 EO 控制台「环境变量」设。校验规则见 scripts/check.mjs 的 checkPlatformSwitches()。"
 }

@@ -32,6 +32,137 @@ import {
 import { validateGlobal } from './schema.js';
 import { registerDomain, allocBytes, releaseBytes, syncEntries } from '../platform/memBudget.js';
 
+// ============================================================================
+// 全局版本号（ProxySQL 式三层模型的核心：runtime 内存 ↔ canonical 内存 ↔ 存储）
+// ----------------------------------------------------------------------------
+// 多 isolate 下没有共享内存，因此用 KV 里的单一版本号 key 充当「跨 isolate 广播」：
+//   - 任何写入（全局配置 / 站点 / 源站池 / 全站规则）完成后自增版本号
+//   - 读取命中 L1 前，先比对「本地缓存的版本号」与「KV 当前版本号」
+//     - 一致 → 直接返回 L1（<0.01ms，省配额）
+//     - 不一致 → 丢弃 L1、重拉 KV、刷新本地
+// 版本号本身极小，本地再缓存采用「指数动态退避三档」[2s,60s,180s] 进一步省配额：
+// 空闲越久轮询越慢（稳态 180s/次 → 每 isolate ≈ 480 次/天，远低于 10 万/天上限），
+// 一旦检测到变更立即回到 2s 激进档快速收敛（2~6s 内全站生效）。这是「主动失效」
+// 而非「盲等 TTL 过期」，彻底消除「改了配置必须重新部署才生效」的问题。
+// 三个平台（CF Workers / EdgeOne / 阿里云 ESA）统一以 KV 免费读 10 万/天为额度上限。
+// 写入流程统一为：改本地内存(立即生效本 isolate) → 落库 KV → 自增版本号。
+// ============================================================================
+
+/** 全局版本号 key（单一值，跨 isolate 真相源广播位）。 */
+const K_VERSION = 'cfg:version';
+
+/**
+ * 版本号本地再缓存时长（毫秒）——采用「指数动态退避」三档，而非固定值。
+ * 三档间隔 [2s, 60s, 180s]：检测到配置变更时进入激进档（2s）保持若干轮快速
+ * 收敛，连续未变更则逐步退避到更高档。三个部署平台（CF Workers / EdgeOne /
+ * 阿里云 ESA）统一以 KV 免费读 10 万/天为额度上限：
+ *   - 稳态（180s 档）：每 isolate ≈ 86400/180 ≈ 480 次/天；
+ *     即便 30 个常驻 isolate 也仅 ≈ 1.44 万/天，远低于 10 万上限。
+ *   - 变更后：2~6s 内全站生效（比「必须重新部署」已是质的改善）。
+ */
+const VERSION_POLL_LEVELS_MS = [2_000, 60_000, 180_000];
+/** 激进档（2s）连续保持的轮数：变更后以此高频轮询以便快速稳定，之后退避。 */
+const VERSION_RAPID_ROUNDS = 3;
+
+/**
+ * 全局配置变更回调（如 statsDriver 切换需重建单例）。
+ * 由 collector.js 等模块在初始化时注册，store.js 不反向 import 它们，
+ * 避免循环依赖。getGlobal 检测到相关字段变化时调用。
+ * @type {Array<(next:object, prev:object|null)=>void>}
+ */
+const _globalChangeListeners = [];
+
+/** 注册全局配置变更监听（幂等：同一函数只注册一次）。 */
+export function onGlobalChange(fn) {
+  if (typeof fn === 'function' && !_globalChangeListeners.includes(fn)) {
+    _globalChangeListeners.push(fn);
+  }
+}
+
+/**
+ * 版本号读取（指数动态退避三档）：先走本地退避缓存，未命中才读 KV。
+ * 返回 Promise<number>（无版本号时返回 0，表示「首次/未初始化」）。
+ * 读取失败降级为 -1，调用方据此选择「保守：不失效」（宁可多等，绝不丢配置）。
+ *
+ * 退避状态机（详见 VERSION_POLL_LEVELS_MS 注释）：
+ *   - 本次读到的版本号与上次不同（检测到配置变更）→ 重置到激进档（2s），
+ *     并保持 VERSION_RAPID_ROUNDS 轮高频，使全站快速收敛到新值。
+ *   - 本次读到的版本号与上次相同（空闲）→ 若仍在激进轮数内保持 2s，
+ *     否则向更高档（60s→180s）退避，最大程度省 KV 读额度。
+ * @param {import('../contracts.js').Ctx} ctx
+ * @returns {Promise<number>}
+ */
+let _verState = {
+  value: 0, // 最近一次从 KV 读到的版本号
+  level: 0, // 当前轮询档位下标（0=2s, 1=60s, 2=180s）
+  rapidLeft: 0, // 激进档（2s）剩余保持轮数
+  expireAt: 0, // 本地退避缓存过期时间（ms 时间戳）
+};
+async function readVersion(ctx) {
+  const now = Date.now();
+  if (_verState.expireAt > now) return _verState.value;
+
+  const raw = await readJson(ctx, K_VERSION);
+  const v = typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
+
+  if (_verState.value !== v) {
+    // 版本号变化：进入激进档，保持若干轮 2s 高频以便快速稳定全站
+    _verState.level = 0;
+    _verState.rapidLeft = VERSION_RAPID_ROUNDS;
+  } else if (_verState.rapidLeft > 0) {
+    // 仍在激进轮数内：维持 2s 高频
+    _verState.rapidLeft -= 1;
+    _verState.level = 0;
+  } else {
+    // 空闲且已过激进期：向更高档退避（60s → 180s → 封顶）
+    _verState.level = Math.min(_verState.level + 1, VERSION_POLL_LEVELS_MS.length - 1);
+  }
+
+  _verState.value = v;
+  _verState.expireAt = now + VERSION_POLL_LEVELS_MS[_verState.level];
+  return v;
+}
+
+/**
+ * 自增全局版本号（写入完成后调用）。
+ * 失败不抛（版本号只是优化，写入本身已落库），仅吞掉并记录。
+ * @param {import('../contracts.js').Ctx} ctx
+ * @returns {Promise<void>}
+ */
+async function bumpVersion(ctx) {
+  try {
+    // 本地先 +1（即使 KV 读失败也能推进本地视图）
+    let next;
+    const cur = await readJson(ctx, K_VERSION);
+    if (typeof cur === 'number' && Number.isFinite(cur)) next = cur + 1;
+    else next = 1;
+    await writeJson(ctx, K_VERSION, next);
+    // 刷新本地版本号状态：立即看到自己刚写入的新版本，并进入激进档（2s），
+    // 使本 isolate 后续请求快速稳定（其它 isolate 经 KV 版本号同步后各自收敛）。
+    _verState.value = next;
+    _verState.level = 0;
+    _verState.rapidLeft = VERSION_RAPID_ROUNDS;
+    _verState.expireAt = Date.now() + VERSION_POLL_LEVELS_MS[0];
+  } catch (err) {
+    console.error('[store] 自增配置版本号失败（已忽略，写入本身已落库）:', err?.message);
+  }
+}
+
+/**
+ * 通知全局配置变更监听者（如 statsDriver 重建）。
+ * @param {object} next 新配置
+ * @param {object|null} prev 旧配置（可能来自 L1，可能为 null）
+ */
+function emitGlobalChange(next, prev) {
+  for (const fn of _globalChangeListeners) {
+    try {
+      fn(next, prev);
+    } catch (err) {
+      console.error('[store] onGlobalChange 监听器异常（已忽略）:', err?.message);
+    }
+  }
+}
+
 // ----------------------------------------------------------------------------
 // KV Key 常量
 // ----------------------------------------------------------------------------
@@ -272,8 +403,21 @@ async function writeJson(ctx, key, value) {
  * @returns {Promise<import('../contracts.js').GlobalConfig>}
  */
 export async function getGlobal(ctx) {
+  // —— ProxySQL 式版本号失效 ——
+  // 命中 L1 前先比对版本号：本地缓存的版本号与 KV 当前版本号一致，才信任 L1；
+  // 不一致（说明有 isolate 改过配置）则丢弃 L1、重拉 KV。版本号本地再缓存 2s，
+  // 最坏 2s 全站同步，且是「主动发现并失效」而非「盲等 TTL 过期」。
+  // 若 ctx.mgmt 要求直读（管理面写后立刻读），或版本号读取失败（保守：降级为不失效），
+  // 仍走原有 memGet 命中逻辑，保证可用性。
   const cached = memGet(ctx, K_GLOBAL);
-  if (cached) return cached;
+  if (!ctx?.mgmt && cached) {
+    const ver = await readVersion(ctx); // 失败返回 -1
+    if (ver < 0 || ver === _cachedGlobalVersion) {
+      return cached; // 版本一致（或版本号读取失败保守放行）→ 直接用 L1
+    }
+    // 版本号不一致：丢弃 L1，下方重拉 KV
+    memDel(K_GLOBAL);
+  }
 
   const raw = await readJson(ctx, K_GLOBAL);
 
@@ -316,9 +460,27 @@ export async function getGlobal(ctx) {
   }
   _ttlMs = ttlMs;
 
+  // 记录本 isolate 当前生效的配置版本号快照（供下次进入时比对）
+  const newVer = await readVersion(ctx);
+  _cachedGlobalVersion = newVer >= 0 ? newVer : _cachedGlobalVersion;
+
+  // 检测「配置内容变更」并通知监听者（如 statsDriver 切换需重建单例）。
+  // 仅在确实重拉了 KV（非 L1 命中）时发生，避免每次请求都触发监听器。
+  if (cached && cached !== cfg) {
+    emitGlobalChange(cfg, cached);
+  }
+
   memSet(K_GLOBAL, cfg);
   return cfg;
 }
+
+/**
+ * 本 isolate 最近一次 getGlobal 看到的配置版本号。
+ * 用于「主动失效」：下次 getGlobal 时与 KV 当前版本号比对，不一致则重拉。
+ * 模块级单例，跨请求复用（isolate 生命周期内有效）。
+ * @type {number}
+ */
+let _cachedGlobalVersion = 0;
 
 /**
  * 写入全局配置
@@ -333,10 +495,23 @@ export async function putGlobal(ctx, global) {
     passwordHash: global.passwordHash || '',
     passwordSalt: global.passwordSalt || '',
   };
+  // 写前先读旧值，供「变更监听」判断 statsDriver 等是否真的变化（避免无谓清桶）
+  const prev = await readJson(ctx, K_GLOBAL);
+  let prevCfg = null;
+  if (prev) {
+    try { prevCfg = validateGlobal(prev).value; } catch { prevCfg = null; }
+  }
+
   await writeJson(ctx, K_GLOBAL, value);
   memDel(K_GLOBAL);
   memSet(K_GLOBAL, value);
   _ttlMs = Math.max(0, (value.configCacheTtl ?? 30) * 1000);
+
+  // —— ProxySQL 式写入协议：改本地内存(立即生效本 isolate) → 落库 KV → 自增版本号 ——
+  // 立即通知本 isolate 的监听者（如 statsDriver 重建），让本次写入立刻在本 isolate 生效；
+  // 自增版本号则广播给其它 isolate，使其在 2s 内（KV 版本号同步窗口）自动重拉并生效。
+  emitGlobalChange(value, prevCfg);
+  await bumpVersion(ctx);
 }
 
 // ----------------------------------------------------------------------------
@@ -460,6 +635,7 @@ export async function putSite(ctx, site) {
   await writeJson(ctx, kSite(host), site);
 
   invalidateMemCache();
+  await bumpVersion(ctx); // 广播版本号，使其它 isolate 在 2s 内重新拉取（ProxySQL 式生效）
 }
 
 /**
@@ -484,6 +660,7 @@ export async function deleteSite(ctx, host) {
   await kv.delete(kSite(h));
 
   invalidateMemCache();
+  await bumpVersion(ctx);
 }
 
 /**
@@ -620,6 +797,7 @@ export async function putPool(ctx, pool) {
   }
 
   invalidateMemCache();
+  await bumpVersion(ctx);
 }
 
 /**
@@ -637,6 +815,7 @@ export async function deletePool(ctx, poolId) {
   await putPoolIndex(ctx, idx);
 
   invalidateMemCache();
+  await bumpVersion(ctx);
 }
 
 /**
@@ -687,4 +866,5 @@ export async function getGlobalRules(ctx) {
 export async function putGlobalRules(ctx, rules) {
   await writeJson(ctx, K_GLOBAL_RULES, { rules: Array.isArray(rules) ? rules : [] });
   invalidateMemCache();
+  await bumpVersion(ctx);
 }

@@ -48,7 +48,7 @@ if (!existsSync(join(ROOT, 'esa.jsonc'))) {
   process.exit(1);
 }
 
-// ---- 1) 解析 esa.jsonc 的 name（仅用于日志展示）----
+// ---- 1) 解析 esa.jsonc 的 name（仅用于日志展示）并校验不含平台开关误写 ----
 let routineName = basename(ROOT);
 try {
   const { readFileSync } = await import('node:fs');
@@ -57,9 +57,28 @@ try {
     .split('\n')
     .filter((l) => !/^\s*\/\//.test(l))
     .join('\n');
-  routineName = JSON.parse(raw).name || routineName;
-} catch {
-  /* 忽略，用默认名 */
+  const cfg = JSON.parse(raw);
+  routineName = cfg.name || routineName;
+
+  // ESA 的 jsonc 只认顶层字段（name/entry/installCommand/buildCommand/assets），
+  // 不支持 env，也没有 CF 那种 assets 之外的「开关」（preview_urls/observability/cache）。
+  // 若误写入这些 CF 风格字段，esa-cli 会忽略或报错，提前拦下避免困惑。
+  const SWITCH_LIKE = ['preview_urls', 'observability', 'cache', 'compatibility_date', 'compatibility_flags'];
+  const bad = SWITCH_LIKE.filter((k) => k in cfg);
+  if (bad.length) {
+    console.error(
+      `✗ esa.jsonc 含 CF 风格平台开关字段 ${bad.join(', ')}——ESA 不支持，且它们不是运行时变量，请删除（ESA 无此类开关）。`
+    );
+    process.exit(1);
+  }
+  // ESA 的 assets 是合法顶层字段（静态资源目录），非变量——确认其形态
+  if (cfg.assets && typeof cfg.assets !== 'object') {
+    console.error('✗ esa.jsonc 的 assets 应为对象（如 { directory: "./dist/public" }），且是顶层字段而非变量');
+    process.exit(1);
+  }
+} catch (e) {
+  console.error('✗ esa.jsonc 解析失败：', e.message);
+  process.exit(1);
 }
 console.log(`▸ 目标 Routine/Pages: ${routineName}  env=${ENV}`);
 
@@ -100,5 +119,9 @@ if (deploy.status !== 0) {
 }
 
 console.log('\n=== ESA Pages 部署完成（esa-cli，未使用 OSS）===');
-console.log('下一步：在 ESA 控制台为该 Routine/Pages 绑定域名/路由，并设置环境变量');
-console.log('  CLOUD_PLATFORM=esa  REDIS_URL=<必填>  ADMIN_PASSWORD/JWT_SECRET=<可选>');
+console.log('下一步：在 ESA 控制台为该 Routine/Pages 绑定域名/路由。');
+console.log('── 变量 vs 开关 说明（ESA）──');
+console.log('  • 【运行时变量】全部在 ESA 控制台「环境变量」设置（esa.jsonc 不支持 env 字段）：');
+console.log('      CLOUD_PLATFORM=esa  REDIS_URL=<必填>  ADMIN_PASSWORD/JWT_SECRET=<可选>');
+console.log('  • 【平台开关】esa.jsonc 顶层只有 assets.directory（静态资源目录，合法顶层字段，非变量）。');
+console.log('      ESA 无 preview_urls / observability / cache 等 CF 风格开关——请勿写入。');
