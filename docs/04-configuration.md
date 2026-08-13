@@ -384,4 +384,114 @@ conditions: [
 
 ## 7. 配置备份
 
-管理面「系统 → 配置备份」一键**导出 / 导入**完整 JSON。导出是下载到本地，不外传任何服务器。迁移环境时直接导入即可。
+管理面「系统 → 配置备份」一键**导出 / 导入**完整 JSON。Export 是下载到本地，不外传任何服务器。迁移环境时直接导入即可。
+
+---
+
+## 8. 动态变量（规则动作里的 `${var}`）
+
+规则动作（如 `rewrite` / `redirect.target` / `reqHeaders.set` / `respHeaders.set` / `directResponse.body`）的值里可以写 `${变量名}`，运行时**自动替换成当前请求的对应值**。这样一条规则就能对所有请求"千人千面"，不用写死。
+
+> 这跟 Cloudflare / EdgeOne / 阿里云 ESA 规则引擎的变量写法是一脉相承的，只不过本项目用大括号风格 `${var}`。
+
+### 8.1 一个具体例子（小白照着看）
+
+假设用户发起这样一次请求：
+
+```
+GET https://img.example.com/photos/2026/summer/beach.jpg?w=800&token=abc123
+```
+
+携带了这些请求头（伪代码）：
+
+```
+Host: img.example.com
+CF-Connecting-IP: 1.2.3.4
+CF-IPCountry: CN
+CF-ASN: 13335
+User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15
+Referer: https://www.google.com/
+X-Forwarded-For: 8.8.8.8, 1.1.1.1
+Cookie: uid=9988; sess=xyz
+CF-Ray: 8a1b2c3d4e5f6g7h-SJC
+```
+
+下面这张表，就是**上面这次请求**里每个变量会被替换成什么（空串表示"取不到值 / 当前未接线"）：
+
+| 变量 | 小白话含义 | 本例具体值 | 备注 / 典型用途 |
+|---|---|---|---|
+| `${host}` | 访问的域名 | `img.example.com` | 回源 Host、按域名分流 |
+| `${client_ip}` | 真实客户端 IP | `1.2.3.4` | 取自 `CF-Connecting-IP` 等回源头首段 |
+| `${client_country}` | 客户端国家码 | `CN` | 取自 `CF-IPCountry`，大写 |
+| `${client_continent}` | 客户端大区 | `AS` | 由 `CF-IPCountry` 推导（CN→AS、US→NA、EU 各国→EU 等）；未知国家码为空串 |
+| `${client_asn}` | 客户端 ASN | `13335` | 取自 `CF-ASN`（Cloudflare）/ `asn` 头；非 Cloudflare 环境若无该头则为空串 |
+| `${client_device}` | 设备类型 | `mobile` | 由 User-Agent 粗分：`mobile`（含 Mobile/Android/iPhone/iPad 等）/ `bot`（含 bot/crawler/curl 等）/ `desktop`（其余） |
+| `${method}` | HTTP 方法 | `GET` | 大写 |
+| `${scheme}` | 协议（http/https） | ``（空串） | ⚠️ 易踩坑：本变量**当前返回空串**！要取协议请改用 `${protocol}` |
+| `${protocol}` | 协议（同 scheme） | `https` | 取 `url.protocol`，与 `${scheme}` 是兼容别名但**只有这个有值** |
+| `${uri}` | 完整路径含查询串 | `/photos/2026/summer/beach.jpg?w=800&token=abc123` | 重定向 target 常用 |
+| `${path}` | 路径（不含查询串） | `/photos/2026/summer/beach.jpg` | 重写、缓存键 |
+| `${query}` | 完整查询串（无前导 `?`） | `w=800&token=abc123` | |
+| `${filename}` | 路径末段文件名 | `beach.jpg` | |
+| `${extension}` | 文件扩展名（无点） | `jpg` | 按类型缓存 / 优化 |
+| `${directory}` | 文件所在目录（含末尾 `/`） | `/photos/2026/summer/` | |
+| `${user_agent}` | 客户端 User-Agent | `Mozilla/5.0 (iPhone; ...)` | 识别爬虫 / 设备 |
+| `${referer}` | 来源页面 | `https://www.google.com/` | 防盗链判断 |
+| `${origin}` | 本次回源**源站 id** | `o1` | 首要分流维度，规则据此选源站 |
+| `${origin_addr}` | 本次回源**源站地址** | `origin-a.com` | |
+| `${edge_country}` | 边缘节点所在国家 | ``（空串） | 取自 `cf-country` 等边缘头；非 Cloudflare 环境或无该头时回退为空（本例未带边缘国家头） |
+| `${edge_colo}` | 边缘节点编号 | ``（空串） | 取自 `CF-Ray` 第一段（如 `8a1b2c3d4e5f6g7h`）；非 Cloudflare 环境为空。本例请求头里虽有 `CF-Ray`，但上表值按"默认未携带"演示；若携带则为本例 `CF-Ray` 的首段 `8a1b2c3d4e5f6g7h` |
+| `${request_id}` | 本次请求唯一 id | `req_...`（自动生成或取自 `CF-Request-Id`） | 日志串联、排障 |
+| `${product_name}` | 网关产品名常量 | `EdgeGateway` | 只读，呼应 `PRODUCT_NAME` |
+| `${remote_addr}` | 直连对端 IP | `1.2.3.4` | `CF-Connecting-IP` 优先，否则 socket 对端 |
+
+#### 带 key 前缀的三类变量
+
+除了上面这些"独立变量"，还有三类**带 key** 的变量，key 写在变量名后面，用来取"某个具体的头 / Cookie / 查询参数"：
+
+| 写法 | 取什么 | 本例值 | 说明 |
+|---|---|---|---|
+| `${http_x_forwarded_for}` | 名为 `x-forwarded-for` 的请求头 | `8.8.8.8, 1.1.1.1` | 变量名里的 `_` 会自动还原成 `-`，所以 `http_x_forwarded_for` → 头 `x-forwarded-for` |
+| `${http_cf_ipcountry}` | 头 `cf-ipcountry` | `CN` | |
+| `${cookie_uid}` | Cookie 里 `uid` 字段 | `9988` | Cookie 名原样（不带 `_` 还原） |
+| `${cookie_sess}` | Cookie 里 `sess` 字段 | `xyz` | |
+| `${query_w}` | 查询参数 `w` | `800` | 取 URL `?w=800` |
+| `${query_token}` | 查询参数 `token` | `abc123` | 取 URL `?token=abc123` |
+
+> 前缀三类：`http_<头名>`（下划线→连字符）、`cookie_<字段名>`、`query_<参数名>`。key 缺失或不存在统一返回空串。
+
+### 8.2 怎么用（最小示例）
+
+给所有响应加一个 `X-Client-IP` 头，把真实客户端 IP 透传给浏览器 / 源站：
+
+```jsonc
+{
+  "action": {
+    "respHeaders": { "set": { "X-Client-IP": "${client_ip}" } }
+  }
+}
+```
+
+重定向时把原路径带上：
+
+```jsonc
+{
+  "action": {
+    "redirect": { "enabled": true, "status": 301, "target": "https://new.example.com${uri}" }
+  }
+}
+```
+
+### 8.3 常见坑
+
+> **变量名只能 `[a-z0-9_]`**：小写字母、数字、下划线。写 `${Client-IP}`、`${client-ip}`、`${client ip}` 都不合法，会被当"未知变量"回退空串（不会报错，但值没了）。
+
+> **`${...}` 里不能写表达式**：不支持 `${client_ip == '1.1.1.1' ? a : b}` 这种三元 / 运算。`${}` 里只能是一个变量名。要按条件分支，请用规则的 `match` 条件去写多条规则。
+
+> **未知变量不报错，回退空串**：写了 `${foobar}` 这种不存在的变量，请求不会 500，只是替换成空串（并在 debug 日志留 `unknown-var:foobar`）。这既是好处（不会一写错全站崩）也是坑（静默变空，排障要看日志）。
+
+> **不含 `${` 的字符串零开销**：动作值里只要没有 `${` 这两个字符，就原样返回、完全不进入变量解析。所以纯静态配置没有任何性能负担。
+
+> **⚠️ `${scheme}` 是空串，用 `${protocol}`**：取协议时请写 `${protocol}`（`https`/`http`）。`${scheme}` 当前版本解析不到值、返回空串，是历史命名遗留，后续可能补上，但写文档此刻请以 `${protocol}` 为准。
+
+> **平台差异**：`${edge_country}` / `${edge_colo}` / `${request_id}` 在非 Cloudflare 环境（EdgeOne / 阿里云 ESA）或没带对应平台头时，可能为空或回退为自动生成值（`request_id` 会自己造一个）。跨平台部署时别假设这些一定有值。

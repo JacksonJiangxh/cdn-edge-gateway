@@ -12,7 +12,7 @@
  */
 
 import { getGlobalSettings } from '../config/store.js';
-import { DEFAULT_GLOBAL_SETTINGS } from '../config/defaults.js';
+import { DEFAULT_GLOBAL_SETTINGS, DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
 import { expandVars } from '../config/vars.js';
 
 /**
@@ -62,13 +62,14 @@ export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) 
     }
   }
 
-  // ---- 2. 伪装头 ----
+  // ---- 2. 兜底伪装头 ----
   // 注意用 set 而非 append：如果客户端已带 Accept/Accept-Language，这里统一覆盖，
   // 使回源特征稳定，避免因客户端差异产生过多缓存变体。
-  // 这些值来自全站兜底默认回源请求头（DEFAULT_GLOBAL_RULES.stages.reqHeaders.set，
-  // 经由 effRule 并入 ops 后由下方步骤 4 注入；此处仅作兜底，确保即使 ops 缺失也有合理默认）。
+  // 这些值来自全站兜底默认回源请求头（DEFAULT_GLOBAL_RULES.stages.reqHeaders.set），
+  // 经由 effRule 并入 ops 后由下方步骤 4 注入；此处仅作兜底，确保即使 ops 缺失也有合理默认。
+  // 兜底值同样经 expandVars 处理，使全站兜底 reqHeaders.set 支持 ${var} 写法。
   for (const [key, value] of Object.entries(getDefaultReqHeaderSet(S))) {
-    out.set(key, value);
+    out.set(key, expandVars(value, ctx, { label: `reqHeader:${key}` }));
   }
   // Accept-Encoding 交给运行时自行协商，不强行覆盖客户端的值；
   // 若客户端未提供则给一个通用值
@@ -126,9 +127,12 @@ export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) 
  * @returns {Record<string, string>}
  */
 function getDefaultReqHeaderSet(S) {
-  // 优先用站点/全站默认的 reqHeaders.set（来自 stages），否则用内置常量级默认值。
-  // 注意：DEFAULT_GLOBAL_SETTINGS 不含这组 set（它由 stages.reqHeaders.set 承载），
-  // 故这里回退到一个稳定的内置默认，与旧 DEFAULT_UA_HEADERS 一致。
+  // 兜底默认值统一引用全站兜底「回源请求头」单一真相源
+  // (DEFAULT_GLOBAL_RULES.stages.reqHeaders.set)，与步骤 4 注入的 ops 同源，
+  // 不再写死浏览器 UA 字符串——可视化即可修改，且支持 ${var} 写法。
+  // 若全站兜底为空（极端配置），则回退到内置冻结常量，保证至少有一个合理 UA。
+  const base = DEFAULT_GLOBAL_RULES.reqHeaders?.set || {};
+  if (Object.keys(base).length > 0) return base;
   return {
     'User-Agent':
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',

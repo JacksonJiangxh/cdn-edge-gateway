@@ -106,7 +106,9 @@ export async function renderDisguise(ctx, disguise) {
 function staticDisguise(status, dg) {
   const code = Number.isInteger(status) && status >= 200 && status <= 599 ? status : 200;
   const maxAge = dg?.disguiseCdnMaxAge ?? 86400;
-  const serverName = dg?.staticServerName ?? 'nginx';
+  // 伪装成普通 nginx 的服务端指纹：Server 名统一取自全站设置（可视化可改），
+  // 不再写死 'nginx' 魔法串；缺省回退到默认值单一真相源。
+  const serverName = dg?.staticServerName ?? DEFAULT_GLOBAL_SETTINGS.disguise.staticServerName;
   return new Response(STATIC_HTML, {
     status: code,
     headers: {
@@ -166,7 +168,9 @@ async function proxyDisguise(ctx, target, dg, proxyUA) {
     const body = new TextDecoder().decode(buf);
     const ct = upstream.headers.get('content-type');
     const maxAge = dg?.disguiseCdnMaxAge ?? 86400;
-    const serverName = dg?.staticServerName ?? 'nginx';
+    // 伪装成普通 nginx 的服务端指纹：Server 名统一取自全站设置（可视化可改），
+    // 不再写死 'nginx' 魔法串；缺省回退到默认值单一真相源。
+    const serverName = dg?.staticServerName ?? DEFAULT_GLOBAL_SETTINGS.disguise.staticServerName;
 
     const headers = {
       'content-type': ct || 'text/html; charset=utf-8',

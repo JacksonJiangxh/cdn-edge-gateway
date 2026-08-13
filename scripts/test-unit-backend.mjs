@@ -1238,6 +1238,49 @@ test('hasVars / extractVarNames / validateVarNames 辅助', () => {
   assert.equal(expandVars('x=${Host}y', makeCtx({ url: 'https://x.com/' })), 'x=${Host}y');
 });
 
+test('expandVars: client_continent 由 CF-IPCountry 推导（CN→AS）', () => {
+  const ctx = makeCtx({ url: 'https://x.com/', headers: { 'cf-ipcountry': 'CN' } });
+  assert.equal(expandVars('${client_continent}', ctx), 'AS');
+  // 未知国家码回退空串
+  const ctx2 = makeCtx({ url: 'https://x.com/', headers: { 'cf-ipcountry': 'ZZ' } });
+  assert.equal(expandVars('${client_continent}', ctx2), '');
+});
+
+test('expandVars: client_asn 取自 cf-asn / asn 头', () => {
+  const ctx = makeCtx({ url: 'https://x.com/', headers: { 'cf-asn': '13335' } });
+  assert.equal(expandVars('${client_asn}', ctx), '13335');
+  // 非 CF 平台回退 asn 头
+  const ctx2 = makeCtx({ url: 'https://x.com/', headers: { asn: '64512' } });
+  assert.equal(expandVars('${client_asn}', ctx2), '64512');
+  // 两个头都没有 → 空串
+  const ctx3 = makeCtx({ url: 'https://x.com/' });
+  assert.equal(expandVars('${client_asn}', ctx3), '');
+});
+
+test('expandVars: client_device 由 UA 粗分 mobile/bot/desktop', () => {
+  const mobile = makeCtx({ url: 'https://x.com/', headers: { 'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) AppleWebKit/605.1.15' } });
+  assert.equal(expandVars('${client_device}', mobile), 'mobile');
+  const bot = makeCtx({ url: 'https://x.com/', headers: { 'user-agent': 'Googlebot/2.1 (+http://www.google.com/bot.html)' } });
+  assert.equal(expandVars('${client_device}', bot), 'bot');
+  const desktop = makeCtx({ url: 'https://x.com/', headers: { 'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36' } });
+  assert.equal(expandVars('${client_device}', desktop), 'desktop');
+  // 无 UA → desktop（默认）
+  const noUa = makeCtx({ url: 'https://x.com/' });
+  assert.equal(expandVars('${client_device}', noUa), 'desktop');
+});
+
+test('expandVars: 三变量组合解析（CN/ASN=13335/iPhone）', () => {
+  const ctx = makeCtx({
+    url: 'https://x.com/',
+    headers: {
+      'cf-ipcountry': 'CN',
+      'cf-asn': '13335',
+      'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) AppleWebKit/605.1.15',
+    },
+  });
+  assert.equal(expandVars('${client_continent}/${client_asn}/${client_device}', ctx), 'AS/13335/mobile');
+});
+
 test('DEFAULT_GLOBAL_SETTINGS.debug 默认保持原调试头行为（可配置、默认开启）', () => {
   assert.equal(DEFAULT_GLOBAL_SETTINGS.debug.enabled, true);
   assert.equal(DEFAULT_GLOBAL_SETTINGS.debug.headers.originId, 'X-Origin-Id');

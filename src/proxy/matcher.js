@@ -14,6 +14,38 @@ import { getSite } from '../config/store.js';
 import { TARGETS_NEED_KEY, DEFAULT_GLOBAL_SETTINGS } from '../config/defaults.js';
 
 /**
+ * ISO 国家码 → 大区映射（常用即可，未知返回 ''）。
+ * 内联于此以避免反向 import vars.js（vars → matcher 已是单向依赖，反向会循环）。
+ */
+const CONTINENT_MAP = Object.freeze({
+  // 北美
+  US: 'NA', CA: 'NA', MX: 'NA',
+  // 南美
+  BR: 'SA', AR: 'SA', CL: 'SA', CO: 'SA', PE: 'SA',
+  // 欧洲
+  GB: 'EU', DE: 'EU', FR: 'EU', NL: 'EU', ES: 'EU', IT: 'EU', RU: 'EU',
+  // 亚洲
+  CN: 'AS', JP: 'AS', KR: 'AS', IN: 'AS', SG: 'AS', HK: 'AS', TW: 'AS', TH: 'AS',
+  // 大洋洲
+  AU: 'OC', NZ: 'OC',
+  // 非洲
+  ZA: 'AF', EG: 'AF', NG: 'AF', KE: 'AF',
+});
+
+/** 由 ISO 国家码推导大区（未知返回 ''）。 */
+function resolveContinent(cc) {
+  return CONTINENT_MAP[String(cc || '').toUpperCase()] || '';
+}
+
+/** 由 User-Agent 粗分设备类型：mobile / desktop / bot。 */
+function deriveDevice(ua) {
+  if (!ua) return 'desktop';
+  if (/Mobile|Android|iPhone|iPad|iPod|Windows Phone/i.test(ua)) return 'mobile';
+  if (/bot|crawl|spider|crawl|curl|wget|python-requests|go-http-client|java\//i.test(ua)) return 'bot';
+  return 'desktop';
+}
+
+/**
  * 匹配站点配置。
  *
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
@@ -57,13 +89,19 @@ export function buildMatchSubject(ctx) {
   // defaultProtocol 为协议回落值（当 url.protocol 缺失时）。
   const reqSettings =
     (ctx.__globalSettings && ctx.__globalSettings.request) || DEFAULT_GLOBAL_SETTINGS.request;
-  const clientIpHeaders = reqSettings.clientIpHeaders || ['cf-connecting-ip', 'x-real-ip'];
+  // 提取真实客户端 IP 的回源头优先级统一取自全站兜底 settings.request.clientIpHeaders
+  // （单一真相源，可视化可改），不再写死裸字面量列表。
+  const clientIpHeaders = reqSettings.clientIpHeaders || DEFAULT_GLOBAL_SETTINGS.request.clientIpHeaders;
   let clientIp = '';
   for (const h of clientIpHeaders) {
     const v = headers.get(h);
     if (v) { clientIp = v; break; }
   }
   const protocol = (url.protocol || `${reqSettings.defaultProtocol}:`).replace(':', '');
+  const clientCountry = (headers.get('cf-ipcountry') || '').toUpperCase();
+  const userAgent = headers.get('user-agent') || '';
+  // 客户端 ASN：Cloudflare 为 cf-asn，部分平台为 asn 头；无则空串（跨平台行为一致）。
+  const clientAsn = headers.get('cf-asn') || headers.get('asn') || '';
 
   return {
     host: String(url.hostname || '').toLowerCase(),
@@ -76,8 +114,11 @@ export function buildMatchSubject(ctx) {
     method: (ctx.request.method || 'GET').toUpperCase(),
     protocol,
     clientIp,
-    clientCountry: (headers.get('cf-ipcountry') || '').toUpperCase(),
-    userAgent: headers.get('user-agent') || '',
+    clientCountry,
+    clientAsn,
+    clientContinent: resolveContinent(clientCountry),
+    clientDevice: deriveDevice(userAgent),
+    userAgent,
     referer: headers.get('referer') || '',
     // 首要分流（选源站）选出的本次回源对象。在 matchRule 之前由 pipeline 写入 ctx.origin，
     // 作为规则引擎的「首要条件」维度：oriX AND 规则引擎 的分支即由它产生。

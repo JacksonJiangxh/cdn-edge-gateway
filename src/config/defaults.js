@@ -344,9 +344,13 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
   respHeaders: Object.freeze({
     // 全站兜底「默认响应头」。所有响应默认注入本项目品牌头 Server / Via，
     // 并剥离上游敏感响应头（与旧 headers.js 写死的 PRODUCT_NAME / DEFAULT_STRIP_RESP_HEADERS 一致）。
+    //
+    // 品牌名统一引用「单一真相源」：settings.respHeaders.serverName（见下方），
+    // 经运行时 expandVars 把 ${product_name} 求值为真实品牌名。
+    // 这样品牌名只在一处可配（可视化可改），不再于 stages 与 settings 两处都写死字面量。
     set: Object.freeze({
-      server: PRODUCT_NAME,
-      via: `1.1 ${PRODUCT_NAME}`,
+      server: '${product_name}',
+      via: '1.1 ${product_name}',
     }),
     remove: Object.freeze([
       'cross-origin-resource-policy',
@@ -404,8 +408,10 @@ export const STRIP_REQ_HEADERS = Object.freeze({
 export const DEFAULT_GLOBAL_SETTINGS = Object.freeze({
   // 请求接收层
   request: Object.freeze({
-    // 提取真实客户端 IP 的回源/请求头优先级（matcher.js 旧写死 cf-connecting-ip || x-real-ip）
-    clientIpHeaders: Object.freeze(['cf-connecting-ip', 'x-real-ip']),
+    // 提取真实客户端 IP 的回源/请求头优先级（单一真相源：matcher.js / vars.js 的
+    // ${client_ip} / ${remote_addr} 均读取此字段，无需改代码即可在管理面板调整）。
+    // 顺序按平台常见度排：CF 系 cf-connecting-ip → Nginx/EO 系 x-real-ip → 通用 x-forwarded-for。
+    clientIpHeaders: Object.freeze(['cf-connecting-ip', 'x-real-ip', 'x-forwarded-for']),
     // 默认协议（matcher.js 默认 https）
     defaultProtocol: 'https',
   }),

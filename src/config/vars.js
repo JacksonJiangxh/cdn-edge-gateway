@@ -27,6 +27,7 @@
  */
 
 import { buildMatchSubject } from '../proxy/matcher.js';
+import { DEFAULT_GLOBAL_SETTINGS } from './defaults.js';
 
 /** 所有支持的「独立变量名」白名单（不含带 key 的 http_/cookie_/query_ 前缀）。 */
 export const SCALAR_VARS = Object.freeze([
@@ -111,7 +112,9 @@ export function resolveVar(ctx, name) {
   const ALIAS = {
     client_ip: 'clientIp',
     client_country: 'clientCountry',
+    client_continent: 'clientContinent',
     client_asn: 'clientAsn',
+    client_device: 'clientDevice',
     user_agent: 'userAgent',
     referer: 'referer',
   };
@@ -157,13 +160,20 @@ function buildSubject(ctx) {
   return s;
 }
 
-/** 客户端直连字段（cf-connecting-ip / socket remote）。 */
+/** 客户端直连字段（取自 clientIpHeaders 优先级 / socket remote）。 */
 function clientField(ctx, what) {
   const headers = ctx?.request?.headers;
   if (what === 'country') return (headers && headers.get('cf-ipcountry')) || '';
   if (what === 'remote_addr') {
-    const ip = headers && (headers.get('cf-connecting-ip') || headers.get('x-real-ip'));
-    if (ip) return ip;
+    // 与 ${client_ip} / matcher.js 统一：真实客户端 IP 取自全站兜底 settings.request.clientIpHeaders 优先级
+    const clientIpHeaders = (ctx?.__globalSettings?.request?.clientIpHeaders)
+      || DEFAULT_GLOBAL_SETTINGS.request.clientIpHeaders;
+    if (headers) {
+      for (const h of clientIpHeaders) {
+        const v = headers.get(h);
+        if (v) return v.split(',')[0].trim();
+      }
+    }
     return ctx?.remoteAddr || '';
   }
   return '';
@@ -207,33 +217,6 @@ function decodeURIComponentSafe(s) {
   } catch {
     return s;
   }
-}
-
-/** 把 ISO 国家码推导大区（常用即可，未知返回 ''）。 */
-const CONTINENT_MAP = Object.freeze({
-  // 北美
-  US: 'NA', CA: 'NA', MX: 'NA',
-  // 南美
-  BR: 'SA', AR: 'SA', CL: 'SA', CO: 'SA', PE: 'SA',
-  // 欧洲
-  GB: 'EU', DE: 'EU', FR: 'EU', NL: 'EU', ES: 'EU', IT: 'EU', RU: 'EU',
-  // 亚洲
-  CN: 'AS', JP: 'AS', KR: 'AS', IN: 'AS', SG: 'AS', HK: 'AS', TW: 'AS', TH: 'AS',
-  // 大洋洲
-  AU: 'OC', NZ: 'OC',
-  // 非洲
-  ZA: 'AF', EG: 'AF', NG: 'AF', KE: 'AF',
-});
-
-/**
- * 推导客户端大区（基于 cf-ipcountry）。仅作为 client_continent 变量的数据源，
- * 不依赖额外库。
- * @param {import('../contracts.js').Ctx} ctx
- * @returns {string}
- */
-export function resolveContinent(ctx) {
-  const cc = (clientField(ctx, 'country') || '').toUpperCase();
-  return CONTINENT_MAP[cc] || '';
 }
 
 /**

@@ -917,7 +917,7 @@ import { el, clear, $ } from './dom.js';
       const valCell = withVal
         ? el('div', { class: 'kv-val' }, [
             el('input', { class: 'input hv', value: v0 || '', placeholder: 'value（可写 ${var} 变量）' }),
-            varHintBar('头值可写 ${host} ${client_ip} ${uri} 等内置变量，运行时替换为真实值。'),
+            varHintBar('头值可写 ${host} ${client_ip} ${uri} ${product_name} 等内置变量，运行时替换为真实值。如响应头注入客户端 IP 用 ${client_ip}，品牌头用 ${product_name}。'),
           ])
         : el('span', { class: 'muted', text: '(移除)' });
       const row = el('div', { class: 'kv-row' }, [
@@ -3329,6 +3329,65 @@ import { el, clear, $ } from './dom.js';
     ]);
     wrap.appendChild(dbgCard);
 
+    // ---- 全站品牌与请求特征（settings.respHeaders / settings.request / settings.disguise 单一真相源）----
+    // 这些字段本是后端写死的常量（品牌头 PRODUCT_NAME、伪装页 'nginx'、客户端 IP 回源头优先级列表），
+    // 现已收编为「全站规则的全局默认参数」可视化可改：
+    //   - respHeaders.serverName / viaName：Server / Via 响应头品牌名；全站规则 respHeaders.set 的
+    //     ${product_name} / 1.1 ${product_name} 运行时经它求值（改这里即改全站品牌，无需改代码）。
+    //   - request.clientIpHeaders：提取真实客户端 IP 的回源头优先级（逗号分隔），多平台兼容可调。
+    //   - disguise.staticServerName：伪装页 / 反代伪装响应的 Server 指纹（默认 nginx）。
+    // 走全站规则 settings 段（与后端 DEFAULT_GLOBAL_SETTINGS 对齐），后端 saveGlobal 自动 merge 其他子段。
+    const brandServer = el('input', { class: 'input', placeholder: 'EdgeGateway' });
+    const brandVia = el('input', { class: 'input', placeholder: 'EdgeGateway' });
+    const reqClientIpHeaders = el('input', { class: 'input', placeholder: 'cf-connecting-ip,x-real-ip,x-forwarded-for' });
+    const disguiseServer = el('input', { class: 'input', placeholder: 'nginx' });
+    const fillBrand = (s) => {
+      const rh = (s && s.respHeaders) || {};
+      const req = (s && s.request) || {};
+      const dg = (s && s.disguise) || {};
+      brandServer.value = rh.serverName || '';
+      brandVia.value = rh.viaName || '';
+      reqClientIpHeaders.value = Array.isArray(req.clientIpHeaders) ? req.clientIpHeaders.join(',') : (req.clientIpHeaders || '');
+      disguiseServer.value = dg.staticServerName || '';
+    };
+    const brandCard = el('div', { class: 'card-block' }, [
+      el('h4', {}, '全站品牌与请求特征'),
+      el('div', { class: 'form-stack' }, [
+        field('响应 Server 品牌名', brandServer, '全站规则 ${product_name} 引用此值；留空=沿用默认。改这里即改全局 Server 头，无需改代码。'),
+        field('响应 Via 品牌名', brandVia, '全站规则 Via 头品牌名；留空=沿用默认。'),
+        field('真实客户端 IP 回源头（逗号分隔）', reqClientIpHeaders, '提取客户端真实 IP 的回源头优先级，按逗号顺序尝试；多平台兼容可调（CF 系 cf-connecting-ip / Nginx 系 x-real-ip / 通用 x-forwarded-for）。'),
+        field('伪装页 Server 指纹', disguiseServer, '全站兜底伪装页与反代伪装的 Server 头；默认 nginx。'),
+      ]),
+      el('div', { class: 'section-head' }, [
+        el('button', {
+          class: 'btn btn-primary', text: '保存品牌与请求特征',
+          onclick: async () => {
+            const clientIpHeaders = reqClientIpHeaders.value
+              .split(',')
+              .map((x) => x.trim().toLowerCase())
+              .filter(Boolean);
+            const payload = {
+              settings: {
+                respHeaders: {
+                  serverName: brandServer.value.trim(),
+                  viaName: brandVia.value.trim(),
+                },
+                request: { clientIpHeaders },
+                disguise: { staticServerName: disguiseServer.value.trim() },
+              },
+            };
+            try {
+              const saved = await API.rules.saveGlobal(payload);
+              fillBrand((saved && saved.settings) || {});
+              toast('已保存全站品牌与请求特征', 'ok');
+              await loadAll();
+            } catch (e) { toast(e.message, 'err'); }
+          },
+        }),
+      ]),
+    ]);
+    wrap.appendChild(brandCard);
+
     // 载入现有全局配置填入表单（此时操作的是节点引用，无需已挂载到 document）
     try {
       fillGlobalForm(await API.config.get());
@@ -3338,6 +3397,7 @@ import { el, clear, $ } from './dom.js';
     try {
       const g = await API.rules.global().catch(() => null);
       fillDbg((g && g.settings) || {});
+      fillBrand((g && g.settings) || {});
     } catch (e) { /* 全站规则尚未初始化时忽略 */ }
 
     wrap.appendChild(el('div', { class: 'section-head' }, [
@@ -3443,10 +3503,12 @@ import { el, clear, $ } from './dom.js';
 
   // 动态变量提示条：在支持 ${var} 的字段旁统一展示「可用变量」说明。
   // 仅作人话提示，不参与表单读取（read() 仍只取用户输入框的值）。
+  // 变量名与后端 src/config/vars.js 的 SCALAR_VARS / PREFIXED_VARS 白名单一致；
+  // 其中 ${product_name} 是「全站品牌头单一真相源」核心变量（Server/Via 经它注入真实品牌名）。
   function varHintBar(text) {
     return el('div', { class: 'field-hint muted var-hint' }, [
       el('span', { class: 'var-hint-tag', text: '支持动态变量' }),
-      el('span', { text: text || '可写 ${host} ${client_ip} ${uri} ${path} 等内置变量，运行时替换为真实值。如读请求头用 ${http_x_forwarded_for}，读查询参数用 ${query_foo}。' }),
+      el('span', { text: text || '可写 ${host} ${client_ip} ${uri} ${path} ${product_name} 等内置变量，运行时替换为真实值。如读请求头用 ${http_x_forwarded_for}，读 Cookie 用 ${cookie_foo}，读查询参数用 ${query_foo}。' }),
     ]);
   }
 
