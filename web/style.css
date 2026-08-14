@@ -1219,6 +1219,76 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
 .ext-chip:hover { border-color: var(--accent, #3b82f6); color: var(--accent, #3b82f6); }
 .ext-chip:active { transform: scale(.94); }
 
+/* EO/CF 风格分类多选下拉：触发框 + 弹出分类面板（替代平铺 chips） */
+.ms-trigger-wrap { margin-top: 6px; }
+.ms-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 12px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text, #1f2937);
+  background: var(--bg-soft, #f3f4f6);
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color .15s, box-shadow .15s, background .15s;
+}
+.ms-trigger:hover { border-color: var(--accent, #3b82f6); }
+.ms-trigger.is-open { border-color: var(--accent, #3b82f6); box-shadow: 0 0 0 3px rgba(59,130,246,.15); }
+.ms-trigger.has-value { color: var(--accent, #2563eb); font-weight: 600; }
+.ms-trigger-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ms-caret { color: var(--text-muted, #6b7280); transition: transform .18s ease; flex: none; }
+.ms-trigger.is-open .ms-caret { transform: rotate(180deg); }
+
+.ms-panel {
+  z-index: 9999;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 8px;
+  background: var(--bg, #fff);
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(15,23,42,.18);
+  animation: ms-pop .14s ease;
+}
+@keyframes ms-pop { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.ms-group { padding: 4px 2px; }
+.ms-group + .ms-group { margin-top: 4px; border-top: 1px solid var(--border, #eef0f3); padding-top: 8px; }
+.ms-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted, #6b7280);
+  letter-spacing: .03em;
+  margin: 2px 4px 6px;
+}
+.ms-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.ms-opt {
+  font-size: 12px;
+  font-family: inherit;
+  padding: 5px 10px;
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 8px;
+  background: var(--bg-soft, #f3f4f6);
+  color: var(--text, #1f2937);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform .12s, border-color .12s, background .12s, color .12s, box-shadow .12s;
+}
+.ms-opt:hover { border-color: var(--accent, #3b82f6); color: var(--accent, #2563eb); transform: translateY(-1px); }
+.ms-opt:active { transform: scale(.95); }
+/* 已选项：主题色填充 + 白字高亮，一眼区分未选 */
+.ms-opt.is-selected {
+  background: linear-gradient(135deg, var(--accent, #3b82f6), #2563eb);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(37,99,235,.35);
+}
+.ms-opt.is-selected:hover { color: #fff; }
+
 @media (max-width: 720px) {
   .cond-row { grid-template-columns: 1fr 1fr; }
 }

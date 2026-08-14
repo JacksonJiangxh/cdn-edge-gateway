@@ -918,7 +918,7 @@ import { el, clear, $ } from './dom.js';
       const valCell = withVal
         ? el('div', { class: 'kv-val' }, [
             el('input', { class: 'input hv', value: v0 || '', placeholder: 'value（可写 ${var} 变量）' }),
-            varHintBar('头值可写 ${host} ${client_ip} ${uri} ${product_name} 等内置变量，运行时替换为真实值。如响应头注入客户端 IP 用 ${client_ip}，品牌头用 ${product_name}。'),
+            varHintBar(),
           ])
         : el('span', { class: 'muted', text: '(移除)' });
       const row = el('div', { class: 'kv-row' }, [
@@ -1033,6 +1033,21 @@ import { el, clear, $ } from './dom.js';
     400, 401, 403, 404, 405, 406, 408, 409, 410, 412, 413, 415, 422, 429,
     500, 502, 503, 504,
   ];
+  // 后缀候选按资源类型分组（仅前端展示层，便于 EO/CF 风格的分类多选下拉）。
+  // 不改动 EXTENSION_PRESETS 数组定义，避免破坏 build.mjs 一致性断言。
+  const EXTENSION_GROUPS = [
+    { label: '网页与脚本', values: ['css', 'js', 'ejs', 'class', 'swf'] },
+    { label: '图片', values: ['bmp', 'gif', 'ico', 'jpg', 'jpeg', 'png', 'svg', 'svgz', 'tif', 'tiff', 'avif', 'webp', 'pict', 'eps', 'eot', 'otf', 'ttf', 'woff', 'woff2'] },
+    { label: '音视频', values: ['avi', 'flac', 'mid', 'midi', 'mkv', 'mp3', 'mp4', 'ogg', 'webm'] },
+    { label: '文档', values: ['csv', 'doc', 'docx', 'pdf', 'ppt', 'pptx', 'ps', 'xls', 'xlsx'] },
+    { label: '压缩包与镜像', values: ['7z', 'bz2', 'gz', 'rar', 'tar', 'zip', 'zst', 'dmg', 'iso'] },
+    { label: '程序与二进制', values: ['apk', 'bin', 'exe', 'jar', 'pls'] },
+  ];
+  // 错误码按 4xx / 5xx 分组（仅展示层）。
+  const ERROR_CODE_GROUPS = [
+    { label: '4xx 客户端错误', values: [400, 401, 403, 404, 405, 406, 408, 409, 410, 412, 413, 415, 422, 429] },
+    { label: '5xx 服务端错误', values: [500, 502, 503, 504] },
+  ];
 
   // 单个条件行：[匹配对象] [键名] [操作符] [值] [忽略大小写] [删除]
   function conditionRow(cond, onRemove) {
@@ -1053,25 +1068,26 @@ import { el, clear, $ } from './dom.js';
     });
     const icCb = el('input', { type: 'checkbox', checked: cond.ignoreCase !== false });
     const valHint = el('span', { class: 'field-hint muted' });
-    // 后缀候选 chips：点击即把该后缀追加进值框（多选），同时仍可手填。
-    const extChips = el('div', { class: 'ext-chips' }, EXTENSION_PRESETS.map((e) => {
-      const chip = el('button', {
-        type: 'button',
-        class: 'ext-chip',
-        text: '.' + e,
-        onclick: () => {
-          const cur = valInput.value.split(',').map((s) => s.trim()).filter(Boolean);
-          const norm = e.toLowerCase();
-          if (!cur.map((x) => x.replace(/^\./, '').toLowerCase()).includes(norm)) cur.push(norm);
-          valInput.value = cur.join(', ');
-          valInput.focus();
-        },
-      });
-      return chip;
-    }));
+    // 后缀候选：EO/CF 风格分类多选下拉（替代原先在值框下方平铺的 chips）。
+    // 点击触发框弹出分类面板，已选填充高亮、未选描边；同时保留逗号手填能力。
+    const extMs = multiSelectPanel({
+      presets: EXTENSION_PRESETS,
+      groups: EXTENSION_GROUPS,
+      getValue: () => valInput.value,
+      setValue: (t) => { valInput.value = t; valInput.focus(); },
+      tokenOf: (e) => String(e).toLowerCase(),
+      isSelected: (e) => {
+        const norm = String(e).toLowerCase();
+        return valInput.value.split(',').map((s) => s.trim().replace(/^\./, '').toLowerCase()).filter(Boolean).includes(norm);
+      },
+      render: (e) => '.' + e,
+      placeholder: '选择文件后缀（可多选）',
+    });
+    const extTriggerWrap = el('div', { class: 'ms-trigger-wrap' }, [extMs.trigger]);
+    valInput.addEventListener('input', () => extMs.syncFromInput());
 
     const keyWrap = el('div', { class: 'cond-cell' }, [keyInput]);
-    const valWrap = el('div', { class: 'cond-cell' }, [valInput, extDl, extChips, valHint]);
+    const valWrap = el('div', { class: 'cond-cell' }, [valInput, extDl, extTriggerWrap, valHint]);
 
     // 运算符对应的填写示例，帮小白看懂“值”该写什么
     const OP_EXAMPLES = {
@@ -1102,13 +1118,14 @@ import { el, clear, $ } from './dom.js';
       keyInput.placeholder = needKey ? (KEY_HINTS[tSel.value] || '键名') : '键名';
       valWrap.style.display = OPS_NO_VALUE.includes(opSel.value) ? 'none' : '';
       const isExt = tSel.value === 'extension' || opSel.value === 'suffix' || opSel.value === 'notSuffix';
-      // 后缀模式：值输入框启用候选 datalist + 显示多选 chips；否则隐藏。
+      // 后缀模式：值输入框启用候选 datalist + 显示多选触发框；否则隐藏。
       if (isExt) {
         valInput.setAttribute('list', extDlId);
-        extChips.style.display = '';
+        extTriggerWrap.style.display = '';
+        extMs.syncFromInput();
       } else {
         valInput.removeAttribute('list');
-        extChips.style.display = 'none';
+        extTriggerWrap.style.display = 'none';
       }
       valHint.textContent = OPS_NO_VALUE.includes(opSel.value)
         ? ''
@@ -1248,23 +1265,24 @@ import { el, clear, $ } from './dom.js';
       placeholder: '如 404:10, 500:5',
       list: errDlId,
     });
-    // 错误码候选 chips：点击即追加「码:」前缀（再手填秒数），同样可手填新码。
-    const errChips = el('div', { class: 'ext-chips' }, ERROR_CODE_PRESETS.map((code) => {
-      const chip = el('button', {
-        type: 'button',
-        class: 'ext-chip',
-        text: String(code),
-        title: '点击追加 ' + code + ':<秒数>',
-        onclick: () => {
-          const cur = statusTtl.value.split(',').map((s) => s.trim()).filter(Boolean);
-          const prefix = String(code) + ':';
-          if (!cur.some((p) => p === prefix || p.startsWith(prefix))) cur.push(prefix);
-          statusTtl.value = cur.join(', ');
-          statusTtl.focus();
-        },
-      });
-      return chip;
-    }));
+    // 错误码候选：EO/CF 风格分类多选下拉（替代平铺 chips）。
+    // 点击候选追加「码:」前缀（再手填秒数）；已选指值框里含「码:…」；保留手填码:秒能力。
+    const errMs = multiSelectPanel({
+      presets: ERROR_CODE_PRESETS,
+      groups: ERROR_CODE_GROUPS,
+      getValue: () => statusTtl.value,
+      setValue: (t) => { statusTtl.value = t; statusTtl.focus(); },
+      tokenOf: (code) => String(code) + ':',
+      isSelected: (code) => {
+        const prefix = String(code) + ':';
+        return statusTtl.value.split(',').map((s) => s.trim()).filter(Boolean)
+          .some((p) => p === prefix || p.startsWith(prefix));
+      },
+      render: (code) => String(code),
+      placeholder: '选择错误码（可多选）',
+    });
+    const errTriggerWrap = el('div', { class: 'ms-trigger-wrap' }, [errMs.trigger]);
+    statusTtl.addEventListener('input', () => errMs.syncFromInput());
     const preRefresh = el('input', { type: 'checkbox', checked: !!c.preRefresh });
     const preP = el('input', { class: 'input', type: 'number', value: c.preRefreshPercent || 80, placeholder: '%' });
     const offline = el('input', { type: 'checkbox', checked: !!c.offlineCache });
@@ -1311,7 +1329,7 @@ import { el, clear, $ } from './dom.js';
         field('额外按 Cookie 来区分（逗号分隔）', ckCookies, '例如 tier（会员等级）。一般不用填。'),
       ]),
       section('高级缓存', '状态码缓存 / 预刷新 / 离线兜底——一般用不到，保持默认即可', [
-        field('给错误页也加缓存（格式 码:秒，逗号分隔）', statusTtl, '例如 404:10 表示 404 页面也缓存 10 秒，减轻源站压力。', [errDl, errChips]),
+        field('给错误页也加缓存（格式 码:秒，逗号分隔）', statusTtl, '例如 404:10 表示 404 页面也缓存 10 秒，减轻源站压力。', [errDl, errTriggerWrap]),
         el('div', { class: 'grid2' }, [
           el('label', { class: 'check' }, [preRefresh, el('span', { text: '缓存即将过期时提前回源刷新' })]),
           el('label', { class: 'check' }, [offline, el('span', { text: '源站挂了就用旧缓存顶着' })]),
@@ -3379,6 +3397,154 @@ import { el, clear, $ } from './dom.js';
     ]);
   }
 
+  // EO/CF 风格的分类多选下拉：替代「编辑框下方平铺 chips」。
+  // 默认只显示只读触发框（带摘要 + 箭头），点击才弹出大的分类面板；面板外点击或
+  // 再次点击触发框即关闭；已选项用主题色填充高亮、未选项描边，一眼区分。
+  // 与手填值框双向同步：手填时反向刷新面板选中态，点击候选时回写值框。
+  // 面板挂到 document.body 并用 getBoundingClientRect 绝对定位，避免被抽屉 overflow 裁剪。
+  //
+  // 参数：
+  //  - presets : 全部候选值数组（用于「全选/已选判断」与兜底）
+  //  - groups  : [{ label, values:[] }] 分组（控制面板里的分类区块）
+  //  - getValue: () => string  当前值框文本（逗号分隔）
+  //  - setValue: (text) => void  回写值框文本
+  //  - tokenOf : (raw) => string  从候选值规范成「值框里的 token 片段」（如错误码场景需加 ':'）
+  //  - isSelected: (raw) => boolean  该候选是否已存在于值框（raw 为候选值）
+  //  - render  : (raw) => string  候选按钮上展示的文字（如 '.js' 或 '404'）
+  //  - placeholder: 触发框空态占位
+  // 返回：{ trigger, panel, destroy } —— trigger 挂到值框旁，panel 通常挂 body。
+  function multiSelectPanel({ presets, groups, getValue, setValue, tokenOf, isSelected, render, placeholder }) {
+    const tokenOfSafe = tokenOf || ((r) => String(r));
+    const isSelSafe = isSelected || ((r) => {
+      const cur = getValue().split(',').map((s) => s.trim()).filter(Boolean);
+      return cur.includes(tokenOfSafe(r));
+    });
+    const renderSafe = render || ((r) => String(r));
+
+    // 触发框：只读摘要，点击展开面板；右侧箭头随开合旋转。
+    const trigger = el('button', {
+      type: 'button',
+      class: 'ms-trigger',
+      onclick: (e) => { e.preventDefault(); e.stopPropagation(); toggle(); },
+    }, [
+      el('span', { class: 'ms-trigger-text', text: '请选择…' }),
+      el('span', { class: 'ms-caret', text: '▾' }),
+    ]);
+    const triggerText = trigger.querySelector('.ms-trigger-text');
+
+    // 弹出面板（初始隐藏，挂在 body 上）。
+    const panel = el('div', { class: 'ms-panel', hidden: true });
+    const optEls = new Map(); // raw -> 候选按钮节点
+
+    for (const g of groups) {
+      const groupEl = el('div', { class: 'ms-group' }, [
+        el('div', { class: 'ms-group-label', text: g.label }),
+      ]);
+      const optWrap = el('div', { class: 'ms-opts' });
+      for (const raw of g.values) {
+        const opt = el('button', {
+          type: 'button',
+          class: 'ms-opt',
+          text: renderSafe(raw),
+          onclick: (e) => { e.stopPropagation(); toggleItem(raw); },
+        });
+        optEls.set(raw, opt);
+        optWrap.appendChild(opt);
+      }
+      groupEl.appendChild(optWrap);
+      panel.appendChild(groupEl);
+    }
+    // 兜底：分组未覆盖的候选值（防止 presets 与 groups 不一致时漏选）
+    const covered = new Set();
+    groups.forEach((g) => g.values.forEach((v) => covered.add(String(v))));
+    const missing = presets.filter((p) => !covered.has(String(p)));
+    if (missing.length) {
+      const optWrap = el('div', { class: 'ms-opts' });
+      for (const raw of missing) {
+        const opt = el('button', {
+          type: 'button', class: 'ms-opt', text: renderSafe(raw),
+          onclick: (e) => { e.stopPropagation(); toggleItem(raw); },
+        });
+        optEls.set(raw, opt);
+        optWrap.appendChild(opt);
+      }
+      panel.appendChild(el('div', { class: 'ms-group' }, [el('div', { class: 'ms-group-label', text: '其它' }), optWrap]));
+    }
+
+    function syncTrigger() {
+      const count = [...optEls.keys()].filter((r) => isSelSafe(r)).length;
+      if (count > 0) {
+        triggerText.textContent = '已选 ' + count + ' 项';
+        trigger.classList.add('has-value');
+      } else {
+        triggerText.textContent = placeholder || '请选择…';
+        trigger.classList.remove('has-value');
+      }
+    }
+    function syncOpts() {
+      for (const [raw, node] of optEls) {
+        node.classList.toggle('is-selected', isSelSafe(raw));
+      }
+    }
+    function toggleItem(raw) {
+      const cur = getValue().split(',').map((s) => s.trim()).filter(Boolean);
+      const token = tokenOfSafe(raw);
+      const idx = cur.indexOf(token);
+      if (idx >= 0) cur.splice(idx, 1);
+      else cur.push(token);
+      setValue(cur.join(', '));
+      syncTrigger();
+      syncOpts();
+    }
+    function position() {
+      const r = trigger.getBoundingClientRect();
+      panel.style.position = 'fixed';
+      panel.style.top = (r.bottom + 6) + 'px';
+      panel.style.left = r.left + 'px';
+      panel.style.minWidth = Math.max(r.width, 280) + 'px';
+    }
+    let open = false;
+    function show() {
+      position();
+      panel.hidden = false;
+      open = true;
+      trigger.classList.add('is-open');
+      document.addEventListener('click', onDocClick, true);
+      window.addEventListener('resize', onDocClick);
+      window.addEventListener('scroll', onDocClick, true);
+      syncOpts();
+      syncTrigger();
+    }
+    function hide() {
+      panel.hidden = true;
+      open = false;
+      trigger.classList.remove('is-open');
+      document.removeEventListener('click', onDocClick, true);
+      window.removeEventListener('resize', onDocClick);
+      window.removeEventListener('scroll', onDocClick, true);
+    }
+    function toggle() { open ? hide() : show(); }
+    // 点击面板外部即关闭（面板自身点击已 stopPropagation，不会触发这里）。
+    function onDocClick(e) {
+      if (panel.hidden) return;
+      if (panel.contains(e.target) || trigger.contains(e.target)) return;
+      hide();
+    }
+    // 手填值框时反向同步选中态与摘要。
+    function syncFromInput() { syncOpts(); syncTrigger(); }
+
+    document.body.appendChild(panel);
+    syncTrigger();
+
+    return {
+      trigger, panel, syncFromInput,
+      destroy() {
+        hide();
+        panel.remove();
+      },
+    };
+  }
+
   // 动态变量提示条：在支持 ${var} 的字段旁统一展示「可用变量」说明。
   // 仅作人话提示，不参与表单读取（read() 仍只取用户输入框的值）。
   // 变量名与后端 src/config/vars.js 的 SCALAR_VARS / PREFIXED_VARS 白名单一致；
@@ -3386,7 +3552,7 @@ import { el, clear, $ } from './dom.js';
   function varHintBar(text) {
     return el('div', { class: 'field-hint muted var-hint' }, [
       el('span', { class: 'var-hint-tag', text: '支持动态变量' }),
-      el('span', { text: text || '可写 ${host} ${client_ip} ${uri} ${path} ${product_name} 等内置变量，运行时替换为真实值。如读请求头用 ${http_x_forwarded_for}，读 Cookie 用 ${cookie_foo}，读查询参数用 ${query_foo}。' }),
+      el('span', { text: text || '头值可写 ${host} ${client_ip} ${uri} ${path} ${product_name} 等内置变量，运行时替换为真实值。' }),
     ]);
   }
 

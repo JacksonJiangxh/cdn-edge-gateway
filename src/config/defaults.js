@@ -244,7 +244,7 @@ export const DEFAULT_DIRECT_RESPONSE = Object.freeze({
 
 /** 默认客户端 IP 回源头（关闭）。启用后使用本项目自有品牌头 X-EdgeGateway-Client-IP 透传真实客户端 IP。 */
 export const DEFAULT_CLIENT_IP_HEADER = Object.freeze({
-  enabled: false,
+  enabled: true,
   name: 'X-EdgeGateway-Client-IP',
 });
 
@@ -330,7 +330,7 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
   origin: Object.freeze({
     hostHeader: deepUnfreeze(DEFAULT_HOST_HEADER),
     clientIpHeader: deepUnfreeze(DEFAULT_CLIENT_IP_HEADER),
-    followRedirect: false,
+    followRedirect: true,
     originTimeoutMs: 0,
     // 故障转移策略：全站兜底默认值。站点/源站级可覆盖（见 DEFAULT_FAILOVER）。
     // maxRetryBodyBytes：判定源站「可重试错误响应」的最大响应体字节（failover.js 写死 5MB）。
@@ -350,16 +350,16 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
     // 始终生效，故单独收进 settings.cache（见 DEFAULT_GLOBAL_SETTINGS）。
     enabled: false,
     mode: 'ttl',
-    edgeTtl: 15552000,
-    staleWhileRevalidate: 86400,
-    browserTtl: 1800,
-    ignoreQuery: false,
+    edgeTtl: 86400,
+    staleWhileRevalidate: 3600,
+    browserTtl: 3600,
+    ignoreQuery: true,
     queryWhitelist: Object.freeze([]),
     key: deepUnfreeze(DEFAULT_CACHE_KEY),
     statusTtl: Object.freeze({}),
-    preRefresh: false,
+    preRefresh: true,
     preRefreshPercent: 80,
-    offlineCache: false,
+    offlineCache: true,
   }),
   respHeaders: Object.freeze({
     // 全站兜底「默认响应头」。所有响应默认注入本项目品牌头 Server / Via，
