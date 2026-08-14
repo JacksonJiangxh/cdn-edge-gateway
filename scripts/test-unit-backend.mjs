@@ -36,9 +36,10 @@ import {
   hasVars,
   validateVarNames,
   extractVarNames,
+  CLIENT_IP_HEADERS,
 } from '../src/config/vars.js';
 
-import { DEFAULT_GLOBAL_SETTINGS } from '../src/config/defaults.js';
+import { DEFAULT_GLOBAL_SETTINGS, DEBUG_HEADER_NAMES } from '../src/config/defaults.js';
 
 import {
   buildCacheKey,
@@ -1298,8 +1299,12 @@ testA('T3 模拟人工编辑: putGlobalRules 落盘后全 7 阶段 + rewrite.typ
   // 合法段(security/request/...)保留内置默认。语义与人工在管理面编辑等价。
   assert.ok(actual.settings && typeof actual.settings === 'object', '期望：settings 段存在且为对象');
   assert.equal(actual.settings.security.rateLimitRpm, 600, '期望：settings.security 来自内置默认基线');
-  assert.deepEqual(actual.settings.request.clientIpHeaders, ['cf-connecting-ip', 'x-real-ip', 'x-forwarded-for'],
-    '期望：settings.request 来自内置默认基线');
+  // clientIpHeaders 已下沉为引擎内部常量 CLIENT_IP_HEADERS（不再作为可配 settings.request 字段），
+  // 故 settings.request 不再含该 key；其提取结果经 ${client_ip} 暴露。断言下沉语义：
+  assert.ok(!('clientIpHeaders' in (actual.settings.request || {})),
+    '期望：settings.request 已不再暴露 clientIpHeaders（已下沉为引擎常量）');
+  assert.ok(Array.isArray(CLIENT_IP_HEADERS) && CLIENT_IP_HEADERS.includes('cf-connecting-ip'),
+    '期望：真实客户端 IP 提取优先级已下沉为引擎常量 CLIENT_IP_HEADERS');
   // 与 T1 落盘结构对比：语义一致（程序自动化 == 人工逐一设置）
   const expectedKeys = [...STAGE_ORDER].sort();
   assert.deepEqual(Object.keys(actual.stages).sort(), expectedKeys, '实际键集与期望一致');
@@ -1441,13 +1446,16 @@ test('expandVars: 三变量组合解析（CN/ASN=13335/iPhone）', () => {
   assert.equal(expandVars('${client_continent}/${client_asn}/${client_device}', ctx), 'AS/13335/mobile');
 });
 
-test('DEFAULT_GLOBAL_SETTINGS.debug 默认保持原调试头行为（可配置、默认开启）', () => {
-  assert.equal(DEFAULT_GLOBAL_SETTINGS.debug.enabled, true);
-  assert.equal(DEFAULT_GLOBAL_SETTINGS.debug.headers.originId, 'X-Origin-Id');
-  assert.equal(DEFAULT_GLOBAL_SETTINGS.debug.headers.cache, 'X-Cache');
-  assert.equal(DEFAULT_GLOBAL_SETTINGS.debug.headers.ruleId, 'X-Rule-Id');
-  assert.equal(DEFAULT_GLOBAL_SETTINGS.debug.headers.retryCount, 'X-Retry-Count');
-  assert.equal(DEFAULT_GLOBAL_SETTINGS.debug.headers.edgeTime, 'X-Edge-Time');
+test('DEBUG_HEADER_NAMES 默认调试响应头（已下沉为引擎常量，默认始终下发）', () => {
+  // debug 段已从 settings 下沉为引擎常量 DEBUG_HEADER_NAMES（旧 settings.debug.headers）。
+  // 默认始终下发；如需关闭，在站点规则 stages.respHeaders.remove 中移除对应头名即可。
+  assert.equal(DEBUG_HEADER_NAMES.originId, 'X-Origin-Id');
+  assert.equal(DEBUG_HEADER_NAMES.cache, 'X-Cache');
+  assert.equal(DEBUG_HEADER_NAMES.ruleId, 'X-Rule-Id');
+  assert.equal(DEBUG_HEADER_NAMES.retryCount, 'X-Retry-Count');
+  assert.equal(DEBUG_HEADER_NAMES.edgeTime, 'X-Edge-Time');
+  assert.ok(!('debug' in DEFAULT_GLOBAL_SETTINGS),
+    '期望：DEFAULT_GLOBAL_SETTINGS 已不再含 debug 段（已下沉为引擎常量）');
 });
 
 test('applyRewrite regexTo：捕获组 $1..$9 真正生效', () => {
