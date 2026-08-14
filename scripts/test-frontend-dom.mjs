@@ -75,6 +75,54 @@ async function bundleFrontend() {
 }
 
 /**
+ * 单独打包 rule-editor/shared.js 以便单测其转换函数（globalStageToAction /
+ * actionToGlobalStage）。shared.js 依赖 sequence.js / global.js / card.js 三个
+ * 含 DOM 逻辑的模块，这里用 esbuild 插件把它们替换为桩，只保留 shared.js 自身逻辑。
+ * @returns {Promise<{globalStageToAction: Function, actionToGlobalStage: Function}>}
+ */
+async function loadSharedConversion() {
+  const stubPlugin = {
+    name: 'stub-dom-deps',
+    setup(build) {
+      const stubs = new Set([
+        resolve(WEB, 'app/views/sequence.js'),
+        resolve(WEB, 'app/rule-editor/global.js'),
+        resolve(WEB, 'app/rule-editor/card.js'),
+      ]);
+      build.onResolve({ filter: /.*/ }, (args) => {
+        if (stubs.has(resolve(args.resolveDir, args.path))) {
+          return { path: args.path, namespace: 'stub' };
+        }
+      });
+      build.onLoad({ filter: /.*/, namespace: 'stub' }, (args) => {
+        const name = args.path.split('/').pop();
+        if (name === 'sequence.js') return { contents: 'export const renderTrafficSequence = () => {};', loader: 'js' };
+        if (name === 'global.js') return { contents: 'export const openGlobalRulesDrawer = () => {};', loader: 'js' };
+        if (name === 'card.js') return { contents: 'export const buildRuleCard = {};', loader: 'js' };
+        return { contents: 'export default {};', loader: 'js' };
+      });
+    },
+  };
+  const result = await esbuild.build({
+    entryPoints: [join(WEB, 'app/rule-editor/shared.js')],
+    bundle: true,
+    format: 'cjs',
+    platform: 'node',
+    target: 'es2020',
+    write: false,
+    logLevel: 'silent',
+    plugins: [stubPlugin],
+  });
+  const code = result.outputFiles[0].text;
+  const moduleObj = { exports: {} };
+  const fn = new Function('module', 'exports', 'require', code);
+  // 桩 require：避免任何残留外部依赖解析失败
+  const req = () => ({});
+  fn(moduleObj, moduleObj.exports, req);
+  return moduleObj.exports;
+}
+
+/**
  * 读取 web/index.html 作为测试用 DOM 骨架（app.js 依赖其中预置根节点）。
  * @returns {Promise<string>}
  */
@@ -639,8 +687,61 @@ export async function runFrontendDomTest() {
 
 let JSDOM; // 动态 import 后赋值
 
+/**
+ * 纯逻辑单测：前端 rule-editor/shared.js 的「全扁平双向转换契约」。
+ * 与后端 stageValueToAction/actionToStageValue 同构，验证前后端一致，
+ * 不因 NESTED_STAGES 删除而错位（读取展开到 action 顶层、写回剥离规则专属键）。
+ */
+export async function runSharedConversionTest() {
+  let passed = 0, failed = 0;
+  const log = (ok, msg) => {
+    if (ok) { passed++; console.log(`  ✓ ${msg}`); }
+    else { failed++; console.error(`  ✗ ${msg}`); }
+  };
+  try {
+    const { globalStageToAction, actionToGlobalStage } = await loadSharedConversion();
+
+    // 读：扁平阶段 terminate 直接展开到 action 顶层（不得反向嵌套 {terminate:{...}}）
+    const a1 = globalStageToAction('terminate', { forceHttps: true, forceHttpsStatus: 308, directResponse: { status: 403 } });
+    log(JSON.stringify(a1) === JSON.stringify({ forceHttps: true, forceHttpsStatus: 308, directResponse: { status: 403 } }),
+      'globalStageToAction(terminate) 展开到 action 顶层，不反向嵌套');
+
+    // 读：嵌套型阶段 rewrite 挂到 action[stage] 子对象（与 normRule 读取约定一致）
+    const a2 = globalStageToAction('rewrite', { type: 'prefix', value: '/api' });
+    log(JSON.stringify(a2) === JSON.stringify({ rewrite: { type: 'prefix', value: '/api' } }),
+      'globalStageToAction(rewrite) 挂到 action.rewrite 子对象（normRule 约定）');
+
+    // 写：扁平型 action → stages[stage]，剥离规则专属键（id/name/match/stage 等）
+    const act = { forceHttps: true, forceHttpsStatus: 301, id: 'r1', name: 'x', priority: 0, match: { conditions: [] }, enabled: true, stage: 'terminate' };
+    const s1 = actionToGlobalStage('terminate', act);
+    log(JSON.stringify(s1) === JSON.stringify({ forceHttps: true, forceHttpsStatus: 301 }),
+      'actionToGlobalStage(terminate) 收集顶层字段并剥离规则专属键');
+    log(!('terminate' in s1), 'actionToGlobalStage(terminate) 落盘值为扁平字段，不嵌套成 {terminate:{...}}');
+
+    // 写：嵌套型阶段 rewrite 取 action[stage] 子对象整体作为落盘值（仍平铺）
+    const s2 = actionToGlobalStage('rewrite', { rewrite: { type: 'none' }, id: 'r2', stage: 'rewrite' });
+    log(JSON.stringify(s2) === JSON.stringify({ type: 'none' }),
+      'actionToGlobalStage(rewrite) 取 action.rewrite 子对象平铺落盘');
+
+    return { ok: failed === 0, checks: passed + failed, failures: failed };
+  } catch (e) {
+    console.error('  ✗ 前端转换契约测试执行异常:', e && (e.stack || e.message));
+    return { ok: false, checks: passed + failed, failures: failed + 1 };
+  }
+}
+
 async function main() {
   try {
+    // 1) 前端全扁平双向转换契约（纯逻辑，不依赖 jsdom）
+    const conv = await runSharedConversionTest();
+    console.log(`\n前端转换契约测试完成：共 ${conv.checks} 项断言，失败 ${conv.failures} 项`);
+    if (!conv.ok) {
+      console.error('\n✗ 前端转换契约（globalStageToAction/actionToGlobalStage）未通过。');
+      process.exit(1);
+    }
+    console.log('✓ 前端全扁平双向转换契约通过（与后端同构）');
+
+    // 2) jsdom 整链测试
     const res = await runFrontendDomTest();
     if (res.skipped) {
       console.log('⚠ 前端 DOM 测试已跳过（jsdom 未安装），不影响 build。');
@@ -653,7 +754,7 @@ async function main() {
     }
     console.log('✓ 前端整链（jsdom 真实 DOM）登录 → 进后台 → 全视图 → 规则抽屉 通过');
   } catch (e) {
-    console.error('\n✗ 前端 DOM 测试执行异常:', e && (e.stack || e.message));
+    console.error('\n✗ 前端测试执行异常:', e && (e.stack || e.message));
     process.exit(1);
   }
 }

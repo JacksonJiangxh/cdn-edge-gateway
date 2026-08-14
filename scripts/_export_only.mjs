@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 const EXPORTS = {
   'app/ui.js': ['toast', 'openDrawer', 'closeDrawer', 'scrollToAnchor', 'confirmDialog', 'ensureAuth', 'doLogin', 'doLogout', 'showLogin', 'enterApp'],
   'app/router.js': ['route', '$$nav'],
-  'app/rule-editor/shared.js': ['GLOBAL_STAGE_OPS', 'NESTED_STAGES', 'globalStageToAction', 'actionToGlobalStage'],
+  'app/rule-editor/shared.js': ['GLOBAL_STAGE_OPS', 'globalStageToAction', 'actionToGlobalStage'],
   'app/rule-editor/conditions.js': ['conditionRow', 'conditionsEditor', 'normalizeMatchForEditor'],
   'app/rule-editor/status.js': ['statusQuickPick', 'statusTtlEditor', 'statusPatternListEditor', 'stripRuleEditor', 'stringListEditor'],
   'app/rule-editor/ops.js': ['headerEditor', 'cacheEditor', 'rewriteEditor', 'previewRewrite'],

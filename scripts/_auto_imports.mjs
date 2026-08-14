@@ -12,7 +12,7 @@ const SYM = {
   'toast': 'ui.js', 'openDrawer': 'ui.js', 'closeDrawer': 'ui.js', 'scrollToAnchor': 'ui.js', 'confirmDialog': 'ui.js',
   'ensureAuth': 'ui.js', 'doLogin': 'ui.js', 'doLogout': 'ui.js', 'showLogin': 'ui.js', 'enterApp': 'ui.js',
   'route': 'router.js', '$$nav': 'router.js',
-  'GLOBAL_STAGE_OPS': 'rule-editor/shared.js', 'NESTED_STAGES': 'rule-editor/shared.js',
+  'GLOBAL_STAGE_OPS': 'rule-editor/shared.js',
   'globalStageToAction': 'rule-editor/shared.js', 'actionToGlobalStage': 'rule-editor/shared.js',
   'conditionRow': 'rule-editor/conditions.js', 'conditionsEditor': 'rule-editor/conditions.js', 'normalizeMatchForEditor': 'rule-editor/conditions.js',
   'statusQuickPick': 'rule-editor/status.js', 'statusTtlEditor': 'rule-editor/status.js', 'statusPatternListEditor': 'rule-editor/status.js',

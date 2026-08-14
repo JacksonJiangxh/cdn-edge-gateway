@@ -123,7 +123,30 @@ export function applyRewrite(pathname, rewrite, ctx) {
         // 先对 regexTo 做变量展开（静态值无 ${ 前缀时零开销），再用其作为
         // replace 第二参让捕获组真正生效。
         const to = expandVars(rewrite.regexTo ?? '', ctx, { label: 'rewrite.regexTo', maxLen: REGEX_REPLACE_MAX_LEN });
-        const replaced = out.replace(re, to);
+        let replaced;
+        if (rewrite.glob) {
+          // 通配符模式（regexFrom 由 * 编译而来）下，对齐小白直觉：
+          //   $0 = 第一个 * 匹配的段（对应首个捕获组）
+          //   $1 = 完整输入路径（对应整串匹配）
+          //   $2..$9 = 其余 * 匹配的段（标准捕获组）
+          // 用函数式 replace 一次性把 $0/$1/$N 映射到对应内容，规避
+          // 字符串替换里 $&/$$ 的转义地狱，且不影响 ${var}（已先展开为字面）。
+          replaced = out.replace(re, (...args) => {
+            const full = args[0];
+            const groups = args.slice(1, -2); // 去掉末尾 offset/string
+            // 通配符别名约定（对齐小白直觉）：
+            //   $0 = 第一个 * 匹配的段      $1 = 完整输入路径
+            //   $2..$9 = 其余第 n-1 个 * 匹配的段（标准捕获组顺延）
+            return to.replace(/\$(\d)\b/g, (_, d) => {
+              const n = Number(d);
+              if (n === 0) return groups[0] ?? '';
+              if (n === 1) return full;
+              return groups[n - 1] ?? '';
+            });
+          });
+        } else {
+          replaced = out.replace(re, to);
+        }
         out = replaced.length > REGEX_REPLACE_MAX_LEN ? out : replaced;
       } catch {
         out = pathname;

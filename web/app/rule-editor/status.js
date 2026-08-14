@@ -198,6 +198,13 @@ export   function stripRuleEditor(initial) {
     const listWrap = el('div', { class: 'kv-list' });
     const errBox = el('div', { class: 'field-hint muted' });
 
+    // 头名正则支持通配符（* 代表任意字符），与后端 compileWildcard('header') 对齐
+    const compileHeadGlob = (src) => {
+      if (!src || !src.includes('*')) return src || '';
+      const escaped = src.replace(/\\/g, '\\\\').replace(/[.+?(){}|[\]^$]/g, '\\$&');
+      return escaped.split('*').join('(.*)');
+    };
+
     const validate = () => {
       const bad = [];
       Array.from(listWrap.children).forEach((row) => {
@@ -206,8 +213,9 @@ export   function stripRuleEditor(initial) {
         const v = input.value.trim();
         let okRow = true;
         if (v && type === 'regex') {
-          // 正则写错会导致「配置看着生效、实际没剥离」，必须当场报错
-          try { new RegExp(v); } catch { okRow = false; }
+          // 正则写错会导致「配置看着生效、实际没剥离」，必须当场报错。
+          // 先按通配符编译（cf-* → cf-(.*)）再做语法校验，避免把合法的 * 写法误判。
+          try { new RegExp(compileHeadGlob(v)); } catch { okRow = false; }
         }
         if (!okRow) bad.push(v);
         input.classList.toggle('input-err', !okRow);
@@ -226,7 +234,7 @@ export   function stripRuleEditor(initial) {
       const valInput = el('input', {
         class: 'input sr-val',
         value: value || '',
-        placeholder: 'cf- / true-client-ip / ^x-.*-id$',
+        placeholder: 'cf-* / true-client-ip / ^x-.*-id$（* 代表任意字符）',
       });
       valInput.addEventListener('input', validate);
       typeSel.addEventListener('change', validate);
@@ -265,7 +273,7 @@ export   function stripRuleEditor(initial) {
         const type = $('.sr-type', row).value;
         const value = $('.sr-val', row).value.trim().toLowerCase();
         if (!value) return;
-        if (type === 'regex') { try { new RegExp(value); } catch { return; } }
+        if (type === 'regex') { try { new RegExp(compileHeadGlob(value)); } catch { return; } }
         if (!out.some((x) => x.type === type && x.value === value)) out.push({ type, value });
       });
       return out;

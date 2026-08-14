@@ -83,6 +83,8 @@ import {
   validatePool,
   validateGlobal,
   validateGlobalRulesStages,
+  stageValueToAction,
+  actionToStageValue,
 } from '../src/config/schema.js';
 
 import {
@@ -1146,6 +1148,76 @@ test('validateGlobalRulesStages: 合法 stages 原样通过校验', () => {
   }
   // 单轨化后不应再返回 settings 段（其字段已归并入对应 stage）
   assert.ok(!('settings' in r.value), '校验后不应返回 settings 段（单轨化）');
+});
+
+test('validateGlobalRulesStages: 扁平阶段 terminate 的 forceHttps/directResponse 勾选值正确落盘（修复不落盘）', () => {
+  // 复现用户 bug：前端勾选「强制 HTTPS」并配置 directResponse，保存后必须原样落盘，
+  // 不能因反向嵌套被 normRule 回落默认值而抹掉。
+  const input = {
+    terminate: {
+      forceHttps: true,
+      forceHttpsStatus: 308,
+      directResponse: { status: 403, contentType: 'text/plain', body: 'blocked' },
+    },
+  };
+  const r = validateGlobalRulesStages(input, cloneGlobalRules());
+  assert.equal(r.ok, true, `terminate 勾选值应校验通过，但得到: ${r.errors.join('; ')}`);
+  const t = r.value.stages.terminate;
+  assert.equal(t.forceHttps, true, 'forceHttps 勾选值必须落盘（不得回落默认 false）');
+  assert.equal(t.forceHttpsStatus, 308, 'forceHttpsStatus 必须落盘');
+  // directResponse 经 normRule 规范化会补全 enabled 等字段，断言关键子字段即可
+  assert.equal(t.directResponse.status, 403, 'directResponse.status 必须落盘');
+  assert.equal(t.directResponse.contentType, 'text/plain', 'directResponse.contentType 必须落盘');
+  assert.equal(t.directResponse.body, 'blocked', 'directResponse.body 必须落盘');
+  // 关键反回归：落盘值里不应残留嵌套片段 { terminate: {...} }
+  assert.ok(!('terminate' in t), 'terminate 落盘应为扁平字段，不得再嵌套成 {terminate:{...}}');
+});
+
+test('validateGlobalRulesStages: 扁平阶段 origin 字段平铺落盘', () => {
+  const input = {
+    origin: { hostHeader: { mode: 'custom', custom: 'api.example.com' }, followRedirect: true, originTimeoutMs: 5000 },
+  };
+  const r = validateGlobalRulesStages(input, cloneGlobalRules());
+  assert.equal(r.ok, true, `origin 平铺值应校验通过，但得到: ${r.errors.join('; ')}`);
+  const o = r.value.stages.origin;
+  assert.deepEqual(o.hostHeader, { mode: 'custom', custom: 'api.example.com' }, 'hostHeader 应平铺落盘');
+  assert.equal(o.followRedirect, true, 'followRedirect 应平铺落盘');
+  assert.ok(!('origin' in o), 'origin 落盘应为扁平字段，不得再嵌套成 {origin:{...}}');
+});
+
+test('validateGlobalRulesStages: 嵌套型阶段 rewrite/cache 平铺落盘（与 terminate 形态统一）', () => {
+  const input = {
+    rewrite: { type: 'prefix', value: '/api', regexFrom: '', regexTo: '' },
+    cache: { enabled: true, edgeTtl: 60, browserTtl: 30, mode: 'override' },
+  };
+  const r = validateGlobalRulesStages(input, cloneGlobalRules());
+  assert.equal(r.ok, true, `rewrite/cache 平铺值应校验通过，但得到: ${r.errors.join('; ')}`);
+  // rewrite 经 normRule 规范化会补 glob 等字段；重点断言「平铺在 stages.rewrite 顶层、无嵌套片段」
+  const rw = r.value.stages.rewrite;
+  assert.equal(rw.type, 'prefix', 'rewrite.type 应平铺在 stages.rewrite 顶层');
+  assert.equal(rw.value, '/api', 'rewrite.value 应平铺在 stages.rewrite 顶层');
+  assert.equal(r.value.stages.cache.enabled, true, 'cache.enabled 应平铺落盘');
+  assert.ok(!('rewrite' in rw), 'rewrite 落盘不得嵌套成 {rewrite:{...}}');
+  assert.ok(!('cache' in r.value.stages.cache), 'cache 落盘不得嵌套成 {cache:{...}}');
+});
+
+test('stageValueToAction / actionToStageValue: 全扁平双向转换契约', () => {
+  // 读：扁平型阶段 terminate → 展开到 action 顶层（直接平铺字段）
+  const r1 = stageValueToAction('terminate', { forceHttps: true, forceHttpsStatus: 301 });
+  assert.deepEqual(r1, { forceHttps: true, forceHttpsStatus: 301 }, 'stageValueToAction(terminate) 应展开到 action 顶层');
+  assert.ok(!('terminate' in r1), 'stageValueToAction(terminate) 不得反向嵌套成 {terminate:{...}}');
+  // 读：嵌套型阶段 rewrite → 挂到 action[stage] 子对象（normRule 读取约定）
+  const r2 = stageValueToAction('rewrite', { type: 'none' });
+  assert.deepEqual(r2, { rewrite: { type: 'none' } }, 'stageValueToAction(rewrite) 应挂到 action.rewrite 子对象（normRule 约定）');
+
+  // 写：扁平型阶段 terminate → 收集顶层 owned 字段，剥离规则专属键
+  const a = { forceHttps: true, forceHttpsStatus: 301, id: 'r1', name: 'x', priority: 0, match: { conditions: [] }, enabled: true, stage: 'terminate' };
+  const s = actionToStageValue('terminate', a);
+  assert.deepEqual(s, { forceHttps: true, forceHttpsStatus: 301 }, 'actionToStageValue(terminate) 收集顶层 owned 字段并剥离规则专属键');
+  assert.ok(!('id' in s) && !('name' in s) && !('match' in s) && !('stage' in s), '规则专属键应被剥离');
+  // 写：嵌套型阶段 rewrite → 取 action[stage] 子对象整体作为落盘值（仍为扁平结构）
+  const s2 = actionToStageValue('rewrite', { rewrite: { type: 'none' } });
+  assert.deepEqual(s2, { type: 'none' }, 'actionToStageValue(rewrite) 取 action.rewrite 子对象整体平铺落盘');
 });
 
 test('validateGlobalRulesStages: 未知 stage key 被忽略，缺失阶段用 base 补全', () => {

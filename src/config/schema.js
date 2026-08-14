@@ -277,27 +277,76 @@ function validateAddr(addr) {
 }
 
 /**
+ * 通配符编译：把面向小白的「*」简写转换为等价标准正则。
+ *
+ * 设计目标：用户无需懂正则，也能写出 /img/* 、cf-x-* 这类直观匹配。
+ * 后端在归一化阶段统一编译成标准正则存储，前端仍显示用户写的通配符原文。
+ *
+ * 编译规则：
+ *  - 非字母数字的特殊字符先按正则语义转义（避免用户输入被当成正则元字符）。
+ *  - 「*」按 kind 自适应：
+ *      'path'   ->  ([^/]*)  不匹配斜杠（路径段直觉，/img/* 不会跨目录）。
+ *      'header' ->  (.*)     匹配任意字符（头名/头值里的 * 即任意串）。
+ *      'raw'    ->  (.*)     回落默认。
+ *  - 锚点 ^ $ 照原样保留（用户示例 ^/old/(.*) 即含锚点）。
+ *  - 每个 * 对应一个捕获组，从 $1 起编号（与 JS 正则 $1..$9 习惯一致）。
+ *
+ * 返回值附 glob 标志：供 normRewrite 把「通配符来源」透传给执行层，
+ * 使执行层能把用户写的 $0（* 匹配段）别名映射为首个捕获组 $1。
+ * 若输入不含任何通配符，则不编译、glob=false（纯正则路径零改动）。
+ * 编译失败（极端畸形）时回退为原串、glob=false，交下方既有 try/catch 兜底。
+ *
+ * @param {string} src
+ * @param {'path'|'header'|'raw'} kind
+ * @returns {{value:string, glob:boolean}}
+ */
+export function compileWildcard(src, kind) {
+  if (!src.includes('*')) return { value: src, glob: false };
+  // 仅在「明显是通配符写法」时启用编译：用户输入不含分组括号 ( ，即没有在写标准正则。
+  // 这样 /img/*、cf-x-* 会被编译，而 ^/old/(.*)、(a)* 等纯正则原样保留，互不干扰。
+  if (src.includes('(')) return { value: src, glob: false };
+  const star = kind === 'path' ? '([^/]*)' : '(.*)';
+  // 先转义反斜杠（避免被后续替换再次转义），再转义其余正则特殊字符；
+  // * 在此阶段保留为占位，最后统一替换为捕获组。^ $ 照原样保留（锚点语义）。
+  let escaped = src.replace(/\\/g, '\\\\');
+  escaped = escaped.replace(/[.+?(){}|[\]^$]/g, '\\$&');
+  // 把 * 替换为对应捕获组
+  const compiled = escaped.split('*').join(star);
+  // 编译后做语法试探，失败则回落原串
+  try {
+    new RegExp(compiled);
+    return { value: compiled, glob: true };
+  } catch {
+    return { value: src, glob: false };
+  }
+}
+
+/**
  * 校验正则字符串，防 ReDoS。
  * 检测嵌套量词（如 (a+)+、(a*)* ），这是灾难性回溯的主要来源。
+ * 同时支持「通配符」简写（*）：当 src 含 * 时按 kind 自适应编译为标准正则。
  * @param {string} src
- * @returns {{ok:boolean, value?:string, error?:string}}
+ * @param {'path'|'header'|'raw'} [kind='raw'] 字段语义，决定 * 的匹配范围
+ * @returns {{ok:boolean, value?:string, glob?:boolean, error?:string}}
  */
-function validateRegex(src) {
+export function validateRegex(src, kind = 'raw') {
   const s = str(src, '', LIMITS.REGEX_MAX);
   if (!s) return { ok: true, value: '' };
   if (s.length > LIMITS.REGEX_MAX) {
     return { ok: false, error: `正则过长（上限 ${LIMITS.REGEX_MAX} 字符）` };
   }
+  // 通配符编译（含 * 时）：先编译再走下面的 ReDoS/语法校验，安全性不退化。
+  const cw = s.includes('*') ? compileWildcard(s, kind) : { value: s, glob: false };
   // 嵌套量词检测：形如 (...)+ / (...)* / (...){n,} 且括号内本身含量词
-  if (/\([^)]*[+*}]\)\s*[+*]|\([^)]*[+*]\s*\)\s*\{/.test(s)) {
+  if (/\([^)]*[+*}]\)\s*[+*]|\([^)]*[+*]\s*\)\s*\{/.test(cw.value)) {
     return { ok: false, error: '正则包含嵌套量词，存在灾难性回溯风险，请简化' };
   }
   try {
-    new RegExp(s);
+    new RegExp(cw.value);
   } catch (e) {
     return { ok: false, error: `正则语法错误: ${e.message}` };
   }
-  return { ok: true, value: s };
+  return { ok: true, value: cw.value, glob: cw.glob };
 }
 
 /** HTTP 头名合法性：RFC 7230 token */
@@ -470,23 +519,29 @@ function normConditions(input, label) {
       }
 
       const needValues = op !== 'exists' && op !== 'notExists';
-      const values = strArr(c.values, 50, LIMITS.STR_MAX);
+      let values = strArr(c.values, 50, LIMITS.STR_MAX);
       if (needValues && values.length === 0) {
         errors.push(`${tag} 操作符 ${op} 需要至少一个匹配值`);
         continue;
       }
 
-      // 正则类值逐条校验，防 ReDoS
+      // 正则类值逐条校验，防 ReDoS，并把通配符（*）编译为标准正则写回
       if (op === 'regex' || op === 'notRegex') {
+        // 按匹配对象自适应通配符语义：路径类 * 不匹配斜杠，头/Cookie/查询类等 * 匹配任意字符
+        const kind = target === 'path' || target === 'fullUrl' || target === 'directory' || target === 'filename' || target === 'extension' ? 'path' : 'header';
         let bad = false;
+        const compiled = [];
         for (const v of values) {
-          const r = validateRegex(v);
+          const r = validateRegex(v, kind);
           if (!r.ok) {
             errors.push(`${tag} ${r.error}`);
             bad = true;
+            continue;
           }
+          compiled.push(r.value);
         }
         if (bad) continue;
+        values = compiled;
       }
 
       g.push({
@@ -600,13 +655,13 @@ function normClientIpHeader(input, label) {
   };
 }
 
-function normRewrite(input) {
+export function normRewrite(input) {
   const errors = [];
   const d = DEFAULT_REWRITE;
   if (!isObj(input)) return { value: deepClone(d), errors };
 
   const type = enumOf(input.type, ['none', 'prefix', 'strip', 'regex'], 'none');
-  const out = { type, value: '', regexFrom: '', regexTo: '' };
+  const out = { type, value: '', regexFrom: '', regexTo: '', glob: false };
 
   if (type === 'prefix' || type === 'strip') {
     let v = str(input.value, '');
@@ -618,13 +673,14 @@ function normRewrite(input) {
       out.value = v;
     }
   } else if (type === 'regex') {
-    const r = validateRegex(input.regexFrom);
+    const r = validateRegex(input.regexFrom, 'path');
     if (!r.ok) {
       errors.push(`重写正则: ${r.error}`);
     } else if (!r.value) {
       errors.push('重写模式 regex 需要填写 regexFrom');
     } else {
       out.regexFrom = r.value;
+      out.glob = !!r.glob;
     }
     out.regexTo = str(input.regexTo, '');
     // regexTo 支持 $1..$9 与 ${var}；校验 ${var} 变量名白名单
@@ -807,13 +863,14 @@ function normGlobalOnlySubFields(stage, raw, base) {
         const value = str(obj.value, '', 256).toLowerCase();
         if (!value) continue;
         // regex 必须可编译，否则回源时会静默不剥离，属于「配置看着生效实则没生效」的坑
+        // 复用 validateRegex 并传 header kind，使其支持通配符（cf-x-* 等）写法
         if (type === 'regex') {
-          try {
-            new RegExp(value);
-          } catch {
+          const r = validateRegex(value, 'header');
+          if (!r.ok) {
             errors.push(`strip 中存在非法正则: ${value}`);
             continue;
           }
+          value = r.value;
         } else if (type === 'exact' && !isValidHeaderName(value)) {
           errors.push(`strip(exact) 中存在非法头名: ${value}`);
           continue;
@@ -863,6 +920,52 @@ function normGlobalOnlySubFields(stage, raw, base) {
 }
 
 /**
+ * 全扁平落盘形态下的「单一方向转换」契约。
+ *
+ * 落盘约定：所有阶段的 stages[stage] 一律平铺该阶段「在 normRule 动作空间里
+ * 对应的字段」——对 terminate/origin 就是 forceHttps/.../hostHeader/... 直接平铺；
+ * 对 rewrite/cache/reqHeaders/... 则是该阶段唯一的动作子对象（action[stage]，其
+ * 自身已是 {type,value} 之类的平铺结构）整体作为 stages[stage]，不包第二层
+ * {[stage]:{...}}。换言之落盘形态无「嵌套片段」，与用户选择「全部平铺」一致。
+ *
+ * 注意 normRule 内部读取约定是「混合」的：嵌套型阶段读 action[stage]，扁平型阶段
+ * 读 action 顶层字段。故转换函数需按阶段类型映射，而非盲目展开：
+ *   - 嵌套型（rewrite/cache/reqHeaders/...）：stages[stage] 值 ⇄ action[stage]
+ *   - 扁平型（terminate/origin）：stages[stage] 平铺字段 ⇄ action 顶层字段集合
+ * 本对函数即封装这两种映射，前后端同构复用。
+ */
+
+// 判断某阶段是否为「嵌套型」：ownedFields 仅含唯一元素且该元素名 == stage 本身
+// （即 normRule 内部把整段动作挂在 action[stage] 子对象上，如 rewrite→action.rewrite）。
+function isNestedStage(stage) {
+  const f = ownedFieldsForStage(stage);
+  return f.size === 1 && f.has(stage);
+}
+
+/** 读：stages[stage] 的扁平落盘值 → normRule 期望的 action。 */
+export function stageValueToAction(stage, value) {
+  if (!isObj(value)) return {};
+  if (isNestedStage(stage)) return { [stage]: value };
+  return { ...value };
+}
+
+/** 写：normRule 产出的 action → stages[stage] 扁平落盘值（仅保留该阶段 owned 字段）。 */
+export function actionToStageValue(stage, action) {
+  const a = isObj(action) ? action : {};
+  // 嵌套型阶段：整段动作就挂在 action[stage] 子对象上，直接取该子对象作为落盘值
+  // （其子对象自身已是 {type,value} 之类的平铺结构，故 stages[stage] 仍为扁平）。
+  if (isNestedStage(stage)) return isObj(a[stage]) ? { ...a[stage] } : {};
+  // 扁平型阶段：该阶段字段分散在 action 顶层，逐一收集。
+  const fields = ownedFieldsForStage(stage);
+  /** @type {Record<string, any>} */
+  const out = {};
+  for (const k of fields) {
+    if (k in a) out[k] = a[k];
+  }
+  return out;
+}
+
+/**
  * 校验「全站通用（兜底）规则」的 stages 映射结构。
  *
  * 全站兜底规则是「阶段→默认动作」映射（见 store.getGlobalRules）：每个阶段恰好 1 条、
@@ -896,18 +999,19 @@ export function validateGlobalRulesStages(input, base) {
       if (base && isObj(base[stage])) out[stage] = deepClone(base[stage]);
       continue;
     }
-    // 复用 normRule：把单阶段值包成一个伪规则，规范化后裁剪回该阶段字段，
+    // 复用 normRule：把单阶段扁平值展开为伪规则的扁平 action，规范化后裁剪回该阶段字段，
     // 使全站兜底与站点规则共享同一套字段校验/裁剪逻辑，避免重复实现。
-    const r = normRule({ stage, action: { [stage]: v } }, 0);
+    // 关键修复：扁平阶段（terminate/origin）的值本已是 action 顶层字段，必须直接展开
+    // （stageValueToAction = {...v}），绝不能反向包成 {[stage]:v}（否则 a.forceHttps 读不到、
+    // 回落默认值，抹掉用户真实勾选值 → 勾选不落盘）。
+    const r = normRule({ stage, action: stageValueToAction(stage, v) }, 0);
     if (r.errors.length) {
       errors.push(...r.errors.map((e) => `全站规则[${stage}] ${e}`));
     }
     if (r.value) {
-      // 嵌套型阶段（rewrite/redirect/reqHeaders/respHeaders/cache）的裁剪结果在
-      // action[stage] 里；扁平型阶段（terminate/origin）的字段直接展开在 action 顶层，
-      // 故按其 stage 键是否出现在 action 上来区分取值方式。
-      const clipped = (stage in r.value.action) ? r.value.action[stage] : r.value.action;
-      if (clipped !== undefined) out[stage] = clipped;
+      // 现在 action 恒为顶层扁平字段（无嵌套片段），直接剥规则专属键整体作为 stages[stage]。
+      const clipped = actionToStageValue(stage, r.value.action);
+      if (Object.keys(clipped).length) out[stage] = clipped;
       else if (base && isObj(base[stage])) out[stage] = deepClone(base[stage]);
     } else if (base && isObj(base[stage])) {
       out[stage] = deepClone(base[stage]);
@@ -1137,7 +1241,7 @@ function normR2Origin(input, idx, label, errors) {
       errors.push(`${label} r2KeyMode='${keyMode}' 时必须填写 r2KeyPrefixRule`);
     }
   } else if (keyMode === 'regex') {
-    const r = validateRegex(input.r2KeyPrefixRule);
+    const r = validateRegex(input.r2KeyPrefixRule, 'path');
     if (!r.ok) errors.push(`${label} r2KeyPrefixRule 正则非法: ${r.error}`);
     else if (!r.value) errors.push(`${label} r2KeyMode='regex' 时必须填写 r2KeyPrefixRule`);
   }

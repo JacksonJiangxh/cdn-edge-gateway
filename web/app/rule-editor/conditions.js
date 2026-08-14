@@ -119,8 +119,8 @@ export   function conditionRow(cond, onRemove) {
       notPrefix: '例如填 /old 表示不以 /old 开头',
       suffix: '例如填 .php 表示以 .php 结尾',
       notSuffix: '例如填 .css 表示不以 .css 结尾',
-      regex: '例如 ^/old/(.*) 表示匹配 /old/ 下的路径；^(.*)$ 表示匹配整条路径（可用 $1 引用）',
-      notRegex: '例如 ^/admin 表示不匹配以 /admin 开头',
+      regex: '可写标准正则如 ^/old/(.*)，也可写通配符如 /img/*（* 代表任意内容，后台自动转正则）；^/img/ 表示以 /img/ 开头',
+      notRegex: '例如 ^/admin 表示不匹配以 /admin 开头；也可写通配符如 /secret/*',
       exists: '无需填值，只要这个头/参数存在就命中',
       notExists: '无需填值，只要这个头/参数不存在就命中',
     };

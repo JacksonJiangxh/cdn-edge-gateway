@@ -24,13 +24,11 @@ export   function headerEditor(initial) {
       return { set, remove };
     };
     const addKv = (wrap, k0, v0, withVal) => {
-      // 头值支持 ${var} 内置变量（与后端 headers.js 的 applyHeaderOps.set 接入 expandVars 对齐），
-      // 故在 value 输入框下方挂变量提示条——这是计划 overview 点名的 HeaderOps.set 覆盖字段。
+      // 头值支持 ${var} 内置变量（与后端 headers.js 的 applyHeaderOps.set 接入 expandVars 对齐）。
+      // 注意：变量提示条只挂一次在编辑器顶部（见 root），不在每行 value 下重复，
+      // 否则流量序列里每加一行 key-value 就重复一整段「支持动态变量」说明，极其冗杂。
       const valCell = withVal
-        ? el('div', { class: 'kv-val' }, [
-            el('input', { class: 'input hv', value: v0 || '', placeholder: 'value（可写 ${var} 变量）' }),
-            varHintBar(),
-          ])
+        ? el('input', { class: 'input hv', value: v0 || '', placeholder: 'value（可写 ${var} 变量）' })
         : el('span', { class: 'muted', text: '(移除)' });
       const row = el('div', { class: 'kv-row' }, [
         el('input', { class: 'input hk', value: k0 || '', placeholder: 'Header-Name' }),
@@ -44,6 +42,7 @@ export   function headerEditor(initial) {
     if (!setWrap.children.length) addKv(setWrap, '', '', true);
     if (!removeWrap.children.length) addKv(removeWrap, '', '', false);
     const root = el('div', { class: 'header-editor' }, [
+      varHintBar(),
       el('div', { class: 'kv-label' }, '新增 / 修改（把某个请求头设成指定值）：'),
       setWrap,
       el('button', { class: 'btn btn-sm', text: '+ 添加', onclick: () => addKv(setWrap, '', '', true) }),
@@ -207,6 +206,17 @@ export   function cacheEditor(c, opts) {
     return { root, read };
   }
 
+  // 前端通配符编译（与 src/config/schema.js 的 compileWildcard 保持一致）：
+  // 把 * 编译为等价正则，让本地预览所见即所得。kind 决定 * 的匹配范围，
+  // 路径类不匹配斜杠，其余匹配任意字符。返回 null 表示不含通配符（原样正则）。
+  function compileGlobLocal(src, kind) {
+    if (!src || !src.includes('*')) return null;
+    const star = kind === 'path' ? '([^/]*)' : '(.*)';
+    let escaped = src.replace(/\\/g, '\\\\');
+    escaped = escaped.replace(/[.+?(){}|[\]^$]/g, '\\$&');
+    return escaped.split('*').join(star);
+  }
+
   // 重写编辑器
   // 路径重写的纯前端预览（与 src/proxy/rewrite.js 的 applyRewrite 保持一致）
 export   function previewRewrite(pathname, rewrite) {
@@ -221,8 +231,26 @@ export   function previewRewrite(pathname, rewrite) {
         const v = rewrite.value || '';
         if (v && out.startsWith(v)) out = out.slice(v.length);
       } else if (type === 'regex') {
-        const re = new RegExp(rewrite.regexFrom || '', 'g');
-        out = out.replace(re, rewrite.regexTo ?? '');
+        // 支持通配符（*）语法：本地编译为等价正则后再预览，与后端行为对齐
+        const compiled = compileGlobLocal(rewrite.regexFrom, 'path') || (rewrite.regexFrom || '');
+        const re = new RegExp(compiled, 'g');
+        const to = rewrite.regexTo ?? '';
+        // glob 模式下 $0=首个*段、$1=完整输入、$2..=其余段，与后端 applyRewrite 的别名映射对齐。
+        // 用函数式 replace 一次性映射，避免字符串替换里 $& 的转义地狱。
+        if (rewrite.regexFrom && rewrite.regexFrom.includes('*')) {
+          out = out.replace(re, (...args) => {
+            const full = args[0];
+            const groups = args.slice(1, -2);
+            return to.replace(/\$(\d)\b/g, (_, d) => {
+              const n = Number(d);
+              if (n === 0) return groups[0] ?? '';
+              if (n === 1) return full;
+              return groups[n - 1] ?? '';
+            });
+          });
+        } else {
+          out = out.replace(re, to);
+        }
       }
     } catch { out = pathname; }
     if (!out.startsWith('/')) out = `/${out}`;
@@ -242,8 +270,8 @@ export
     typeSel.className = 'input';
     const desc = el('div', { class: 'rw-desc muted' });
     const valueInput = el('input', { class: 'input rw-val', value: r.value || '', placeholder: '例如 /api 或 /img' });
-    const fromInput = el('input', { class: 'input rw-from', value: r.regexFrom || '', placeholder: '例如 ^/old/(.*)' });
-    const toInput = el('input', { class: 'input rw-to', value: r.regexTo || '', placeholder: '例如 /new/$1' });
+    const fromInput = el('input', { class: 'input rw-from', value: r.regexFrom || '', placeholder: '例如 /img/* 或 ^/old/(.*)' });
+    const toInput = el('input', { class: 'input rw-to', value: r.regexTo || '', placeholder: '例如 /images/$0' });
     const fieldsBox = el('div', { class: 'rw-fields' });
     // 示例请求路径：仅用于本地预览，不写入规则配置（避免被误当成真实字段填写）
     const sampleInput = el('input', { class: 'input', value: '/img/photo.png', placeholder: '示例路径，仅用于预览，不会保存' });
@@ -260,10 +288,11 @@ export
           ? '示例：填 /api，则 /img/x.png → /api/img/x.png'
           : '示例：填 /img，则 /img/x.png → /x.png' }));
       } else if (t === 'regex') {
-        fieldsBox.appendChild(field('匹配规则（源正则）', fromInput));
-        fieldsBox.appendChild(field('替换为（目标，可用 $1 $2 引用分组）', toInput, '还支持 ${var} 变量，如 /new/$1?host=${host}', [varHintBar()]));
-        // 小白友好的常用简单示例：点一下即可套用（源正则 + 目标）
+        fieldsBox.appendChild(field('匹配规则（源）', fromInput, '不会写正则也没关系：直接写 /img/* 这种通配符，* 代表「后面任意内容」，后台会自动转成正则。'));
+        fieldsBox.appendChild(field('替换为（目标）', toInput, '用 $0 引用 * 匹配到的那段内容，$1 引用完整路径（如 /images/$0）。也支持标准 $1 $2 引用分组。', [varHintBar()]));
+        // 小白友好的常用简单示例：点一下即可套用（源 + 目标）
         const EXAMPLES = [
+          { from: '/img/*', to: '/images/$0', note: '通配符写法：/img/a/b.png → /images/a/b.png（最直观，推荐小白）' },
           { from: '^(.*)$', to: '$1', note: '整体原样透传（保留完整路径，仅做占位/后续拼接用）' },
           { from: '^/old/(.*)', to: '/new/$1', note: '目录迁移：/old/a.png → /new/a.png' },
           { from: '^(.*)\\.html$', to: '$1', note: '去掉 .html 后缀：/page.html → /page' },
