@@ -860,7 +860,7 @@ function normGlobalOnlySubFields(stage, raw, base) {
         // 兼容纯字符串写法：视为 exact
         const obj = isObj(item) ? item : { type: 'exact', value: item };
         const type = enumOf(obj.type, ['prefix', 'exact', 'regex'], 'exact');
-        const value = str(obj.value, '', 256).toLowerCase();
+        let value = str(obj.value, '', 256).toLowerCase();
         if (!value) continue;
         // regex 必须可编译，否则回源时会静默不剥离，属于「配置看着生效实则没生效」的坑
         // 复用 validateRegex 并传 header kind，使其支持通配符（cf-x-* 等）写法
