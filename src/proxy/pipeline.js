@@ -195,15 +195,27 @@ async function runPipeline(ctx) {
     const eff = deepClone(globalStages[stage] || {});
     const sr = matchRuleByStage(site, stage, ctx);
     if (sr && sr.action) {
+      // sr.action 的 key 即阶段名（如 'reqHeaders' / 'terminate'），其值是「该阶段的扁平对象」。
+      // 而 eff 已经是「全站同阶段扁平对象」（deepClone(globalStages[stage])）。
+      // 因此每个阶段都是把 eff（全站）与站点同阶段对象合并——这才是「全站默认 + 站点覆盖」的语义。
+      // 注意：绝不能写成 eff[k] = sr.action[k]——eff 本身已是该阶段对象，k 是它的「阶段名包装」，
+      // 嵌套赋值会把站点值错误地塞进 eff.terminate，而 eff 顶层全站字段（如 forceHttps）反而没被覆盖。
       for (const k of Object.keys(sr.action)) {
-        // HeaderOps 段（reqHeaders/respHeaders）：走 mergeStageHeaderOps 并集
-        // —— set 站点覆盖同名 key、全站保留其余；站点 remove 在合并期即从 set 剔除全站被点名 key。
-        if ((stage === 'reqHeaders' || stage === 'respHeaders') && isObj(eff[k]) && isObj(sr.action[k])) {
-          eff[k] = mergeStageHeaderOps(eff[k], sr.action[k]);
+        const siteStageObj = sr.action[k];
+        if (!siteStageObj || typeof siteStageObj !== 'object') continue;
+        if (stage === 'reqHeaders' || stage === 'respHeaders') {
+          // HeaderOps 段：整段并集（set 站点覆盖全站同名 key、全站其余保留；站点 remove 在合并期即从 set 剔除全站被点名 key）
+          const merged = mergeStageHeaderOps(eff, siteStageObj);
+          eff.set = merged.set;
+          eff.remove = merged.remove;
+          if (siteStageObj.strip !== undefined) eff.strip = siteStageObj.strip;
+          if (siteStageObj.forwardWhitelist !== undefined) eff.forwardWhitelist = siteStageObj.forwardWhitelist;
         } else {
-          // 标量段（rewrite/redirect/terminate/origin/cache 等）：逐同名字段覆盖（含子对象整段覆盖）；
+          // 标量段（rewrite/redirect/terminate/origin/cache 等）：整段逐字段覆盖（含子对象整段覆盖），
           // 未设字段沿用全站 eff 中的值。
-          eff[k] = deepClone(sr.action[k]);
+          for (const fk of Object.keys(siteStageObj)) {
+            eff[fk] = deepClone(siteStageObj[fk]);
+          }
         }
       }
       ctx.debug.ruleSource[stage] = 'site';
@@ -211,15 +223,13 @@ async function runPipeline(ctx) {
       // 该阶段站点规则集未命中 → 全站结果保留进入下一阶段。
       ctx.debug.ruleSource[stage] = 'global';
     }
-    // 各阶段 eff 的 key 互不重叠（已经 buildActionByStage 按阶段裁剪），直接聚合到扁平 effAction。
-    // 例外：HeaderOps 段（reqHeaders/respHeaders）以 {set, remove} 嵌套存放于 effAction[stage]，
-    // 否则两段的 set/remove 会在 effAction 顶层相互覆盖（后遍历者胜），导致 reqHeaders 伪装头丢失、
-    // 且下游 effAction.reqHeaders / respHeaders 取不到。站点规则的 remove 在合并期已从 set 剔除全站被点名 key。
-    if (stage === 'reqHeaders' || stage === 'respHeaders') {
-      effAction[stage] = eff;
-    } else {
-      Object.assign(effAction, eff);
-    }
+    // 每个阶段的结果都以「整段」形式挂到 effAction[stage]，与 STAGE_ORDER 一一对应：
+    //   effAction.rewrite / redirect / terminate / reqHeaders / origin / cache / respHeaders
+    // 这样下游（buildClientHeaders 读 effAction.cache、mergeRewrite 读 effAction.rewrite、
+    // applyTerminalActions 读 effAction.terminate / effAction.redirect 等）按统一「阶段名 → 整段」路径取值，
+    // 不会出现「标量段被展开到 effAction 顶层、而消费代码又整段读取」的错位。
+    // 注：HeaderOps 段（reqHeaders/respHeaders）同样是整段 {set, remove} 存放，与此一致。
+    effAction[stage] = eff;
   }
   const rule = { action: effAction, _source: ctx.debug.ruleId ? 'site' : 'global' };
   const ruleSource = rule._source;
@@ -330,7 +340,9 @@ async function runPipeline(ctx) {
   // 此时由项目多源站逻辑回源 + 响应头委托 EO 边缘缓存（路径 B），灵活度优先。
   const delegateEoEdge =
     ctx.caps?.eoEdgeCache &&
-    !effectiveHostHeader &&
+    // 仅当「无自定义回源 Host」（站点 defaultHostHeader 为 accel 且未指定 custom）时，
+    // 用同站 fetch 委托 EO 边缘节点缓存；任何自定义 Host 都必须走 failover 路径。
+    effectiveHostHeader?.mode === 'accel' && !effectiveHostHeader?.custom &&
     cacheKey &&
     safeIsCacheable(ctx, cacheKey, new Response(null, { status: 200 }), policy);
 
@@ -442,13 +454,17 @@ function applyTerminalActions(ctx, rule) {
   // 品牌响应头：统一从全站规则 stages.respHeaders.set 取得（支持站点规则 remove 覆盖）。
   const brand = getBrandHeaders(ctx, rule);
 
+  // 终止型动作按阶段整段取值（单轨化后 effAction 以 stage 为键整段存放）。
+  const term = a.terminate || {};
+  const redirect = a.redirect || {};
+
   // ---- 强制 HTTPS ----
   // 只在确实是 http 时跳转，避免已经是 https 还 301 造成无限循环
-  if (a.forceHttps && ctx.url.protocol === 'http:') {
+  if (term.forceHttps && ctx.url.protocol === 'http:') {
     const target = new URL(ctx.url.href);
     target.protocol = 'https:';
     return new Response(null, {
-      status: a.forceHttpsStatus || 301,
+      status: term.forceHttpsStatus || 301,
       headers: {
         Location: target.toString(),
         'Cache-Control': 'no-store',
@@ -458,8 +474,8 @@ function applyTerminalActions(ctx, rule) {
   }
 
   // ---- 自定义直接响应 ----
-  if (a.directResponse?.enabled) {
-    const dr = a.directResponse;
+  if (term.directResponse?.enabled) {
+    const dr = term.directResponse;
     // body 支持 ${var} 变量模板（对齐 EO/CF 响应体变量能力），
     // 如直接返回客户端 IP：body = "your ip: ${client_ip}"。
     const body = expandVars(dr.body || '', ctx, { label: 'directResponse.body', maxLen: 65536 });
@@ -474,11 +490,11 @@ function applyTerminalActions(ctx, rule) {
   }
 
   // ---- 访问 URL 重定向 ----
-  if (a.redirect?.enabled && a.redirect.target) {
-    const loc = buildRedirectTarget(ctx, rule, a.redirect);
+  if (redirect?.enabled && redirect.target) {
+    const loc = buildRedirectTarget(ctx, rule, redirect);
     if (loc) {
       return new Response(null, {
-        status: a.redirect.status || 302,
+        status: redirect.status || 302,
         headers: { Location: loc, 'Cache-Control': 'no-store', ...brand },
       });
     }

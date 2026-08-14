@@ -370,6 +370,17 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
   // 注意：原 settings.security.signedUrlParam / signedUrlTtl 已随不完善的签名 URL
   // 逻辑一并从全项目删除，不再出现在任何默认值中。
   security: Object.freeze({
+    // —— 全站安全校验阶段的可视化策略字段（与站点 security 同构）——
+    // 单轨化后这些原本隐藏在 settings 的双轨字段统一回到「全站通用规则 · 安全校验」
+    // 阶段。若此处缺失，ctx.__globalStages.security.uaBlacklist 等永远为 undefined，
+    // 全站安全策略（UA / IP 黑名单、Referer 防盗链）将形同虚设。
+    refererMode: 'off',
+    refererList: Object.freeze([]),
+    allowEmptyReferer: true,
+    uaBlacklist: Object.freeze([]),
+    ipBlacklist: Object.freeze([]),
+    ipWhitelist: Object.freeze([]),
+    botManagement: Object.freeze({ enabled: false, mode: 'blacklist', list: Object.freeze([]) }),
     // 全站默认限速（每分钟请求数）。站点自身的限速配置优先。
     rateLimitRpm: 600,
     // 限速计数槽在 KV / 内存中的存活秒数

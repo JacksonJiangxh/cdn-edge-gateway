@@ -99,11 +99,13 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
     // 规则未设（engine=''/scheme=''/port=0）则回退源站自身值，保持向后兼容。
     // 用临时副本，绝不写入 pool 里的原始 origin —— 否则会污染熔断统计与后续请求。
     const ra = rule?.action || {};
-    const effScheme = ra.scheme || selected.scheme || 'https';
-    const effPort = Number(ra.port) > 0 ? Number(ra.port)
+    // origin 段整段存放于 ra.origin；reqHeaders / rewrite 为各自独立阶段整段。
+    const ruleOrigin = ra.origin || {};
+    const effScheme = ruleOrigin.scheme || selected.scheme || 'https';
+    const effPort = Number(ruleOrigin.port) > 0 ? Number(ruleOrigin.port)
       : Number(selected.port) > 0 ? Number(selected.port)
       : (effScheme === 'http' ? 80 : 443);
-    const effEngine = ra.engine || selected.engine || 'fetch';
+    const effEngine = ruleOrigin.engine || selected.engine || 'fetch';
     const origin = {
       ...selected,
       scheme: effScheme,
@@ -121,16 +123,16 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
     // 源站级打底，规则级覆盖
     const mergedRewrite = mergeRewrite(origin.rewrite, ra.rewrite);
     const mergedReqHeaders = mergeHeaderOps(origin.reqHeaders, ra.reqHeaders);
-    const mergedClientIpHeader = mergeClientIpHeader(origin.clientIpHeader, ra.clientIpHeader);
+    const mergedClientIpHeader = mergeClientIpHeader(origin.clientIpHeader, ruleOrigin.clientIpHeader);
 
     // 超时：规则级 > 源站级 > 池级
     const originTimeout = Number(origin.originTimeoutMs) || 0;
-    const ruleTimeout = Number(ra.originTimeoutMs) || 0;
+    const ruleTimeout = Number(ruleOrigin.originTimeoutMs) || 0;
     const timeoutMs = ruleTimeout > 0 ? ruleTimeout : originTimeout > 0 ? originTimeout : poolTimeout;
 
     // 跟随重定向：规则级优先，否则源站级
-    const followRedirect = ra.followRedirect !== undefined
-      ? ra.followRedirect === true
+    const followRedirect = ruleOrigin.followRedirect !== undefined
+      ? ruleOrigin.followRedirect === true
       : origin.followRedirect === true;
 
     // 构造临时规则对象以复用 buildOriginUrl

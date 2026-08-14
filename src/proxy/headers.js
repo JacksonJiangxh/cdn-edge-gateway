@@ -62,11 +62,15 @@ async function getGlobalStage(ctx, stage) {
  * @returns {Headers} 回源请求头
  */
 export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) {
-  // 透传白名单 / 剥离规则来自「修改请求头」阶段的全站默认（stages.reqHeaders），
-  // 用户可在「全站通用规则 · 修改请求头」里可视化调整。
-  const rh = await getGlobalStage(ctx, 'reqHeaders');
-  const forwardWhitelist = new Set((rh.forwardWhitelist || []).map((h) => String(h).toLowerCase()));
-  const stripRules = normalizeStripRules(rh.strip);
+  // 透传白名单 / 剥离规则来自「修改请求头」阶段（全站默认 + 站点命中规则已合并到 ops）。
+  // ops 即 pipeline ④ 合并出的 effAction.reqHeaders（含全站兜底与站点覆盖/追加）。
+  // 站点规则可在「流量序列 · 修改请求头」里可视化收窄或扩充 strip / forwardWhitelist，
+  // 因此这里以 ops 为准：站点未设则回落全站 getGlobalStage 的值，站点设了则与全站合并/覆盖。
+  const gRh = await getGlobalStage(ctx, 'reqHeaders');
+  const opsForward = ops && Array.isArray(ops.forwardWhitelist) ? ops.forwardWhitelist : gRh.forwardWhitelist;
+  const opsStrip = ops && Array.isArray(ops.strip) ? ops.strip : gRh.strip;
+  const forwardWhitelist = new Set((opsForward || []).map((h) => String(h).toLowerCase()));
+  const stripRules = normalizeStripRules(opsStrip);
   const out = new Headers();
 
   // ---- 1. 白名单透传 ----

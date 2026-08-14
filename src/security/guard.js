@@ -24,6 +24,36 @@ import { checkRateLimit } from './ratelimit.js';
 import { DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
 
 /**
+ * 合并「全站安全校验兜底 → 站点安全配置」：站点字段覆盖同名全站字段，
+ * 站点未设的字段沿用全站兜底。
+ *
+ * 关键纠偏：站点 security 在管理面是「整份默认空对象」（每个字段都带值，
+ * 名单默认是空数组）。若站点整份覆盖全站，全站配好的 uaBlacklist / ipBlacklist
+ * 等会被站点的空名单「清空」——这与单轨化「全站默认 + 站点覆盖」的直觉相悖。
+ * 因此数组类字段仅在「站点数组非空」时才覆盖全站（空数组视为「站点未自定义该名单」，
+ * 继承全站）；标量字段站点给了值（含 false / 0 / ''）即覆盖。
+ *
+ * 仅做一层浅合并——security 内部结构扁平，无嵌套对象需要递归。
+ * @param {Object} gSec 全站兜底 security（stages.security）
+ * @param {Object} siteSec 站点 security（覆盖层）
+ * @returns {Object} 合并后的 security 配置
+ */
+function mergeSecurity(gSec, siteSec) {
+  const out = { ...(gSec || {}) };
+  for (const k of Object.keys(siteSec || {})) {
+    const sv = siteSec[k];
+    if (sv === undefined) continue;
+    // 数组字段：仅当站点非空时才覆盖全站；空数组表示「站点未自定义」，继承全站名单
+    if (Array.isArray(sv)) {
+      if (sv.length > 0) out[k] = sv;
+    } else {
+      out[k] = sv;
+    }
+  }
+  return out;
+}
+
+/**
  * 构造统一的拦截响应。
  *
  * 拦截体 / 缓存控制来自「错误处理」阶段的全站默认（stages.error），
@@ -272,7 +302,12 @@ function refererBlocked(request, sec) {
  */
 export async function checkSecurity(ctx, site) {
   try {
-    const sec = site && site.security;
+    // 单轨化：security 是「全站通用规则 · 安全校验」阶段的默认 action，
+    // 站点 security 对其做逐字段覆盖。全站兜底必须参与校验，否则全站安全策略
+    // （uaBlacklist / ipBlacklist / rateLimit / referer 等）形同虚设。
+    const gSec = (ctx && ctx.__globalStages && ctx.__globalStages.security) || DEFAULT_GLOBAL_RULES.security;
+    const siteSec = (site && site.security) || {};
+    const sec = mergeSecurity(gSec, siteSec);
     if (!sec || typeof sec !== 'object') return null;
 
     const request = ctx.request;
