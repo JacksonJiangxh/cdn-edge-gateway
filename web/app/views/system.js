@@ -37,6 +37,14 @@ export   async function renderSystem() {
       wrap.appendChild(el('div', { class: 'banner warn' },
         info.limitations.map((l) => el('div', {}, '⚠ ' + l.message))));
     }
+    // 静态烘焙配置（方案 A）：本节点为只读边缘执行壳，配置来自主节点导出 + 构建发布。
+    if (info && info.bakedMode) {
+      wrap.appendChild(el('div', { class: 'banner info' }, [
+        el('div', {}, '📦 当前运行于「静态烘焙配置」模式（只读）'),
+        el('div', { class: 'muted' }, '配置由主节点（如 Cloudflare 部署）「系统设置 → 导出配置」后随代码构建发布，本节点不连接任何 KV / Redis，所有配置修改均被拒绝。'),
+        el('div', { class: 'muted' }, '如需修改配置：在主节点修改 → 导出 JSON → 重新构建部署（npm run build -- --bake <文件>）。'),
+      ]));
+    }
     wrap.appendChild(table(['项目', '状态'], rows));
 
     // ---- KV 后端 / Redis(Webdis) 状态与连通性测试 ----
@@ -44,11 +52,13 @@ export   async function renderSystem() {
     const kvBackend = (info && info.kvBackend) || (caps.hasKV ? 'native' : 'none');
     const redisConfigured = !!(info && info.redisConfigured);
     const kvStateText =
-      kvBackend === 'redis'
-        ? '自部署 Redis（Webdis）✅'
-        : kvBackend === 'native'
-          ? '平台 KV（CDN_KV / KV）✅'
-          : '无（配置无法持久化）❌';
+      kvBackend === 'baked'
+        ? '静态烘焙配置（只读，不依赖 KV）📦'
+        : kvBackend === 'redis'
+          ? '自部署 Redis（Webdis）✅'
+          : kvBackend === 'native'
+            ? '平台 KV（CDN_KV / KV）✅'
+            : '无（配置无法持久化）❌';
     const kvCard = el('div', { class: 'card-block' }, [
       el('h4', {}, 'KV 存储后端'),
       el('div', { class: 'form-stack' }, [
@@ -58,6 +68,7 @@ export   async function renderSystem() {
       el('div', { class: 'section-head' }, [
         el('button', {
           class: 'btn', text: '测试连通性（读写回环）',
+          disabled: !!(info && info.bakedMode),
           onclick: async (ev) => {
             const btn = ev.target;
             btn.disabled = true; btn.textContent = '测试中…';

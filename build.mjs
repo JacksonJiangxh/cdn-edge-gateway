@@ -51,6 +51,11 @@ const WATCH = args.includes('--watch');
 // 关键护栏：CI 环境（process.env.CI 为真）下忽略 --skip-verify，强制跑全部测试，
 // 杜绝「绕过测试带病部署」。本地调试可用 --skip-verify 加速，但部署链路不应使用。
 const SKIP_VERIFY = args.includes('--skip-verify') && !process.env.CI;
+// 烘焙配置（方案 A：静态部署 / 不依赖 KV）。--bake <file> 接收一份「系统设置 → 导出配置」
+// 下载的 JSON 镜像（结构见 buildConfigMirror 的 payload），将其转写为
+// src/config/baked.generated.js 供 ESA 在 STATIC_CONFIG=1 模式下直接读取，完全不依赖任何 KV。
+const BAKE_ARG_INDEX = args.indexOf('--bake');
+const BAKE_FILE = BAKE_ARG_INDEX >= 0 ? args[BAKE_ARG_INDEX + 1] : null;
 
 // ---------------------------------------------------------------------------
 // 工具
@@ -432,6 +437,79 @@ const buildOptions = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// 步骤 -1.5：烘焙配置生成（方案 A：静态部署 / 不依赖 KV）
+// ---------------------------------------------------------------------------
+
+const BAKED_OUT = join(ROOT, 'src/config/baked.generated.js');
+
+/**
+ * 把「系统设置 → 导出配置」下载的 JSON 镜像转写为 src/config/baked.generated.js。
+ * 该文件 git 不追踪（.gitignore 已排除），由部署专属配置生成，供 ESA 在
+ * STATIC_CONFIG=1 模式下直接 import 读取，实现「完全不依赖 KV」。
+ *
+ * 安全约定：导出的镜像本就剥离了 passwordHash / passwordSalt（见 buildConfigMirror），
+ * 因此烘焙产物不含任何管理员凭据，ESA 端天然无法修改配置，只有执行副本。
+ *
+ * @param {string|null} file  传入 --bake <file> 的 JSON 路径；为 null 时跳过（不烘焙）。
+ */
+async function bakeConfigFile(file) {
+  const raw = await readFile(file, 'utf8');
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`烘焙失败：--bake 指定的文件不是合法 JSON（${file}）。\n  请用「系统设置 → 导出配置」下载的文件，或此前已生成的 baked 文件。`);
+  }
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('烘焙失败：配置镜像格式异常（顶层应为对象）。');
+  }
+
+  // 兼容两种来源：① 管理后台导出的 payload（含 global/globalRules/sites/pools）；
+  // ② 已生成的 baked 文件（含 BAKED_CONFIG 对象）。统一归一为归一结构。
+  const norm = payload.BAKED_CONFIG ? payload.BAKED_CONFIG : payload;
+  const cleaned = {
+    version: typeof norm.version === 'number' ? norm.version : 1,
+    exportedAt: norm.exportedAt ?? null,
+    global: norm.global ?? null,
+    globalRules: norm.globalRules ?? null,
+    sites: Array.isArray(norm.sites) ? norm.sites : [],
+    pools: Array.isArray(norm.pools) ? norm.pools : [],
+  };
+
+  const body =
+    `/**\n` +
+    ` * 自动生成（方案 A 静态烘焙配置）。请勿手改；由构建脚本写入。\n` +
+    ` * 来源：主节点「系统设置 → 导出配置」生成的镜像。git 不追踪。\n` +
+    ` * 更新配置 = 重新导出 → 重新构建部署（ESA 为只读边缘执行壳）。\n` +
+    ` */\n\n` +
+    `export const BAKED_CONFIG = ${JSON.stringify(cleaned, null, 2)};\n`;
+
+  await writeFile(BAKED_OUT, body, 'utf8');
+  const kb = (Buffer.byteLength(body, 'utf8') / 1024).toFixed(1);
+  console.log(`  ✓ 已烘焙配置 → src/config/baked.generated.js (${kb} KB，含 ${cleaned.sites.length} 站点 / ${cleaned.pools.length} 连接池)`);
+}
+
+/**
+ * 主流程钩子：若指定了 --bake 则生成烘焙文件；否则跳过（保留已有 / 默认空配置）。
+ * 空配置（无站点）也合法——ESA 端会回退到内置默认，仅功能受限。
+ */
+async function maybeBakeConfig() {
+  if (!BAKE_FILE) {
+    // 未指定 --bake：若已存在烘焙文件则提示沿用，否则保持默认空配置（仍可被 ESA 部署为只读壳）。
+    if (existsSync(BAKED_OUT)) {
+      console.log('  · 沿用既有 src/config/baked.generated.js（未指定 --bake）');
+    } else {
+      console.log('  · 未指定 --bake，ESA 将使用默认空配置（内置默认值）；如需完整配置请加 --bake <导出文件>');
+    }
+    return;
+  }
+  if (!existsSync(BAKE_FILE)) {
+    throw new Error(`烘焙失败：--bake 指定的文件不存在（${BAKE_FILE}）。`);
+  }
+  await bakeConfigFile(BAKE_FILE);
+}
+
 async function buildWorker() {
   console.log('▸ [4/5] 打包 Worker...');
   const result = await esbuild.build(buildOptions);
@@ -678,6 +756,11 @@ async function main() {
   // 取代「手写 gitignored 入口文件」，从根上消除非标准导出/误转义导致的构建期语法错误。
   await generateEntries();
 
+  // 步骤 -1.5：烘焙配置生成（方案 A：静态部署 / 不依赖 KV）。
+  // 接收「系统设置 → 导出配置」下载的 JSON 镜像，转写为 src/config/baked.generated.js，
+  // 供 ESA 在 STATIC_CONFIG=1 模式下直接 import 读取，完全不依赖任何 KV / Redis。
+  await maybeBakeConfig();
+
   // 步骤 0：前端阶段字典单一来源（取代旧的文本切片一致性断言）
   await buildStageGen();
 
@@ -694,8 +777,6 @@ async function main() {
 
   // 步骤 4：打包 worker
   await buildWorker();
-
-  // 步骤 5：专项语法校验 + 产物自检 + 端到端测试（构建质量闸门）
   await syntaxChecks(inlineHtml, frontendJs);
   if (!SKIP_VERIFY) {
     // 产物自检：文件完整性 / 入口导出可用 / 平台口径一致性（失败直接 throw）
@@ -731,7 +812,8 @@ async function main() {
   console.log('  Cloudflare Pages   → npx wrangler pages deploy .');
   console.log('  EdgeOne Makers     → npx edgeone makers deploy . -n <project> -t <token>');
   console.log('  阿里云 ESA Pages    → npm install esa-cli -g && esa-cli login && npm run build && esa-cli commit && esa-cli deploy');
-  console.log('                        （ESA 的 EdgeKV 收费无免费额度，持久化需先在 ESA 控制台设 REDIS_URL 指向自建 Webdis/Redis）');
+  console.log('                        （ESA 默认走「静态烘焙配置」：构建时加 --bake <导出配置.json> 即可，完全不依赖 KV；');
+  console.log('                         若改用外置 Redis，需在 ESA 控制台把 STATIC_CONFIG 设为 0 并设 REDIS_URL 指向自建 Webdis/Redis）');
 }
 
 async function runWatch() {

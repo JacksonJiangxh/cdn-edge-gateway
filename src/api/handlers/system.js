@@ -19,16 +19,21 @@ import {
 } from '../../config/store.js';
 import { validateSite, validatePool } from '../../config/schema.js';
 import { getCacheStats } from '../../platform/cache.js';
+import { isBakedMode } from '../../config/store.js';
 
 /** GET /system/info */
 export async function info(ctx, global) {
   const g = global || (await getGlobal(ctx));
+  const baked = isBakedMode(ctx);
   return ok({
     version: CONFIG_VERSION,
     platform: ctx.caps.platform,
     caps: ctx.caps,
-    kvBackend: ctx.caps.kvBackend || 'none',
+    kvBackend: baked ? 'baked' : ctx.caps.kvBackend || 'none',
     redisConfigured: !!(ctx.env && (ctx.env.REDIS_URL || ctx.env.REDIS_URL_KV)),
+    bakedMode: baked,
+    // 配置来源形态：baked=静态烘焙（只读，来自主节点导出）、kv=运行时 KV/Redis、defaults=无配置回退。
+    configMode: baked ? 'baked' : ctx.caps.kvBackend === 'none' ? 'defaults' : 'kv',
     statsDriver: g?.statsDriver || 'none',
     statsEnabled: !!g?.statsEnabled,
     // 边缘缓存命中率。注意：仅统计当前 isolate，实例回收后归零，

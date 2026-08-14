@@ -22,6 +22,7 @@
  */
 
 import { getKV } from '../platform/kv.js';
+import { BAKED_CONFIG } from './baked.generated.js';
 import {
   DEFAULT_GLOBAL,
   DEFAULT_SITE_INDEX,
@@ -378,9 +379,55 @@ export function invalidateMemCache() {
 // ----------------------------------------------------------------------------
 
 /**
+ * 是否处于「烘焙配置」模式（方案 A：静态部署 / 不依赖 KV）。
+ *
+ * 触发条件：环境变量 STATIC_CONFIG === '1'（ESA 端的 resolveEnv 会默认带上），
+ * 且烘焙配置文件确实存在（BAKED_CONFIG 已 import）。在此模式下所有读取直接
+ * 返回烘焙对象、所有写入被拒绝——ESA 成为纯只读的边缘执行壳。
+ *
+ * 该模式通过环境变量开关而非运行时探测，是为了让「是否使用烘焙配置」成为部署
+ * 形态决策（构建/控制台设置），而非依赖 KV 可用性自动推断，避免与主节点行为混淆。
+ *
+ * @param {import('../contracts.js').Ctx} ctx
+ * @returns {boolean}
+ */
+export function isBakedMode(ctx) {
+  return !!(ctx?.env && ctx.env.STATIC_CONFIG === '1');
+}
+
+/**
+ * 烘焙模式下「写入被拒」的统一错误。烘焙配置来自主节点导出的镜像，ESA 只有
+ * 执行副本、没有管理权限，任何写操作都必须明确失败而非静默落到不存在的 KV。
+ */
+function throwBakedReadOnly(ctx) {
+  const platform = ctx?.caps?.platform;
+  const where = platform === 'aliyun-esa' || platform === 'esa' ? '阿里云 ESA' : '当前（烘焙配置）';
+  throw new Error(
+    `${where}运行在静态烘焙配置模式下，配置只读，无法在此节点修改。` +
+      '请在主节点（如 Cloudflare 部署）修改配置后，重新导出并在这里重新构建部署。',
+  );
+}
+
+/**
+ * 在烘焙模式下取出对应 key 的静态对象（供 getXxx 直接返回，跳过 KV 与 L1）。
+ * 不存在则返回 null，由调用方回退到内置默认。
+ * @param {'global'|'globalRules'|'sites'|'pools'} key
+ * @returns {any}
+ */
+function bakedGet(key) {
+  const v = BAKED_CONFIG?.[key];
+  if (v === undefined) return null;
+  return v;
+}
+
+/**
  * 获取 KV，不存在时抛出面向用户的明确错误（仅用于写路径）
  */
 function requireKV(ctx) {
+  if (isBakedMode(ctx)) {
+    // 烘焙模式下 KV 必然不可用，直接报「只读」，不再往下走 REDIS_URL 提示分支。
+    throwBakedReadOnly(ctx);
+  }
   const kv = getKV(ctx.env);
   if (!kv) {
     const platform = ctx?.caps?.platform;
@@ -426,6 +473,22 @@ async function writeJson(ctx, key, value) {
  * @returns {Promise<import('../contracts.js').GlobalConfig>}
  */
 export async function getGlobal(ctx) {
+  // 烘焙模式：直接返回烤制的 global（合并内置默认补齐缺失字段），跳过 KV / 版本号 / L1。
+  if (isBakedMode(ctx)) {
+    const raw = bakedGet('global');
+    const cfg = raw ? validateGlobal(raw).value : cloneGlobal();
+    // adminPath 同样允许 env 兜底（见下方非烘焙分支的同款逻辑）。
+    const envPath = ctx.env?.ADMIN_PATH;
+    if (
+      typeof envPath === 'string' &&
+      /^[a-zA-Z0-9_/-]+$/.test(envPath) &&
+      (cfg.adminPath === '__panel' || cfg.adminPath == null || cfg.adminPath === '')
+    ) {
+      cfg.adminPath = envPath.replace(/^\/+/, '').replace(/\/+$/, '') || cfg.adminPath;
+    }
+    return cfg;
+  }
+
   // —— ProxySQL 式版本号失效 ——
   // 命中 L1 前先比对版本号：本地缓存的版本号与 KV 当前版本号一致，才信任 L1；
   // 不一致（说明有 isolate 改过配置）则丢弃 L1、重拉 KV。版本号本地再缓存 2s，
@@ -511,6 +574,7 @@ let _cachedGlobalVersion = 0;
  * @param {import('../contracts.js').GlobalConfig} global
  */
 export async function putGlobal(ctx, global) {
+  if (isBakedMode(ctx)) throwBakedReadOnly(ctx);
   const res = validateGlobal(global);
   // 校验会剥离未知字段，但密码哈希必须原样保留
   const value = {
@@ -544,6 +608,19 @@ export async function putGlobal(ctx, global) {
 async function getSiteIndex(ctx) {
   const cached = memGet(ctx, K_SITE_INDEX);
   if (cached) return cached;
+
+  // 烘焙模式：索引由烤制的 sites 列表现场构建（一次即可，结果仍进 L1 缓存）。
+  if (isBakedMode(ctx)) {
+    const sites = bakedGet('sites') || [];
+    const idx = {
+      hosts: sites.filter((s) => s && typeof s.host === 'string').map((s) => String(s.host).toLowerCase()),
+      wildcards: sites
+        .filter((s) => s && typeof s.host === 'string' && String(s.host).startsWith('*.'))
+        .map((s) => ({ pattern: String(s.host).toLowerCase(), host: String(s.host).toLowerCase() })),
+    };
+    memSet(K_SITE_INDEX, idx);
+    return idx;
+  }
 
   const raw = await readJson(ctx, K_SITE_INDEX);
   const idx =
@@ -600,7 +677,16 @@ export async function getSite(ctx, host, options = {}) {
   if (cached !== undefined) return cached;
 
   // ---- 1. 精确匹配 ----
-  let site = await readJson(ctx, kSite(h));
+  let site;
+  // 烘焙模式：不读 KV，直接在内置 sites 里按 host 查（host 已小写化）。
+  if (isBakedMode(ctx)) {
+    const sites = bakedGet('sites') || [];
+    site = sites.find((s) => s && typeof s.host === 'string' && String(s.host).toLowerCase() === h) || null;
+  }
+
+  if (!site && !isBakedMode(ctx)) {
+    site = await readJson(ctx, kSite(h));
+  }
 
   // ---- 2. 泛域名回退 ----
   if (!site && !options.exact) {
@@ -611,7 +697,15 @@ export async function getSite(ctx, host, options = {}) {
     );
     for (const w of sorted) {
       if (w?.pattern && wildcardMatch(w.pattern, h)) {
-        site = await readJson(ctx, kSite(w.pattern));
+        if (isBakedMode(ctx)) {
+          const sites = bakedGet('sites') || [];
+          site =
+            sites.find(
+              (s) => s && typeof s.host === 'string' && String(s.host).toLowerCase() === w.pattern.toLowerCase(),
+            ) || null;
+        } else {
+          site = await readJson(ctx, kSite(w.pattern));
+        }
         break;
       }
     }
@@ -629,6 +723,7 @@ export async function getSite(ctx, host, options = {}) {
  * @param {import('../contracts.js').Site} site
  */
 export async function putSite(ctx, site) {
+  if (isBakedMode(ctx)) throwBakedReadOnly(ctx);
   const host = String(site.host).toLowerCase();
 
   // 【写入顺序】先索引、后数据。
@@ -667,6 +762,7 @@ export async function putSite(ctx, site) {
  * @param {string} host
  */
 export async function deleteSite(ctx, host) {
+  if (isBakedMode(ctx)) throwBakedReadOnly(ctx);
   const h = String(host).toLowerCase();
   const kv = requireKV(ctx);
 
@@ -795,6 +891,14 @@ async function putPoolIndex(ctx, idx) {
 export async function getPool(ctx, poolId) {
   if (!poolId || typeof poolId !== 'string') return null;
   const key = kPool(poolId);
+
+  // 烘焙模式：直接从烤制的 pools 数组查（poolId 已小写化）。
+  if (isBakedMode(ctx)) {
+    const pools = bakedGet('pools') || [];
+    const pool = pools.find((p) => p && typeof p.id === 'string' && String(p.id).toLowerCase() === poolId) || null;
+    memSet(key, pool);
+    return pool;
+  }
 
   const cached = memGet(ctx, key);
   if (cached !== undefined) return cached;
@@ -1064,6 +1168,20 @@ function foldLegacySettingsIntoStages(stages, legacySettings) {
 const ALL_GLOBAL_STAGE_KEYS = [...STAGE_ORDER, ...GLOBAL_ONLY_STAGE_ORDER];
 
 export async function getGlobalRules(ctx) {
+  // 烘焙模式：直接返回烤制的 globalRules（合并内置默认补齐缺失阶段）。
+  if (isBakedMode(ctx)) {
+    const raw = bakedGet('globalRules');
+    const merged = cloneGlobalRules();
+    if (raw && raw.stages) {
+      // 复用校验器做规范化（缺失阶段由 base 补全），与运行时读 KV 等价。
+      const res = validateGlobalRulesStages({ stages: raw.stages }, merged);
+      if (res.ok) return res.value.stages;
+      // 校验失败则回退到内置默认，保证函数永不崩。
+      return merged;
+    }
+    return merged;
+  }
+
   const data = await readJson(ctx, K_GLOBAL_RULES);
 
   /** 落盘 + 失效内存缓存 + bump 版本（失败只告警，不影响返回值） */
@@ -1135,6 +1253,7 @@ export async function getGlobalRules(ctx) {
  * @param {Record<string, any>} stages 键为 STAGE_ORDER + GLOBAL_ONLY_STAGE_ORDER，值为各阶段默认 action
  */
 export async function putGlobalRules(ctx, stages) {
+  if (isBakedMode(ctx)) throwBakedReadOnly(ctx);
   // 经统一校验入口规范化：缺失阶段由内置 base 补全。
   // 与人工在管理面经 PUT /rules/global 完全等价，禁止裸写 KV。
   const res = validateGlobalRulesStages(
@@ -1181,6 +1300,8 @@ export async function putGlobalRules(ctx, stages) {
  * @returns {Promise<SyncToken|null>} 有效的校验码记录；不存在或已过期返回 null
  */
 export async function getSyncToken(ctx) {
+  // 烘焙模式：节点只读、无管理权限，等同于「未开放同步端口」，直接返回 null。
+  if (isBakedMode(ctx)) return null;
   const rec = await readJson(ctx, K_SYNC_TOKEN);
   if (!rec || typeof rec !== 'object' || typeof rec.code !== 'string' || rec.code === '') {
     return null;
@@ -1232,6 +1353,7 @@ export async function setSyncToken(ctx, code, ttlSec = SYNC_TOKEN_TTL_SEC) {
  * @throws {Error} 删除失败时抛出——关闭失败必须让调用方感知，否则接口会意外持续开放
  */
 export async function delSyncToken(ctx) {
+  if (isBakedMode(ctx)) throwBakedReadOnly(ctx);
   const kv = getKV(ctx.env);
   if (!kv) return; // 无 KV 时本就无从开放，视为已关闭
   await kv.delete(K_SYNC_TOKEN);

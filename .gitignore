@@ -10,6 +10,10 @@
 # 构建产物（可选，若不想提交）
 _worker.js
 
+# 烘焙配置产物（方案 A：静态部署 / 完全不依赖 KV）。
+# 由「管理后台导出配置」得到的镜像经构建脚本生成，含部署专属配置，不纳入版本管理。
+src/config/baked.generated.js
+
 # 构建期自动生成的文件（由 build.mjs 生成，勿手动编辑/提交）
 src/ui.gen.js
 web/_stage.gen.js

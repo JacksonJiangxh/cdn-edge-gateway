@@ -20,9 +20,15 @@
 // === 平台约束（来自官方文档 + 成本策略）===
 //   - 无 caches.default，边缘缓存走响应头委托（cache.js 已含 EO 同构分支）。
 //   - 每请求子请求上限 = 4（数据面稳态仅 1 个回源 fetch，安全）。
-//   - 持久化：ESA 的 EdgeKV 按量收费且无免费额度，本项目在 ESA 上**统一禁用厂商
-//     KV**，强制使用外置 REDIS_URL（自建 Webdis/Redis，见 kv.js 的 ESA 分支）。
-//     → 部署 ESA 前必须在控制台设 REDIS_URL，否则配置无法保存（见 store.js requireKV）。
+//   - 持久化：
+//     本项目为 ESA 提供两种持久化形态，二选一：
+//     (A) 静态烘焙配置（默认）：resolveEnv 默认注入 STATIC_CONFIG=1，运行时
+//         直接读取源码内置的 src/config/baked.generated.js（由主节点「导出配置」
+//         后构建生成、git 不追踪），完全不依赖任何 KV / Redis。ESA 成为纯只读的
+//         边缘执行壳，配置变更 = 重新导出 + 重新构建部署。
+//     (B) 外置 KV：若显式在控制台把 STATIC_CONFIG 设为 '0'（或 'false'），则回退到
+//         强制使用外置 REDIS_URL（自建 Webdis/Redis，见 kv.js 的 ESA 分支）。
+//         → 部署前必须在控制台设 REDIS_URL，否则配置无法保存（见 store.js requireKV）。
 //
 // 参考：阿里云 ESA 帮助文档「PAGES构建和路由指南」「使用边缘函数查看KV中的KEY值」
 
@@ -44,6 +50,18 @@ function resolveEnv(passedEnv) {
   // 用规范值 esa（旧版用 aliyun-esa，caps.js 现已归一，但保持规范写法）。
   if (!base.CLOUD_PLATFORM) {
     base = { ...base, CLOUD_PLATFORM: 'esa' };
+  }
+  // 默认开启「静态烘焙配置」模式（方案 A）：ESA 作为扩展边缘，配置来自主节点
+  // 导出的镜像（源码内置、git 不追踪）。可被控制台显式设为 '0'/'false' 退回外置
+  // REDIS_URL 模式。
+  const wantBake =
+    base.STATIC_CONFIG === undefined ||
+    base.STATIC_CONFIG === null ||
+    base.STATIC_CONFIG === '' ||
+    base.STATIC_CONFIG === '1' ||
+    base.STATIC_CONFIG === true;
+  if (wantBake) {
+    base = { ...base, STATIC_CONFIG: '1' };
   }
   return base;
 }

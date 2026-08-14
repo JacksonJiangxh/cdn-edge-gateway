@@ -14,7 +14,9 @@
 - 业务逻辑（`src/`）**零改动**；
 - 入口已双导出（`src/entry.js` 同时 `export default { fetch }` 与 `export function onRequest`），ESA 入口薄壳 `esa/index.js` 直接转发；
 - KV 持久化：阿里云 ESA 的 **EdgeKV 按量收费且无免费额度**，本项目在 ESA 上**统一禁用厂商 KV**，
-  持久化强制走外置 **REDIS_URL Webdis**（`src/platform/redis-kv.js` 已内置适配器），
+  提供两种替代形态（详见 §3 / §3.5）：
+  - **方案 A 静态烘焙（默认推荐）**：`STATIC_CONFIG=1` 时配置烤进代码、随包发布，**完全不依赖任何 KV/Redis**；
+  - **方案 B 外置 Redis**：`STATIC_CONFIG=0` 时走外置 **REDIS_URL Webdis**（`src/platform/redis-kv.js` 已内置适配器）。
   `getKV` 在 ESA 平台直接跳过 EdgeKV 分支。
 - 边缘缓存已含 **响应头委托分支**（`src/platform/cache.js` 的 EO 同构逻辑），ESA 无 `caches.default` 时复用。
 
@@ -93,6 +95,74 @@ dist/public/      # 构建产物：管理面静态资源（被 ESA 静态托管�
 
 ---
 
+## 3.5 静态烘焙配置（方案 A：完全不依赖 KV ✅ 推荐扩展边缘）
+
+> 适用场景：**ESA 仅作为「扩展边缘」**——主配置已在另一个节点（Cloudflare / EdgeOne Pages 等）配好并运行，
+> 你希望 ESA **不用改任何配置、不设任何 KV、直接跑代码**即可成为配置的执行副本。
+
+### 核心思路
+
+把主节点「系统设置 → 导出配置」下载的 JSON 镜像，**在构建期烤进代码**（`src/config/baked.generated.js`），
+ESA 运行时直接 `import` 这份内置对象，**跳过所有 KV / Redis 读取**。配置变更 = 重新导出 → 重新构建部署。
+
+- 这是「扩展边缘」最干净的形态：**ESA 是纯只读的边缘执行壳，零运行时持久化依赖**；
+- 导出的镜像本就**剥离 `passwordHash` / `passwordSalt`**（`buildConfigMirror` 已做），
+  因此烘焙产物不含任何管理员凭据——ESA 端天然**没有修改配置的能力**，只有执行副本；
+- 通过环境变量 `STATIC_CONFIG=1` 开关（ESA 入口 `esa/index.js` 默认就会注入，控制台可显式设为 `0` 退回 §3 外置 Redis 模式）。
+
+### 数据流对比
+
+| 维度 | 方案 A（静态烘焙） | 方案 B（外置 Redis，§3） |
+|------|------------------|------------------------|
+| 持久化来源 | 代码内置 `baked.generated.js` | 外置 Webdis/Redis |
+| 控制台必填项 | 无（连 `REDIS_URL` 都不用设） | `REDIS_URL`（必填） |
+| 配置变更方式 | 重新导出 + 重新构建部署 | 管理面直接改，实时生效 |
+| 管理后台写入 | 拒绝（只读，明确报错） | 允许 |
+| 子请求预算 | 0 个 KV fetch（最省） | 每次 KV 读 = 1 个 fetch（见 §4） |
+| 安全面 | 无凭据、无外连 | 需自建带鉴权 Redis |
+
+### 操作步骤
+
+**① 主节点导出配置**
+在主节点（如 Cloudflare 部署）管理后台「系统设置 → 导出配置」下载 `edgecdn-config.json`
+（该文件即是 `buildConfigMirror` 的 payload：`{version, exportedAt, global, globalRules, sites, pools}`）。
+
+**② 构建时烘焙**
+把文件放到仓库（该文件 `git` 不追踪，见 `src/config/baked.generated.js` 头部注释），构建时加 `--bake`：
+
+```bash
+# 用导出的文件生成 src/config/baked.generated.js（ESM 形式，随代码打包进 _worker.js）
+npm run build -- --bake edgecdn-config.json
+# 等价：node build.mjs --bake edgecdn-config.json
+
+# 不带 --bake 时：若已存在烘焙文件则沿用，否则 ESA 使用内置默认空配置（仅功能受限的只读壳）
+npm run build
+```
+
+**③ 部署 ESA（与方式 A/B/C/D 任意一种相同，但控制台【无需】设 REDIS_URL）**
+```bash
+esa-cli commit
+esa-cli deploy --name project_name --assets .
+```
+`esa/index.js` 的 `resolveEnv` 会默认注入 `STATIC_CONFIG=1`，运行时自动走烘焙读取分支。
+
+> 若要在同一份代码里退回外置 Redis 模式：在 ESA 控制台把 `STATIC_CONFIG` 设为 `0`（或 `false`），
+> 即恢复 §3 行为（此时仍需设 `REDIS_URL`）。两种形态靠同一环境变量切换，不冲突。
+
+### 管理后台的只读提示
+
+ESA 以烘焙模式运行时，管理后台「系统设置」页会自动显示只读横幅：
+「📦 当前运行于静态烘焙配置模式（只读）」，并提示「修改配置需回主节点 → 导出 → 重新构建部署」；
+同步/连通性测试等写操作会被禁用或明确报错，不会静默失败。
+
+### 何时选 A vs B
+
+- **选 A**：ESA 是主节点的镜像/边缘扩展、配置很少变、你不想维护 Redis、追求零持久化依赖——
+  这正是你最初设想的「CF 配好、ESA 直接跑」形态。
+- **选 B**：ESA 本身就是独立管理节点、配置需频繁在线改动、且有现成 Redis 基础设施。
+
+---
+
 ## 4. ⚠️ 32 个子请求上限专项（Cache 与 fetch 共享）
 
 ESA 限制**每个请求最多发 32 个子请求**，且 **Cache 操作与 `fetch` 共享同一预算**（`cacheSubreqLimit=32`）。本项目在 ESA 上持久化走 **REDIS_URL**
@@ -139,7 +209,9 @@ ESA 限制**每个请求最多发 32 个子请求**，且 **Cache 操作与 `fet
 1. fork/推本仓库到 GitHub 或 CNB；
 2. ESA 控制台 → 边缘计算和 AI → 函数和 Pages → 新建 Pages → **连接 GitHub/CNB 仓库（根目录）**；
 3. ESA 自动读取 `esa.jsonc`（`entry` / `assets` / `buildCommand`）并构建；
-4. **控制台「环境变量」必须设置 `REDIS_URL`**（§3：ESA 禁用厂商 KV，持久化唯一来源）；
+4. **控制台「环境变量」设置持久化来源二选一**：
+   - 采用**静态烘焙（推荐）**：无需设 `REDIS_URL`，`STATIC_CONFIG` 默认即为 `1`（见 §3.5）；
+   - 采用**外置 Redis**：设 `REDIS_URL`（§3：ESA 禁用厂商 KV，持久化唯一来源）。
 5. 部署后绑定域名或走 ESA 提供的测试域名。
 > 此后每次 push 主分支 ESA 会自动重新构建部署，无需手动操作。与方式 C 的流水线按钮二选一，不要同时开自动部署以免冲突。
 
@@ -169,7 +241,8 @@ CNB「部署 ESA Pages」按钮（`.cnb.yml` 的 `web_trigger_deploy_esa_pages`�
 3. 流水线执行 `npm ci → npm run check → npm run build`；
 4. 注入 `ESA_ACCESS_KEY_ID`/`ESA_ACCESS_KEY_SECRET` 后 `esa-cli login`（非交互）→
    `esa-cli commit` → `esa-cli deploy --name <项目> --assets .`；
-5. **部署前请先在 ESA 控制台「环境变量」设好 `REDIS_URL`**（CI 无法替你设运行期变量）。
+5. **部署前请先决定持久化形态**：采用静态烘焙（§3.5）则无需 `REDIS_URL`；
+   采用外置 Redis（§3）则须先在 ESA 控制台「环境变量」设好 `REDIS_URL`（CI 无法替你设运行期变量）。
 > 若 `esa-cli` 某版本不支持纯环境变量登录，可在本机用方式 B 的 `esa-cli login` 手动发布，
 > 或改用方式 A 的控制台连接仓库自动部署。
 
@@ -194,7 +267,8 @@ npm run deploy:esa:cli staging "hotfix" # 可指定环境/说明
 
 > 与方式 A/B/C 的区别：方式 D 走 `esa-cli`（需 `esa-cli login` 交互），更适合脚本化 / 多环境
 > （preview/staging/production）切换与**本地手动**调用，但仍**不碰 OSS**（由阿里云后台上传）。
-> 部署后仍需在 ESA 控制台**绑定域名/路由并设 `REDIS_URL`**。
+> 部署后仍需在 ESA 控制台**绑定域名/路由**；若采用外置 Redis（§3）则还须设 `REDIS_URL`，
+> 采用静态烘焙（§3.5）则无需。`STATIC_CONFIG` 默认 `1`。
 
 无论 A/B/C/D，部署目录都是**仓库根目录**（含 `esa.jsonc` + `dist/public`），不是只传 `dist/public`。
 
@@ -219,7 +293,8 @@ npm run deploy:esa:cli staging "hotfix" # 可指定环境/说明
 
 > 与方式 A/B/C 的区别：方式 D 走 `esa-cli` 而非控制台/GitHub 连接，更适合脚本化 / 多环境
 > （preview/staging/production）切换与 CI 调用，但仍**不碰 OSS**（由阿里云后台上传）。
-> 部署后仍需在 ESA 控制台**绑定域名/路由并设 `REDIS_URL`**。
+> 部署后仍需在 ESA 控制台**绑定域名/路由**；若采用外置 Redis（§3）则还须设 `REDIS_URL`，
+> 采用静态烘焙（§3.5）则无需。`STATIC_CONFIG` 默认 `1`。
 
 ---
 
