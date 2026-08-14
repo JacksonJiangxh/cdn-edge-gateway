@@ -173,6 +173,10 @@ async function buildFrontendJs() {
     // 前端无 Node 依赖，无需 external；如有则在此声明
     legalComments: 'none',
     sourcemap: false,
+    // 关闭 tree-shaking：原版 app.js 为顶层 IIFE 立即执行，闭包内全部代码均保留；
+    // 拆为 ESM 子模块后，规则编辑器等经 _OP_BUILDERS 注册表「动态调用」，静态分析
+    // 无法判定其可达，会被摇掉导致运行时功能缺失。关闭后行为与原 IIFE 版完全一致。
+    treeShaking: false,
   });
   const text = result.outputFiles?.[0]?.text;
   if (!text) throw new Error('前端 bundle 未产出内容');
