@@ -3267,142 +3267,16 @@ import { el, clear, $ } from './dom.js';
     ]);
     wrap.appendChild(cfgCard);
 
-    // ---- 调试响应头配置（settings.debug，原写死的 X-Origin-Id / X-Cache 等头名收编为可配置可关）----
-    // 走全站规则 settings 段（与后端 DEFAULT_GLOBAL_SETTINGS.debug 对齐），非顶层 GlobalConfig。
-    const dbgEnabled = el('input', { type: 'checkbox' });
-    const dbgOriginId = el('input', { class: 'input', placeholder: 'X-Origin-Id' });
-    const dbgCache = el('input', { class: 'input', placeholder: 'X-Cache' });
-    const dbgRuleId = el('input', { class: 'input', placeholder: 'X-Rule-Id' });
-    const dbgRetry = el('input', { class: 'input', placeholder: 'X-Retry-Count' });
-    const dbgEdge = el('input', { class: 'input', placeholder: 'X-Edge-Time' });
-    const dbgEnabledField = field('启用调试响应头', dbgEnabled, '开启后，响应会带上源站 ID / 命中状态 / 命中规则 / 重试次数 / 边缘耗时等调试头，便于排查。生产环境可关闭。');
-    const syncDbg = () => {
-      [dbgOriginId, dbgCache, dbgRuleId, dbgRetry, dbgEdge].forEach((i) => { i.disabled = !dbgEnabled.checked; });
-    };
-    dbgEnabled.addEventListener('change', syncDbg);
-    syncDbg();
-
-    const fillDbg = (s) => {
-      const d = (s && s.debug) || {};
-      const h = d.headers || {};
-      dbgEnabled.checked = d.enabled !== false;
-      dbgOriginId.value = h.originId || '';
-      dbgCache.value = h.cache || '';
-      dbgRuleId.value = h.ruleId || '';
-      dbgRetry.value = h.retryCount || '';
-      dbgEdge.value = h.edgeTime || '';
-      syncDbg();
-    };
-    const dbgCard = el('div', { class: 'card-block' }, [
-      el('h4', {}, '调试响应头'),
-      el('div', { class: 'form-stack' }, [
-        dbgEnabledField,
-        field('源站 ID 头名', dbgOriginId, '留空=沿用默认 X-Origin-Id'),
-        field('缓存命中 头名', dbgCache, '留空=沿用默认 X-Cache'),
-        field('命中规则 头名', dbgRuleId, '留空=沿用默认 X-Rule-Id'),
-        field('重试次数 头名', dbgRetry, '留空=沿用默认 X-Retry-Count'),
-        field('边缘耗时 头名', dbgEdge, '留空=沿用默认 X-Edge-Time'),
-      ]),
-      el('div', { class: 'section-head' }, [
-        el('button', {
-          class: 'btn btn-primary', text: '保存调试头配置',
-          onclick: async () => {
-            const payload = {
-              settings: {
-                debug: {
-                  enabled: dbgEnabled.checked,
-                  headers: {
-                    originId: dbgOriginId.value.trim(),
-                    cache: dbgCache.value.trim(),
-                    ruleId: dbgRuleId.value.trim(),
-                    retryCount: dbgRetry.value.trim(),
-                    edgeTime: dbgEdge.value.trim(),
-                  },
-                },
-              },
-            };
-            try {
-              const saved = await API.rules.saveGlobal(payload);
-              fillDbg((saved && saved.settings) || {});
-              toast('已保存调试头配置', 'ok');
-              await loadAll();
-            } catch (e) { toast(e.message, 'err'); }
-          },
-        }),
-      ]),
-    ]);
-    wrap.appendChild(dbgCard);
-
-    // ---- 全站品牌与请求特征（settings.respHeaders / settings.request / settings.disguise 单一真相源）----
-    // 这些字段本是后端写死的常量（品牌头 PRODUCT_NAME、伪装页 'nginx'、客户端 IP 回源头优先级列表），
-    // 现已收编为「全站规则的全局默认参数」可视化可改：
-    //   - respHeaders.serverName / viaName：Server / Via 响应头品牌名；全站规则 respHeaders.set 的
-    //     ${product_name} / 1.1 ${product_name} 运行时经它求值（改这里即改全站品牌，无需改代码）。
-    //   - request.clientIpHeaders：提取真实客户端 IP 的回源头优先级（逗号分隔），多平台兼容可调。
-    //   - disguise.staticServerName：伪装页 / 反代伪装响应的 Server 指纹（默认 nginx）。
-    // 走全站规则 settings 段（与后端 DEFAULT_GLOBAL_SETTINGS 对齐），后端 saveGlobal 自动 merge 其他子段。
-    const brandServer = el('input', { class: 'input', placeholder: 'EdgeGateway' });
-    const brandVia = el('input', { class: 'input', placeholder: 'EdgeGateway' });
-    const reqClientIpHeaders = el('input', { class: 'input', placeholder: 'cf-connecting-ip,x-real-ip,x-forwarded-for' });
-    const disguiseServer = el('input', { class: 'input', placeholder: 'nginx' });
-    const fillBrand = (s) => {
-      const rh = (s && s.respHeaders) || {};
-      const req = (s && s.request) || {};
-      const dg = (s && s.disguise) || {};
-      brandServer.value = rh.serverName || '';
-      brandVia.value = rh.viaName || '';
-      reqClientIpHeaders.value = Array.isArray(req.clientIpHeaders) ? req.clientIpHeaders.join(',') : (req.clientIpHeaders || '');
-      disguiseServer.value = dg.staticServerName || '';
-    };
-    const brandCard = el('div', { class: 'card-block' }, [
-      el('h4', {}, '全站品牌与请求特征'),
-      el('div', { class: 'form-stack' }, [
-        field('响应 Server 品牌名', brandServer, '全站规则 ${product_name} 引用此值；留空=沿用默认。改这里即改全局 Server 头，无需改代码。'),
-        field('响应 Via 品牌名', brandVia, '全站规则 Via 头品牌名；留空=沿用默认。'),
-        field('真实客户端 IP 回源头（逗号分隔）', reqClientIpHeaders, '提取客户端真实 IP 的回源头优先级，按逗号顺序尝试；多平台兼容可调（CF 系 cf-connecting-ip / Nginx 系 x-real-ip / 通用 x-forwarded-for）。'),
-        field('伪装页 Server 指纹', disguiseServer, '全站兜底伪装页与反代伪装的 Server 头；默认 nginx。'),
-      ]),
-      el('div', { class: 'section-head' }, [
-        el('button', {
-          class: 'btn btn-primary', text: '保存品牌与请求特征',
-          onclick: async () => {
-            const clientIpHeaders = reqClientIpHeaders.value
-              .split(',')
-              .map((x) => x.trim().toLowerCase())
-              .filter(Boolean);
-            const payload = {
-              settings: {
-                respHeaders: {
-                  serverName: brandServer.value.trim(),
-                  viaName: brandVia.value.trim(),
-                },
-                request: { clientIpHeaders },
-                disguise: { staticServerName: disguiseServer.value.trim() },
-              },
-            };
-            try {
-              const saved = await API.rules.saveGlobal(payload);
-              fillBrand((saved && saved.settings) || {});
-              toast('已保存全站品牌与请求特征', 'ok');
-              await loadAll();
-            } catch (e) { toast(e.message, 'err'); }
-          },
-        }),
-      ]),
-    ]);
-    wrap.appendChild(brandCard);
+    // 注：原「调试响应头」「全站品牌与请求特征」两张卡片对应的 settings 字段
+    // （settings.debug.*、settings.respHeaders.serverName/viaName、
+    // settings.request.clientIpHeaders、settings.disguise.staticServerName）
+    // 已下沉为规则引擎变量/阶段动作与代码常量，不再作为可配 settings，故此处移除对应表单。
+    // 详见 docs/12-request-flow.md「全局配置收敛」一节。
 
     // 载入现有全局配置填入表单（此时操作的是节点引用，无需已挂载到 document）
     try {
       fillGlobalForm(await API.config.get());
     } catch (e) { /* 配置尚未初始化时忽略 */ }
-
-    // 载入调试响应头配置（settings.debug 段）
-    try {
-      const g = await API.rules.global().catch(() => null);
-      fillDbg((g && g.settings) || {});
-      fillBrand((g && g.settings) || {});
-    } catch (e) { /* 全站规则尚未初始化时忽略 */ }
 
     wrap.appendChild(el('div', { class: 'section-head' }, [
       el('button', { class: 'btn', text: '导出配置', onclick: exportConfig }),

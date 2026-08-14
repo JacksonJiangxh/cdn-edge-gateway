@@ -12,6 +12,7 @@
 
 import { getSite } from '../config/store.js';
 import { TARGETS_NEED_KEY, DEFAULT_GLOBAL_SETTINGS } from '../config/defaults.js';
+import { pickClientIp } from '../config/vars.js';
 
 /**
  * ISO 国家码 → 大区映射（常用即可，未知返回 ''）。
@@ -84,19 +85,13 @@ export function buildMatchSubject(ctx) {
   const ext = dot > 0 && dot !== seg.length - 1 ? seg.slice(dot + 1).toLowerCase() : '';
   const headers = ctx.request.headers;
 
-  // 请求接收层默认参数：取自全站兜底 settings.request（可被用户在管理面板调整，
-  // 无需改代码）。clientIpHeaders 为提取真实客户端 IP 的回源头优先级；
-  // defaultProtocol 为协议回落值（当 url.protocol 缺失时）。
+  // 请求接收层默认参数：协议回落值取自全站兜底 settings.request.defaultProtocol。
+  // 真实客户端 IP 由引擎内部 pickClientIp（CLIENT_IP_HEADERS 优先级，见 vars.js）提取，
+  // 支持 RFC7239 forwarded / 带端口 cloudfront-viewer-address 解析；
+  // 提取结果以 ${client_ip} 暴露给规则引擎，不再作为可配 settings。
   const reqSettings =
     (ctx.__globalSettings && ctx.__globalSettings.request) || DEFAULT_GLOBAL_SETTINGS.request;
-  // 提取真实客户端 IP 的回源头优先级统一取自全站兜底 settings.request.clientIpHeaders
-  // （单一真相源，可视化可改），不再写死裸字面量列表。
-  const clientIpHeaders = reqSettings.clientIpHeaders || DEFAULT_GLOBAL_SETTINGS.request.clientIpHeaders;
-  let clientIp = '';
-  for (const h of clientIpHeaders) {
-    const v = headers.get(h);
-    if (v) { clientIp = v; break; }
-  }
+  const clientIp = pickClientIp(headers);
   const protocol = (url.protocol || `${reqSettings.defaultProtocol}:`).replace(':', '');
   const clientCountry = (headers.get('cf-ipcountry') || '').toUpperCase();
   const userAgent = headers.get('user-agent') || '';
@@ -296,6 +291,45 @@ export function matchRule(site, ctx) {
   for (const rule of sorted) {
     if (isRuleMatched(rule, subject)) {
       ctx.debug.ruleId = rule.id;
+      return rule;
+    }
+  }
+  return null;
+}
+
+/**
+ * 在站点规则中「按阶段独立」匹配：先按 rule.stage 过滤出属于该阶段的规则，
+ * 再在过滤后的子集内按 priority 降序命中第一条。
+ *
+ * 这是「逐阶段先全站后站点」合并模型的站点侧匹配入口：每个阶段在站点规则
+ * 集里各自匹配，某阶段有命中规则就用它的该阶段字段覆盖全站，没命中则全站
+ * 结果保留进入下一步（详见 docs/12-request-flow.md ④.2）。
+ *
+ * @param {Object} site 站点配置
+ * @param {string} stage STAGE_ORDER 中的阶段 key
+ * @param {import('../contracts.js').Ctx} ctx 请求上下文
+ * @returns {Object|null} 命中的 Rule（其 action 已按 rule.stage 裁剪，仅含该阶段字段），未命中返回 null
+ */
+export function matchRuleByStage(site, stage, ctx) {
+  const rules = Array.isArray(site?.rules) ? site.rules : [];
+  if (rules.length === 0) return null;
+
+  const subject = buildMatchSubject(ctx);
+
+  // 仅在该阶段规则子集内匹配；enabled !== false 跳过。
+  const sorted = rules
+    .filter((r) => r && r.enabled !== false && r.stage === stage)
+    .slice()
+    .sort((a, b) => (Number(b.priority) || 0) - (Number(a.priority) || 0));
+
+  for (const rule of sorted) {
+    if (isRuleMatched(rule, subject)) {
+      // 按阶段记录命中来源，便于逐阶段 debug（向后兼容全局 ruleId）。
+      if (!ctx.debug.ruleSource) ctx.debug.ruleSource = {};
+      if (!ctx.debug.ruleIds) ctx.debug.ruleIds = {};
+      ctx.debug.ruleSource[stage] = 'site';
+      ctx.debug.ruleIds[stage] = rule.id;
+      if (!ctx.debug.ruleId) ctx.debug.ruleId = rule.id;
       return rule;
     }
   }

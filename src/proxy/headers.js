@@ -12,8 +12,8 @@
  */
 
 import { getGlobalSettings } from '../config/store.js';
-import { DEFAULT_GLOBAL_SETTINGS, DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
-import { expandVars } from '../config/vars.js';
+import { DEFAULT_GLOBAL_SETTINGS, DEFAULT_GLOBAL_RULES, DEBUG_HEADER_NAMES } from '../config/defaults.js';
+import { expandVars, pickClientIp } from '../config/vars.js';
 
 /**
  * 获取全站兜底「全局默认参数」（settings 段）。
@@ -63,14 +63,9 @@ export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) 
   }
 
   // ---- 2. 兜底伪装头 ----
-  // 注意用 set 而非 append：如果客户端已带 Accept/Accept-Language，这里统一覆盖，
-  // 使回源特征稳定，避免因客户端差异产生过多缓存变体。
-  // 这些值来自全站兜底默认回源请求头（DEFAULT_GLOBAL_RULES.stages.reqHeaders.set），
-  // 经由 effRule 并入 ops 后由下方步骤 4 注入；此处仅作兜底，确保即使 ops 缺失也有合理默认。
-  // 兜底值同样经 expandVars 处理，使全站兜底 reqHeaders.set 支持 ${var} 写法。
-  for (const [key, value] of Object.entries(getDefaultReqHeaderSet(S))) {
-    out.set(key, expandVars(value, ctx, { label: `reqHeader:${key}` }));
-  }
+  // 全站兜底默认回源请求头（DEFAULT_GLOBAL_RULES.stages.reqHeaders.set）已由
+  // pipeline ④ 合并块并入 effAction.reqHeaders，并经下方步骤 4 的 applyHeaderOps 统一注入，
+  // 此处不再从 settings/常量二次注入，避免「规则序列内 + 引擎外」两处写入同字段造成错乱。
   // Accept-Encoding 交给运行时自行协商，不强行覆盖客户端的值；
   // 若客户端未提供则给一个通用值
   if (!out.has('accept-encoding')) {
@@ -100,8 +95,9 @@ export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) 
   // 若放在之前会被无条件剥离。此处是「用户显式开启」的合法透出，
   // 语义上优先于兜底策略。
   if (clientIpHeader?.enabled) {
-    const ip =
-      ctx.request.headers.get('cf-connecting-ip') || ctx.request.headers.get('x-real-ip') || '';
+    // 复用 pickClientIp 统一提取（含 forwarded / cloudfront-viewer-address 解析），
+    // 避免把 forwarded 整串原样透出。
+    const ip = pickClientIp(ctx.request.headers);
     if (ip) out.set(clientIpHeader.name || 'X-Forwarded-For', ip);
   }
 
@@ -120,29 +116,6 @@ export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) 
 }
 
 /**
- * 取全站兜底默认回源请求头 set 映射。
- * 默认来自 DEFAULT_GLOBAL_RULES.stages.reqHeaders.set（已在 pipeline 中并入规则 ops），
- * 但此处额外提供一份静态兜底，保证即使 ops 未传入也能注入合理的伪装浏览器头。
- * @param {Record<string, any>} S settings
- * @returns {Record<string, string>}
- */
-function getDefaultReqHeaderSet(S) {
-  // 兜底默认值统一引用全站兜底「回源请求头」单一真相源
-  // (DEFAULT_GLOBAL_RULES.stages.reqHeaders.set)，与步骤 4 注入的 ops 同源，
-  // 不再写死浏览器 UA 字符串——可视化即可修改，且支持 ${var} 写法。
-  // 若全站兜底为空（极端配置），则回退到内置冻结常量，保证至少有一个合理 UA。
-  const base = DEFAULT_GLOBAL_RULES.reqHeaders?.set || {};
-  if (Object.keys(base).length > 0) return base;
-  return {
-    'User-Agent':
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    Accept:
-      'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-  };
-}
-
-/**
  * 构造返回给客户端的响应头。
  *
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
@@ -153,7 +126,6 @@ function getDefaultReqHeaderSet(S) {
  */
 export async function buildClientHeaders(ctx, originResp, policy, ops) {
   const S = await getSettings(ctx);
-  const rph = S.respHeaders || DEFAULT_GLOBAL_SETTINGS.respHeaders;
   const noCacheStatus = new Set((S.cache?.noCacheStatus) || DEFAULT_GLOBAL_SETTINGS.cache.noCacheStatus);
   // 三个缓存头 TTL 回落值：优先用 policy（已含全站兜底默认 edgeTtl/browserTtl），
   // 再回落到 settings.respHeaders 无关，这里 edgeTtl/browserTtl 来自 policy 默认。
@@ -163,10 +135,9 @@ export async function buildClientHeaders(ctx, originResp, policy, ops) {
 
   // ---- 1. 删除源站的安全策略类响应头 ----
   // 这些头会阻止图片/字体被第三方页面引用，作为 CDN 必须清理。
-  // 剥离列表来自全站兜底 settings.respHeaders.stripDefaults（可被用户调整）。
-  for (const h of rph.stripDefaults || []) {
-    out.delete(h);
-  }
+  // 剥离列表（含 CSP/X-Frame-Options/Set-Cookie 等）统一来自全站规则 stages.respHeaders.remove，
+  // 由下方步骤 3 的 applyHeaderOps(ops) 统一执行（站点规则 remove 可在此追加/覆盖），
+  // 不再由 settings.respHeaders.stripDefaults 在引擎外二次剥离，避免两处处理同字段。
 
   // ---- 2. Cache-Control / CDN-Cache-Control（分层缓存铁律）----
   // 路径：浏览器 → 最前端 CDN(CF/EO) → 本项目(Worker/Makers) → 源站。
@@ -237,12 +208,14 @@ export async function buildClientHeaders(ctx, originResp, policy, ops) {
   applyHeaderOps(out, ops, ctx, null);
 
   // ---- 4. 调试头 ----
-  // 头名与开关来自全站兜底 settings.debug（可在管理面板改名/关闭，默认保持原行为）。
+  // 调试头已下沉为「全站规则 + 引擎常量」，不再作为可配 settings：
+  //   - 头名统一取自 DEBUG_HEADER_NAMES（默认值见下方常量，与旧 settings.debug 行为一致）；
+  //   - 默认始终开启；若想关闭，在站点规则 stages.respHeaders.remove 中移除对应头即可
+  //     （如 remove:['x-cache','x-rule-id','x-origin-id','x-retry-count','x-edge-time']）。
   // 调试字段的「值」仍来自 ctx.debug（运行时注入的 ruleId/cache/originId/retries）。
-  const dbg = S.debug || DEFAULT_GLOBAL_SETTINGS.debug;
-  if (dbg && dbg.enabled) {
+  {
     const d = ctx.debug || {};
-    const names = dbg.headers || DEFAULT_GLOBAL_SETTINGS.debug.headers;
+    const names = DEBUG_HEADER_NAMES;
     setIfPresent(out, names.cache, d.cache);
     // 仅下发源站内部 id（X-Origin-Id），用于标识「本次回源选中的上游源」调试信息。
     // 注意：绝不下发 X-Origin-Addr —— 其值为 origin.addr:port（完整域名/IP+端口），
@@ -254,12 +227,10 @@ export async function buildClientHeaders(ctx, originResp, policy, ops) {
     setIfPresent(out, names.edgeTime, `${Date.now() - ctx.startTime}ms`);
   }
 
-  // ---- 5. 品牌响应头（标识本网关，覆盖上游平台/源站的 Server/Via 泄露）----
-  // Server：本项目作为独立 CDN 网关的身份标识（来自全站兜底 settings.respHeaders.serverName）。
-  // Via：RFC 7230 要求的代理链标识，格式为「协议/版本 别名」（settings.respHeaders.viaName）。
-  // 二者均可在 settings 中调整，实现「改品牌名无需改代码」。
-  out.set('Server', rph.serverName);
-  out.set('Via', rph.viaName);
+  // ---- 5. 品牌响应头（Server/Via）----
+  // 不再于引擎外从 settings 写死注入。品牌头已作为全站规则 stages.respHeaders.set 的
+  // server/via 项，由上方步骤 3 的 applyHeaderOps(ops) 统一经 ${product_name} 展开注入，
+  // 站点规则 respHeaders.remove:['server','via'] 也能在此真正生效（单一真相源）。
 
   return out;
 }
@@ -299,6 +270,41 @@ function applyHeaderOps(headers, ops, ctx, env) {
       headers.set(key, finalValue);
     }
   }
+}
+
+/**
+ * 取得品牌响应头（Server / Via）。
+ *
+ * 品牌头已作为「流量序列默认操作」的一部分收纳进全站规则 stages.respHeaders.set，
+ * 此处统一从此处取得，避免引擎外另写死一份造成两处处理同字段的错乱。
+ * 尊重站点规则 remove：若合并后的规则动作 respHeaders.set 中已无 server/via
+ * （被站点 remove 删除），则返回的对象不含该键，调用方据此不注入。
+ *
+ * 取值优先级：
+ *   1. 合并后的规则动作 rule.action.respHeaders.set.server|via（支持 ${product_name} 展开）
+ *   2. 全站兜底 DEFAULT_GLOBAL_RULES.respHeaders.set（保证缺规则时仍有品牌标识）
+ *
+ * @param {import('../contracts.js').Ctx} ctx 上下文（用于 ${var} 展开）
+ * @param {Object} [rule] 合并后的规则（含 action.respHeaders.set）
+ * @returns {{Server?:string, Via?:string}}
+ */
+export function getBrandHeaders(ctx, rule) {
+  const set =
+    (rule && rule.action && rule.action.respHeaders && rule.action.respHeaders.set) || {};
+  const fallbackSet = (DEFAULT_GLOBAL_RULES.respHeaders && DEFAULT_GLOBAL_RULES.respHeaders.set) || {};
+
+  const resolve = (key, fbKey) => {
+    const raw = set[key] !== undefined ? set[key] : fallbackSet[fbKey || key];
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    return expandVars(String(raw), ctx, { label: `brand:${key}` });
+  };
+
+  const out = {};
+  const server = resolve('server');
+  if (server !== undefined) out.Server = server;
+  const via = resolve('via');
+  if (via !== undefined) out.Via = via;
+  return out;
 }
 
 /**

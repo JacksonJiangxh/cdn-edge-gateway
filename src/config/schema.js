@@ -73,7 +73,7 @@ export const STAGE_OP_FIELDS = {
 };
 
 /** 返回某阶段「允许落库的 action 字段名」集合（仅含阶段专属 op 字段，不含全局字段）。 */
-function ownedFieldsForStage(stage) {
+export function ownedFieldsForStage(stage) {
   const ops = (STAGE_OPS[stage] && STAGE_OPS[stage].allowedOps) || [];
   const set = new Set();
   for (const op of ops) {
@@ -844,11 +844,10 @@ export function validateGlobalSettings(input) {
   const src = isObj(input) ? input : {};
 
   // request：请求接收层
+  // 注意：clientIpHeaders 已下沉为 vars.js 引擎内部常量（CLIENT_IP_HEADERS），
+  // 不再作为可配 settings；此处仅保留 defaultProtocol。
   const req = src.request && isObj(src.request) ? src.request : {};
   out.request = {
-    clientIpHeaders: Array.isArray(req.clientIpHeaders) && req.clientIpHeaders.length
-      ? req.clientIpHeaders.map((x) => str(x, '')).filter(Boolean)
-      : [...def.request.clientIpHeaders],
     defaultProtocol: enumOf(req.defaultProtocol, ['http', 'https'], def.request.defaultProtocol),
   };
 
@@ -878,11 +877,11 @@ export function validateGlobalSettings(input) {
     proxyUserAgent: str(rh.proxyUserAgent, def.reqHeaders.proxyUserAgent, 512),
   };
 
-  // respHeaders：品牌头 + 默认剥离（跨请求全局语义）
+  // respHeaders：默认剥离（跨请求全局语义）。
+  // 注意：Server/Via 已下沉到 DEFAULT_GLOBAL_RULES 的 stages.respHeaders.set（${product_name}），
+  // 不再作为可配 settings；此处仅保留 stripDefaults。
   const rph = src.respHeaders && isObj(src.respHeaders) ? src.respHeaders : {};
   out.respHeaders = {
-    serverName: str(rph.serverName, def.respHeaders.serverName, 128),
-    viaName: str(rph.viaName, def.respHeaders.viaName, 128),
     stripDefaults: Array.isArray(rph.stripDefaults) && rph.stripDefaults.length
       ? rph.stripDefaults.map((x) => str(x, '').toLowerCase()).filter(Boolean)
       : [...def.respHeaders.stripDefaults],
@@ -924,22 +923,6 @@ export function validateGlobalSettings(input) {
   out.disguise = {
     disguiseCdnMaxAge: int(dg.disguiseCdnMaxAge, def.disguise.disguiseCdnMaxAge, 0, 31536000),
     disguiseIsolateTtlMs: int(dg.disguiseIsolateTtlMs, def.disguise.disguiseIsolateTtlMs, 0, 3600000),
-    staticServerName: str(dg.staticServerName, def.disguise.staticServerName, 64),
-  };
-
-  // debug：调试响应头开关（把原写死的 X-Origin-Id / X-Cache 等头名变为可配置可关）
-  const db = src.debug && isObj(src.debug) ? src.debug : {};
-  const dbh = isObj(db.headers) ? db.headers : {};
-  const defH = def.debug.headers;
-  out.debug = {
-    enabled: bool(db.enabled, def.debug.enabled),
-    headers: {
-      originId: str(dbh.originId, defH.originId, 64),
-      cache: str(dbh.cache, defH.cache, 64),
-      ruleId: str(dbh.ruleId, defH.ruleId, 64),
-      retryCount: str(dbh.retryCount, defH.retryCount, 64),
-      edgeTime: str(dbh.edgeTime, defH.edgeTime, 64),
-    },
   };
 
   return { ok: errors.length === 0, value: out, errors };

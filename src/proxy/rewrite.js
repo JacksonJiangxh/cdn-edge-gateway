@@ -64,6 +64,38 @@ export function mergeHeaderOps(originOps, ruleOps) {
   ]);
   return { set, remove: Array.from(removeSet) };
 }
+
+/**
+ * 合并「全站兜底 → 站点命中规则」的 HeaderOps（逐阶段先全站后站点模型专用）。
+ *
+ * 与 mergeHeaderOps（源站 ops + 规则 ops，规则 remove 只透传）不同：本函数里
+ * 站点 remove 必须在「合并阶段」就从并集后的 set 中剔除全站被点名删除的 key。
+ * 原因：下游 buildClientHeaders 的 applyHeaderOps 是「先 remove 后 set」一次性注入，
+ * 全站 set 里的 key 正是通过这次 set 才进入响应头，remove 在 set 之前执行删不到它。
+ * 因此「站点 remove 删全站 set 的 key」只能在合并阶段执行，下游 remove 只负责删
+ * 源站/上游自带的同名头。
+ *
+ * set：浅合并（全站打底，站点覆盖同名 key，全站其余 key 保留，不整段替换）。
+ * set 删除：遍历站点 remove 列表，从并集后的 set 中 delete 对应 key。
+ * remove：全站.remove ∪ 站点.remove（保留删源站/上游自带头的能力）。
+ *
+ * @param {Object} [globalOps] 全站兜底 HeaderOps
+ * @param {Object} [siteOps] 站点命中规则该阶段的 HeaderOps
+ * @returns {Object} 合并后的 HeaderOps
+ */
+export function mergeStageHeaderOps(globalOps, siteOps) {
+  const set = { ...(globalOps?.set || {}), ...(siteOps?.set || {}) };
+  // 站点 remove 必须在合并期即从 set 中删除全站被点名 key
+  const siteRemove = Array.isArray(siteOps?.remove) ? siteOps.remove : [];
+  for (const name of siteRemove) {
+    if (Object.prototype.hasOwnProperty.call(set, name)) delete set[name];
+  }
+  const removeSet = new Set([
+    ...(Array.isArray(globalOps?.remove) ? globalOps.remove : []),
+    ...siteRemove,
+  ]);
+  return { set, remove: Array.from(removeSet) };
+}
 export function applyRewrite(pathname, rewrite, ctx) {
   const type = rewrite?.type || 'none';
   let out = pathname || '/';

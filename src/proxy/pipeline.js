@@ -19,10 +19,10 @@
  * 设计原则：任何一步抛异常都必须被兜住，返回 502/500 而不是让 Worker 崩溃。
  */
 
-import { matchSite, matchRule } from './matcher.js';
-import { buildClientHeaders } from './headers.js';
+import { matchSite, matchRuleByStage } from './matcher.js';
+import { buildClientHeaders, getBrandHeaders } from './headers.js';
 import { buildCacheKey, shouldBypassCache } from './cachekey.js';
-import { buildOriginUrl, resolveHostHeader, mergeRewrite, mergeHeaderOps } from './rewrite.js';
+import { buildOriginUrl, resolveHostHeader, mergeRewrite, mergeHeaderOps, mergeStageHeaderOps } from './rewrite.js';
 import { getPool, getGlobal, getGlobalRules } from '../config/store.js';
 import { renderDisguise } from './disguise.js';
 import { DEFAULT_FAILOVER, DEFAULT_GLOBAL_SETTINGS, deepClone } from '../config/defaults.js';
@@ -168,22 +168,52 @@ async function runPipeline(ctx) {
 
   // ---- 4. 匹配规则（此时 ctx.origin 已就绪，规则可匹配 origin / originAddr）----
 
-  // 站点规则：条件匹配取单条（含各阶段 action 字段）。
-  const siteRule = matchRule(site, ctx);
-
   // 全站通用（兜底）规则 stages：已在函数开头预取并缓存到 globalStages / ctx.__globalSettings。
-  // 此处直接复用，站点某阶段字段缺失时用全站兜底对应 stage 补全；
-  // 站点命中则用站点字段（站点优先），全站仅补足「站点未覆盖的阶段」。
+  //
+  // 合并模型（详见 docs/12-request-flow.md ④.2）：逐阶段独立、先全站后站点。
+  // 按 STAGE_ORDER 遍历每个阶段：
+  //   ① 先取全站兜底 globalStages[stage] 注入 eff（全站先出手）；
+  //   ② 再 matchRuleByStage 在该阶段的站点规则集里按 priority 取命中的一条规则；
+  //   ③ 站点命中则用其「同阶段字段」覆盖 eff 的对应字段（站点优先于全站），
+  //      未命中则全站结果原样保留进入下一阶段。
+  // 这样全站某阶段设置后，站点规则是对「设置后的结果」做具体修改/覆盖/删除，
+  // 不会出现「整条站点规则命中即铺底、把全站兜底层整段冲掉」的本末倒置问题。
+  //
+  // 站内各阶段规则经 buildActionByStage 已按 rule.stage 裁剪（action 只含该阶段字段），
+  // 因此每条命中规则的 action 可直接合并到 eff 而不污染其它阶段。
   const effAction = {};
-  if (siteRule && siteRule.action) Object.assign(effAction, deepClone(siteRule.action));
+  ctx.debug.ruleSource = ctx.debug.ruleSource || {};
   for (const stage of STAGE_ORDER) {
-    const g = globalStages[stage];
-    if (!g || typeof g !== 'object') continue;
-    for (const [k, v] of Object.entries(g)) {
-      if (effAction[k] === undefined) effAction[k] = deepClone(v);
+    const eff = deepClone(globalStages[stage] || {});
+    const sr = matchRuleByStage(site, stage, ctx);
+    if (sr && sr.action) {
+      for (const k of Object.keys(sr.action)) {
+        // HeaderOps 段（reqHeaders/respHeaders）：走 mergeStageHeaderOps 并集
+        // —— set 站点覆盖同名 key、全站保留其余；站点 remove 在合并期即从 set 剔除全站被点名 key。
+        if ((stage === 'reqHeaders' || stage === 'respHeaders') && isObj(eff[k]) && isObj(sr.action[k])) {
+          eff[k] = mergeStageHeaderOps(eff[k], sr.action[k]);
+        } else {
+          // 标量段（rewrite/redirect/terminate/origin/cache 等）：逐同名字段覆盖（含子对象整段覆盖）；
+          // 未设字段沿用全站 eff 中的值。
+          eff[k] = deepClone(sr.action[k]);
+        }
+      }
+      ctx.debug.ruleSource[stage] = 'site';
+    } else {
+      // 该阶段站点规则集未命中 → 全站结果保留进入下一阶段。
+      ctx.debug.ruleSource[stage] = 'global';
+    }
+    // 各阶段 eff 的 key 互不重叠（已经 buildActionByStage 按阶段裁剪），直接聚合到扁平 effAction。
+    // 例外：HeaderOps 段（reqHeaders/respHeaders）以 {set, remove} 嵌套存放于 effAction[stage]，
+    // 否则两段的 set/remove 会在 effAction 顶层相互覆盖（后遍历者胜），导致 reqHeaders 伪装头丢失、
+    // 且下游 effAction.reqHeaders / respHeaders 取不到。站点规则的 remove 在合并期已从 set 剔除全站被点名 key。
+    if (stage === 'reqHeaders' || stage === 'respHeaders') {
+      effAction[stage] = eff;
+    } else {
+      Object.assign(effAction, eff);
     }
   }
-  const rule = { action: effAction, _source: siteRule ? 'site' : 'global' };
+  const rule = { action: effAction, _source: ctx.debug.ruleId ? 'site' : 'global' };
   const ruleSource = rule._source;
 
   // ---- 4.5 终止型动作 ----
@@ -319,8 +349,8 @@ async function runPipeline(ctx) {
         ctx.debug.cache = 'STALE';
         // stale 分支只用 policy 构造客户端头（mergedRespHeaders 在下方步骤 9 才计算，
         // 此处不依赖它，避免时序耦合；stale 响应本身已含源站级响应头）。
-        // 注意：X-Cache 头名由 settings.debug 可配置，buildClientHeaders 已按可配置名写出 STALE，
-        // 此处不再硬编码覆盖。
+        // 注意：X-Cache 头名由引擎常量 DEBUG_HEADER_NAMES 决定（下沉自旧 settings.debug），
+        // buildClientHeaders 已按该常量名写出 STALE，此处不再硬编码覆盖。
         const headers = await buildClientHeaders(ctx, stale, policy, undefined);
         recordSafely(ctx, { status: stale.status, cacheHit: 'STALE' });
         return new Response(stale.body, {
@@ -401,8 +431,8 @@ function applyTerminalActions(ctx, rule) {
   const a = rule?.action;
   if (!a) return null;
 
-  // 品牌响应头：优先取运行时全站兜底 settings（用户改 KV 即生效），回退内置默认
-  const brand = (ctx.__globalSettings && ctx.__globalSettings.respHeaders) || DEFAULT_GLOBAL_SETTINGS.respHeaders;
+  // 品牌响应头：统一从全站规则 stages.respHeaders.set 取得（支持站点规则 remove 覆盖）。
+  const brand = getBrandHeaders(ctx, rule);
 
   // ---- 强制 HTTPS ----
   // 只在确实是 http 时跳转，避免已经是 https 还 301 造成无限循环
@@ -414,8 +444,7 @@ function applyTerminalActions(ctx, rule) {
       headers: {
         Location: target.toString(),
         'Cache-Control': 'no-store',
-        Server: brand.serverName,
-        Via: brand.viaName,
+        ...brand,
       },
     });
   }
@@ -431,8 +460,7 @@ function applyTerminalActions(ctx, rule) {
       headers: {
         'Content-Type': dr.contentType || 'text/plain; charset=utf-8',
         'Cache-Control': 'no-store',
-        Server: brand.serverName,
-        Via: brand.viaName,
+        ...brand,
       },
     });
   }
@@ -443,7 +471,7 @@ function applyTerminalActions(ctx, rule) {
     if (loc) {
       return new Response(null, {
         status: a.redirect.status || 302,
-        headers: { Location: loc, 'Cache-Control': 'no-store', Server: brand.serverName, Via: brand.viaName },
+        headers: { Location: loc, 'Cache-Control': 'no-store', ...brand },
       });
     }
   }
@@ -577,19 +605,20 @@ function errorResponse(status, title, detail, ctx) {
   });
 
   if (ctx?.debug) {
-    const dbg = (ctx.__globalSettings && ctx.__globalSettings.debug) || DEFAULT_GLOBAL_SETTINGS.debug;
-    const names = dbg.headers || DEFAULT_GLOBAL_SETTINGS.debug.headers;
+    // 调试头头名取自引擎常量 DEBUG_HEADER_NAMES（下沉自旧 settings.debug，默认始终开启）。
+    const names = DEBUG_HEADER_NAMES;
     if (ctx.debug.siteId) headers.set('X-Site-Id', ctx.debug.siteId);
-    if (dbg.enabled && ctx.debug.ruleId) headers.set(names.ruleId, ctx.debug.ruleId);
+    if (ctx.debug.ruleId) headers.set(names.ruleId, ctx.debug.ruleId);
     if (Array.isArray(ctx.debug.tried) && ctx.debug.tried.length) {
       headers.set('X-Tried-Origins', ctx.debug.tried.join(','));
     }
-    if (dbg.enabled && ctx.startTime) headers.set(names.edgeTime, `${Date.now() - ctx.startTime}ms`);
+    if (ctx.startTime) headers.set(names.edgeTime, `${Date.now() - ctx.startTime}ms`);
   }
-  // 错误响应同样注入品牌头，避免泄漏上游平台身份（来自全站兜底 settings）
-  const brand = (ctx.__globalSettings && ctx.__globalSettings.respHeaders) || DEFAULT_GLOBAL_SETTINGS.respHeaders;
-  headers.set('Server', brand.serverName);
-  headers.set('Via', brand.viaName);
+  // 错误响应同样注入品牌头，避免泄漏上游平台身份。
+  // 品牌头统一来自全站规则 stages.respHeaders.set（缺规则时回退内置默认），不再引擎外写死。
+  const brand = getBrandHeaders(ctx, undefined);
+  if (brand.Server !== undefined) headers.set('Server', brand.Server);
+  if (brand.Via !== undefined) headers.set('Via', brand.Via);
 
   // 错误标题优先使用全站兜底 settings.error.messages 中对应的语义文案（可被用户调整），
   // 未命中语义键时回退到调用方传入的字面量。

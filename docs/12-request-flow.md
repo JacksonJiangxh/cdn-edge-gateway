@@ -88,28 +88,46 @@
            oriX AND 规则引擎 的分支即由此产生（一次请求只落在一个 initialOrigin 上；
            源站组下不同请求因负载均衡落到不同 oX，各自走各自的分支）
    ▼
-④ 匹配规则 matchRule(site, ctx)   【此时 ctx.origin 已就绪，可匹配 origin / originAddr】
+④ 匹配规则（此时 ctx.origin 已就绪，可匹配 origin / originAddr）
    │
-   ├─ ④.1 站点自身规则匹配
-   │     rules=site.rules 过滤 enabled!==false → priority 降序排序
-   │     逐条 isRuleMatched(rule, subject):
+   ├─ ④.1 站点自身规则匹配（逐阶段独立匹配，见④.2）
+   │     匹配不再「整条规则命中即停」，而是按 STAGE_ORDER 每个阶段各自在站点规则集内匹配：
+   │     matchRuleByStage(site, stage, ctx) 内部先按 `r.stage === stage && enabled !== false` 过滤，
+   │     再在该阶段子集内 priority 降序排序，逐条 isRuleMatched(rule, subject)：
    │        a. buildMatchSubject(ctx) 提取特征(含 origin=ctx.origin.id, originAddr=ctx.origin.addr)
    │        b. m.conditions 二维条件(外OR内AND)：groups空→命中；
    │           否则 groups.some(group.every(evalCondition))
    │             evalCondition: target 支持 origin/originAddr(header/cookie/query/path/host/ext...)
-   │        命中即停 → ctx.debug.ruleId=rule.id, rule=该规则
+   │        某阶段命中即停 → ctx.debug.ruleIds[stage]=rule.id（兼容旧 ctx.debug.ruleId 取首个命中）
    │
-   ├─ ④.2 全站通用规则兜底（阶段→默认动作映射，无条件、每阶段 1 条）
+   ├─ ④.2 全站通用规则兜底（逐阶段先全站后站点，独立匹配）
    │     读取 getGlobalRules → 新阶段映射 { rewrite, redirect, terminate, reqHeaders, origin, cache, respHeaders }
-   │     每个阶段的值即「该阶段默认动作」。合并规则：站点 action 优先，全站仅补全站点缺失的字段——
-   │        effAction = deepClone(siteRule.action)
+   │     每个阶段的值即「该阶段默认动作」。合并模型：逐阶段独立、先全站后站点——
+   │        effAction = {}
    │        for stage in STAGE_ORDER:
-   │           for field in globalStages[stage]:
-   │              if effAction[field] === undefined: effAction[field] = globalStages[stage][field]
-   │     - 站点命中规则 → ruleSource='site'，但未被站点覆盖的阶段仍会被全站默认值补全
-   │     - 站点未命中 → 全部阶段取全站默认（ruleSource='global'）
-   │     注：全站兜底**不再跑 matchRule**（原模型对全站 Rule[] 再做一次条件匹配），改为 O(7) 阶段索引补全，
-   │         零匹配开销；KV 空时写入内置保守默认值（见 defaults.DEFAULT_GLOBAL_RULES）落盘，用户可改。
+   │            eff = deepClone(globalStages[stage] || {})        # ① 全站兜底先入手
+   │            sr  = matchRuleByStage(site, stage, ctx)          # ② 该阶段在站点规则集内按 priority 取命中一条
+   │            if sr:                                            # ③ 站点命中 → 其同阶段字段覆盖全站
+   │                for k in sr.action:
+   │                   if k 是 HeaderOps 段(reqHeaders/respHeaders):
+   │                       eff[k] = mergeStageHeaderOps(eff[k], sr.action[k])   # set 并集+站点remove删全站被点名key
+   │                   else:
+   │                       eff[k] = sr.action[k]                  # 标量/子对象逐字段覆盖
+   │            else:
+   │                # 该阶段站点规则集未命中 → 全站结果原样保留进入下一阶段
+   │            Object.assign(effAction, eff)
+   │     - 站点某阶段命中 → ctx.debug.ruleSource[stage]='site'，其同名字段覆盖全站、未设字段全站沿用；
+   │       站点该阶段未命中 → ctx.debug.ruleSource[stage]='global'，全站结果保留。
+   │     - 全站兜底**不再跑 matchRule**（原模型对全站 Rule[] 再做一次条件匹配），改为「每阶段 O(规则数) 独立匹配」，
+   │       零跨阶段耦合；KV 空时写入内置保守默认值（见 defaults.DEFAULT_GLOBAL_RULES）落盘，用户可改。
+   │
+   │     ★ 关键语义（求解「本末倒置」）：全站某阶段设置之后，站点规则是对「设置后的结果」做修改/覆盖/删除，
+   │       而非「整条站点规则命中即整段铺底、把全站兜底层冲掉」。例：全站 respHeaders.set={cache-control,x-a,x-b,server}，
+   │       站点 respHeaders.set={cache-control,x-a}, remove=[x-b] → 合并后 set={cache-control(站),x-a(站),server(全)}，
+   │       x-b 已被站点 remove 正确删除，server 全站保留。
+   │
+   │     ★ HeaderOps 段的 remove 处理：站点 remove 必须在「合并阶段」就从 set 剔除（mergeStageHeaderOps 实现），
+   │       不能只透传给下游 applyHeaderOps（其「先 remove 后 set」机制删不到全站 set 才注入的 key）。
    │
    │   ④.3 ~ ④.7 是「规则匹配结果」按 action 类别细分的最小任务包（对标 Cloudflare 流量序列）
    │       每个类别独立成节点，按代码真实生效顺序串接；未命中的 action 字段直接跳过。
@@ -282,7 +300,21 @@
    2) 缓存控制头(同上: statusTtl / NO_CACHE_STATUS / enabled&mode!=='origin')
    3) 规则级 respHeaders.applyHeaderOps
    4) 调试头(含 X-Origin-Id=实际成功源站)
-   5) 品牌头 Server/Via
+      └─ 头名来自引擎常量 DEBUG_HEADER_NAMES（下沉自旧 settings.debug，默认始终下发；
+         如需关闭，在站点规则 stages.respHeaders.remove 中移除对应头名即可）
+   5) 品牌头 Server/Via（取自全站规则 stages.respHeaders.set 的 ${product_name}，
+      经代码常量 PRODUCT_NAME 求值——不再经 settings.respHeaders.serverName/viaName 中转）
+   ── 全局配置收敛：clientIpHeaders（真实客户端 IP 回源头优先级）已下沉为引擎常量
+      CLIENT_IP_HEADERS（见 vars.js），经 ${client_ip} 变量暴露，不再作为可配 settings；
+      提取逻辑统一收敛到 pickClientIp(headers)（matcher / headers / clientField 三处复用），
+      支持 RFC7239 forwarded 头（for= 解析）与带端口的 cloudfront-viewer-address（去端口），
+      其余头取逗号分隔首段，按「可信专有 → 反代注入 → 通用转发链」优先级排序；
+      CLIENT_IP_HEADERS 已覆盖 CF / Akamai / Fastly / 腾讯云 EO / 阿里云 / CloudFront /
+      Nginx / Caddy / HAProxy / Traefik / Envoy / Kong / UCloud 等常见 CDN 与反代转入头，
+      发现新头直接在该常量数组追加即可。
+      disguise 伪装页 Server 指纹（'nginx'）已下沉为代码常量 DISGUISE_SERVER_NAME。
+      上述字段本质均为「流量序列内部量」，收敛后 settings 仅保留真正全局策略项
+      （origin/security/error/cache/reqHeaders/disguise 时长类）。
    clientResp = new Response(originResp.body, {status, headers})
    ▼
 ⑪ 异步写缓存（不阻塞响应）

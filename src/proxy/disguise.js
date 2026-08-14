@@ -20,6 +20,13 @@
 import { DEFAULT_DISGUISE, DEFAULT_GLOBAL_SETTINGS } from '../config/defaults.js';
 
 /**
+ * 伪装页 Server 头指纹（下沉自旧 settings.disguise.staticServerName，默认 'nginx'）。
+ * 此值本质是「流量序列内部量」——伪装页要表现得像一台普通 nginx，不再作为可配 settings。
+ * 若需变更伪装指纹，改此引擎常量即可，无需在管理面板暴露。
+ */
+const DISGUISE_SERVER_NAME = 'nginx';
+
+/**
  * 内置静态伪装页。
  *
  * 刻意模仿 nginx 默认欢迎页：这是互联网上最常见、最不值得深究的页面之一，
@@ -100,15 +107,15 @@ export async function renderDisguise(ctx, disguise) {
 /**
  * 静态伪装页。
  * @param {number} [status]
- * @param {{disguiseCdnMaxAge:number, staticServerName:string}} dg 全站兜底伪装页参数
+ * @param {{disguiseCdnMaxAge:number}} dg 全站兜底伪装页参数
  * @returns {Response}
  */
 function staticDisguise(status, dg) {
   const code = Number.isInteger(status) && status >= 200 && status <= 599 ? status : 200;
   const maxAge = dg?.disguiseCdnMaxAge ?? 86400;
-  // 伪装成普通 nginx 的服务端指纹：Server 名统一取自全站设置（可视化可改），
-  // 不再写死 'nginx' 魔法串；缺省回退到默认值单一真相源。
-  const serverName = dg?.staticServerName ?? DEFAULT_GLOBAL_SETTINGS.disguise.staticServerName;
+  // 伪装成普通 nginx 的服务端指纹：Server 名取自引擎常量 DISGUISE_SERVER_NAME（'nginx'），
+  // 不再经 settings.disguise.staticServerName 中转。
+  const serverName = DISGUISE_SERVER_NAME;
   return new Response(STATIC_HTML, {
     status: code,
     headers: {
@@ -130,7 +137,7 @@ function staticDisguise(status, dg) {
  *
  * @param {import('../contracts.js').Ctx} ctx
  * @param {string} target 绝对 URL（schema 已保证 http/https）
- * @param {{disguiseCdnMaxAge:number, disguiseIsolateTtlMs:number, staticServerName:string}} dg 全站兜底伪装页参数
+ * @param {{disguiseCdnMaxAge:number, disguiseIsolateTtlMs:number}} dg 全站兜底伪装页参数
  * @param {string} proxyUA 反代模式使用的伪装 UA
  * @returns {Promise<Response|null>} 失败返回 null 交由调用方降级
  */
@@ -168,9 +175,9 @@ async function proxyDisguise(ctx, target, dg, proxyUA) {
     const body = new TextDecoder().decode(buf);
     const ct = upstream.headers.get('content-type');
     const maxAge = dg?.disguiseCdnMaxAge ?? 86400;
-    // 伪装成普通 nginx 的服务端指纹：Server 名统一取自全站设置（可视化可改），
-    // 不再写死 'nginx' 魔法串；缺省回退到默认值单一真相源。
-    const serverName = dg?.staticServerName ?? DEFAULT_GLOBAL_SETTINGS.disguise.staticServerName;
+    // 伪装成普通 nginx 的服务端指纹：Server 名取自引擎常量 DISGUISE_SERVER_NAME（'nginx'），
+    // 不再经 settings.disguise.staticServerName 中转。
+    const serverName = DISGUISE_SERVER_NAME;
 
     const headers = {
       'content-type': ct || 'text/html; charset=utf-8',

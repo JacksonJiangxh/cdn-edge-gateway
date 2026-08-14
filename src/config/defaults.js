@@ -31,6 +31,26 @@ export const PRODUCT_NAME = 'EdgeGateway';
 setProductName(PRODUCT_NAME);
 
 /**
+ * 提取真实客户端 IP 的回源/请求头优先级（引擎内部常量，非可配 settings）。
+ * 顺序按平台常见度排：CF 系 cf-connecting-ip → Nginx/EO 系 x-real-ip → 通用 x-forwarded-for。
+ * 此前曾作为 settings.request.clientIpHeaders 暴露，现下沉为引擎常量，
+ * 因它本质是「流量序列内部量」——其提取结果（${client_ip}）供别的头/动作使用。
+ * 想注入源站头仍用规则 action 的 clientIpHeader + ${client_ip}，无需改此优先级。
+ * 置于 defaults.js 以避免 matcher ↔ vars 循环依赖（vars 已单向依赖 matcher）。
+ */
+/**
+ * 调试响应头默认头名（引擎常量，下沉自旧 settings.debug.headers）。
+ * 默认始终下发；如需关闭，在站点规则 stages.respHeaders.remove 中移除对应头名即可。
+ */
+export const DEBUG_HEADER_NAMES = Object.freeze({
+  originId: 'X-Origin-Id',
+  cache: 'X-Cache',
+  ruleId: 'X-Rule-Id',
+  retryCount: 'X-Retry-Count',
+  edgeTime: 'X-Edge-Time',
+});
+
+/**
  * 默认 Host 头处理方式：inherit = 沿用 fetch 的默认行为（Host 取源站域名）。
  * @type {Readonly<{mode:'inherit'|'origin'|'client'|'custom', custom?:string}>}
  */
@@ -345,9 +365,12 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
     // 全站兜底「默认响应头」。所有响应默认注入本项目品牌头 Server / Via，
     // 并剥离上游敏感响应头（与旧 headers.js 写死的 PRODUCT_NAME / DEFAULT_STRIP_RESP_HEADERS 一致）。
     //
-    // 品牌名统一引用「单一真相源」：settings.respHeaders.serverName（见下方），
-    // 经运行时 expandVars 把 ${product_name} 求值为真实品牌名。
-    // 这样品牌名只在一处可配（可视化可改），不再于 stages 与 settings 两处都写死字面量。
+    // 品牌名统一引用「单一真相源」：代码常量 PRODUCT_NAME（经 vars.js 的 ${product_name} 变量）。
+    // 注意：Server / Via 不再经由 settings.respHeaders.serverName/viaName 中转，
+    // 而是直接在此 stages 里以 ${product_name} 表达（用户认可的「全局规则里直接写」方式）。
+    // 调试响应头（X-Cache / X-Origin-Id / X-Rule-Id / X-Retry-Count / X-Edge-Time）不在 stages
+    // 显式列出，而由 headers.js 按引擎常量 DEBUG_HEADER_NAMES 默认下发；如需关闭，
+    // 在站点规则 stages.respHeaders.remove 中加入对应头名即可。
     set: Object.freeze({
       server: '${product_name}',
       via: '1.1 ${product_name}',
@@ -408,10 +431,6 @@ export const STRIP_REQ_HEADERS = Object.freeze({
 export const DEFAULT_GLOBAL_SETTINGS = Object.freeze({
   // 请求接收层
   request: Object.freeze({
-    // 提取真实客户端 IP 的回源/请求头优先级（单一真相源：matcher.js / vars.js 的
-    // ${client_ip} / ${remote_addr} 均读取此字段，无需改代码即可在管理面板调整）。
-    // 顺序按平台常见度排：CF 系 cf-connecting-ip → Nginx/EO 系 x-real-ip → 通用 x-forwarded-for。
-    clientIpHeaders: Object.freeze(['cf-connecting-ip', 'x-real-ip', 'x-forwarded-for']),
     // 默认协议（matcher.js 默认 https）
     defaultProtocol: 'https',
   }),
@@ -432,12 +451,10 @@ export const DEFAULT_GLOBAL_SETTINGS = Object.freeze({
     proxyUserAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   }),
-  // 响应头设置（品牌头 + 默认剥离，无法用单一规则 action 表达跨请求全局语义）
+  // 响应头设置（默认剥离，无法用单一规则 action 表达跨请求全局语义）。
+  // 注意：Server / Via 品牌头不再在此中转，而是由 DEFAULT_GLOBAL_RULES 的
+  // stages.respHeaders.set 通过 ${product_name} 变量直接表达（PRODUCT_NAME 为代码常量）。
   respHeaders: Object.freeze({
-    // 本项目作为独立 CDN 网关的身份标识（旧 headers.js 写死 PRODUCT_NAME）
-    serverName: PRODUCT_NAME,
-    // RFC 7230 要求的代理链标识，格式为「协议/版本 别名」
-    viaName: `1.1 ${PRODUCT_NAME}`,
     // 默认删除的源站响应头（旧 contracts.js 的 DEFAULT_STRIP_RESP_HEADERS）
     stripDefaults: Object.freeze([
       'cross-origin-resource-policy',
@@ -482,20 +499,6 @@ export const DEFAULT_GLOBAL_SETTINGS = Object.freeze({
     disguiseCdnMaxAge: 86400,
     // 伪装页在本地的 isolate 内存缓存时长（旧 disguise.js 写死 600000=10min）
     disguiseIsolateTtlMs: 600000,
-    // 静态伪装页 Server 头（旧 disguise.js 写死 'nginx'）
-    staticServerName: 'nginx',
-  }),
-  // 调试响应头（原 headers.js 写死的 X-Origin-Id / X-Cache / X-Rule-Id / X-Retry-Count / X-Edge-Time
-  // 头名与开关，现收编为可配置、可关闭、可改名，默认保持原行为不变）
-  debug: Object.freeze({
-    enabled: true,
-    headers: Object.freeze({
-      originId: 'X-Origin-Id',
-      cache: 'X-Cache',
-      ruleId: 'X-Rule-Id',
-      retryCount: 'X-Retry-Count',
-      edgeTime: 'X-Edge-Time',
-    }),
   }),
 });
 

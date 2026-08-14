@@ -919,11 +919,42 @@ export async function ensureGlobalRulesSeeded(ctx) {
  * @param {import('../contracts.js').Ctx} ctx
  * @returns {Promise<{stages: Record<string, any>, settings: Record<string, any>}>}
  */
+/**
+ * 将 settings.respHeaders 中的默认剥离列表并入 stages.respHeaders，
+ * 使运行时「流量序列默认操作」的唯一真相源为 stages（settings 仅作为管理面可读来源）。
+ *
+ * 注意：品牌头 Server/Via 已不再经 settings.respHeaders.serverName/viaName 中转，
+ * 而是直接在 DEFAULT_GLOBAL_RULES.respHeaders.set 中以 ${product_name}（代码常量 PRODUCT_NAME）
+ * 表达，故此处不再补全省牌头——stages 自带 server/via 即唯一真相源。
+ * - stripDefaults 并入 stages.respHeaders.remove（去重）
+ * 返回一个新的 stages 对象，不修改入参。
+ * @param {Record<string, any>} stages
+ * @param {Record<string, any>} settings
+ * @returns {Record<string, any>}
+ */
+function foldSettingsIntoStages(stages, settings) {
+  const out = deepClone(stages);
+  const rph = settings && settings.respHeaders && typeof settings.respHeaders === 'object'
+    ? settings.respHeaders
+    : {};
+  const rh = (out.respHeaders && typeof out.respHeaders === 'object') ? out.respHeaders : (out.respHeaders = {});
+  const set = (rh.set && typeof rh.set === 'object') ? rh.set : (rh.set = {});
+
+  // 默认剥离列表并入 remove（去重）
+  if (Array.isArray(rph.stripDefaults) && rph.stripDefaults.length) {
+    const rem = Array.isArray(rh.remove) ? (rh.remove = [...rh.remove]) : (rh.remove = []);
+    for (const h of rph.stripDefaults) {
+      if (!rem.some((x) => String(x).toLowerCase() === String(h).toLowerCase())) rem.push(h);
+    }
+  }
+  return out;
+}
+
 export async function getGlobalRules(ctx) {
   const data = await readJson(ctx, K_GLOBAL_RULES);
   // 旧结构：{ rules: [...] } —— 迁移后写回
   if (data && Array.isArray(data.rules)) {
-    const stages = migrateGlobalRulesFromArray(data);
+    const stages = foldSettingsIntoStages(migrateGlobalRulesFromArray(data), cloneGlobalSettings());
     const settings = cloneGlobalSettings();
     try {
       await writeJson(ctx, K_GLOBAL_RULES, { stages, settings });
@@ -948,7 +979,7 @@ export async function getGlobalRules(ctx) {
       } catch (err) {
         console.error('[store] 全站规则空结构补默认落盘失败（忽略，仍返回默认）:', err?.message);
       }
-      return { stages: deepClone(def.stages), settings: deepClone(def.settings) };
+      return { stages: deepClone(foldSettingsIntoStages(def.stages, def.settings)), settings: deepClone(def.settings) };
     }
     // settings 缺失（旧版仅含 stages）时用内置默认补全，保持向后兼容
     const settings = data.settings && typeof data.settings === 'object'
@@ -978,9 +1009,9 @@ export async function getGlobalRules(ctx) {
       } catch (err) {
         console.error('[store] 全站规则缺失阶段补全落盘失败（忽略，仍返回补全值）:', err?.message);
       }
-      return { stages: deepClone(merged), settings: deepClone(settings) };
+      return { stages: deepClone(foldSettingsIntoStages(merged, settings)), settings: deepClone(settings) };
     }
-    return { stages: deepClone(data.stages), settings: deepClone(settings) };
+    return { stages: deepClone(foldSettingsIntoStages(data.stages, settings)), settings: deepClone(settings) };
   }
   // 空值：落盘内置默认并返回（幂等由调用方并发容忍，失败不影响返回）
   const def = { stages: cloneGlobalRules(), settings: cloneGlobalSettings() };
@@ -991,7 +1022,7 @@ export async function getGlobalRules(ctx) {
   } catch (err) {
     console.error('[store] 全站规则默认落盘失败（忽略，仍返回默认）:', err?.message);
   }
-  return { stages: deepClone(def.stages), settings: deepClone(def.settings) };
+  return { stages: deepClone(foldSettingsIntoStages(def.stages, def.settings)), settings: deepClone(def.settings) };
 }
 
 /**
