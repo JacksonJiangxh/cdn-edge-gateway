@@ -177,6 +177,26 @@ const kSite = (host) => `site:${host}`;
 const kPool = (id) => `pool:${id}`;
 
 /**
+ * 配置同步「接收开关」键。
+ *
+ * 该键存在且未过期 == 接收接口开放；键不存在 == 接收接口拒绝一切请求。
+ * 开关完全由数据（KV）承载，不依赖任何源码/环境变量改动或重新部署，
+ * 因此「临时开放一次、用完即关」无需发版。
+ * 值结构见 SyncToken typedef。
+ */
+const K_SYNC_TOKEN = 'sync:token';
+
+/**
+ * 配置同步校验码默认有效期（秒）= 10 分钟。
+ *
+ * 取值权衡：足够完成一次人工「复制校验码 → 到发送方粘贴 → 推送」的操作，
+ * 又足够短以至于即便用户忘记手动关闭，接口也会自动收口。
+ * 同时必须 >= 60，因为 CF KV 的 expirationTtl 最小值为 60 秒
+ * （见 platform/kv.js 的 put，会强制 Math.max(60, ttl)）。
+ */
+export const SYNC_TOKEN_TTL_SEC = 600;
+
+/**
  * 单次 listSites 调用最多读取的站点数。
  * Workers 单请求 subrequest 上限为 50（免费版），这里留出余量给
  * 索引读、鉴权、统计等其它 KV 操作。
@@ -1127,4 +1147,92 @@ export async function putGlobalRules(ctx, stages) {
   invalidateMemCache();
   await bumpVersion(ctx);
   return { ok: true, value: { stages: normStages } };
+}
+
+// ----------------------------------------------------------------------------
+// 配置同步「接收开关」（sync:token）
+// ----------------------------------------------------------------------------
+//
+// 设计要点：
+//  1. 开关即数据：接收接口是否开放，只取决于 KV 中 sync:token 是否存在且未过期。
+//     无需改源码、无需改环境变量、无需重新部署，因此「临时开放 → 用完即关」是
+//     纯运行时行为，接口不会长期暴露在公网被扫描/盗刷。
+//  2. 绝不走 L1 内存缓存：校验码是一次性的强一致语义（生成后立刻要能校验、
+//     删除后必须立刻拒绝），任何缓存都会造成「已删除仍可用」的安全窗口，
+//     因此这里直连 KV，不使用 memGet/memSet。
+//  3. 双保险过期：既写 KV 的 expirationTtl（后端侧自动回收），也在值里存
+//     expiresAt 时间戳（读取时自行判断）。因为 Redis 降级后端/不同厂商 KV 对
+//     TTL 的精度与实现不一致，值内时间戳保证过期判定始终准确。
+
+/**
+ * @typedef {Object} SyncToken
+ * @property {string} code       校验码明文（高熵随机十六进制）
+ * @property {number} createdAt  生成时间戳（ms）
+ * @property {number} expiresAt  过期时间戳（ms），到点即视为失效
+ */
+
+/**
+ * 读取当前的配置同步校验码。
+ *
+ * 直连 KV（不经内存缓存），并主动判定值内 expiresAt：
+ * 已过期时返回 null 且顺手清理残留键（best-effort，清理失败不影响判定结果）。
+ *
+ * @param {import('../contracts.js').Ctx} ctx
+ * @returns {Promise<SyncToken|null>} 有效的校验码记录；不存在或已过期返回 null
+ */
+export async function getSyncToken(ctx) {
+  const rec = await readJson(ctx, K_SYNC_TOKEN);
+  if (!rec || typeof rec !== 'object' || typeof rec.code !== 'string' || rec.code === '') {
+    return null;
+  }
+  // 值内时间戳兜底判定：不依赖后端 TTL 精度
+  if (typeof rec.expiresAt === 'number' && rec.expiresAt <= Date.now()) {
+    // 已过期的残留键顺手清理，避免 list/巡检看到僵尸数据
+    try {
+      await delSyncToken(ctx);
+    } catch {
+      /* 清理失败不影响「已过期」这一结论 */
+    }
+    return null;
+  }
+  return /** @type {SyncToken} */ (rec);
+}
+
+/**
+ * 写入配置同步校验码，开放接收接口。
+ *
+ * @param {import('../contracts.js').Ctx} ctx
+ * @param {string} code   校验码明文（由调用方用 CSPRNG 生成）
+ * @param {number} [ttlSec=SYNC_TOKEN_TTL_SEC] 有效期（秒），下限 60（受 CF KV 限制）
+ * @returns {Promise<SyncToken>} 落盘的记录（含 expiresAt，便于前端显示倒计时）
+ * @throws {Error} KV 不可用或写入失败时抛出，调用方必须感知（不能静默"假开放"）
+ */
+export async function setSyncToken(ctx, code, ttlSec = SYNC_TOKEN_TTL_SEC) {
+  if (typeof code !== 'string' || code === '') {
+    throw new Error('校验码不能为空');
+  }
+  // 下限 60s 与 platform/kv.js 的 put 保持一致（CF KV expirationTtl 最小 60）
+  const ttl = Math.max(60, Math.floor(Number(ttlSec) || SYNC_TOKEN_TTL_SEC));
+  const now = Date.now();
+  /** @type {SyncToken} */
+  const rec = { code, createdAt: now, expiresAt: now + ttl * 1000 };
+  const kv = requireKV(ctx);
+  // 带 expirationTtl：即便调用方忘记关闭，后端也会自动回收，接口自动收口
+  await kv.put(K_SYNC_TOKEN, JSON.stringify(rec), { expirationTtl: ttl });
+  return rec;
+}
+
+/**
+ * 删除配置同步校验码，立即关闭接收接口。
+ *
+ * 用于三个场景：手动点击关闭、一次同步成功后的自动收口、过期残留清理。
+ *
+ * @param {import('../contracts.js').Ctx} ctx
+ * @returns {Promise<void>}
+ * @throws {Error} 删除失败时抛出——关闭失败必须让调用方感知，否则接口会意外持续开放
+ */
+export async function delSyncToken(ctx) {
+  const kv = getKV(ctx.env);
+  if (!kv) return; // 无 KV 时本就无从开放，视为已关闭
+  await kv.delete(K_SYNC_TOKEN);
 }

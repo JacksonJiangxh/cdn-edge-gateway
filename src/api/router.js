@@ -34,6 +34,7 @@ import * as systemH from './handlers/system.js';
 import * as configH from './handlers/config.js';
 import * as rulesH from './handlers/rules.js';
 import * as kvH from './handlers/kv.js';
+import * as syncH from './handlers/sync.js';
 
 /**
  * 路由表。
@@ -95,6 +96,15 @@ const ROUTES = Object.freeze([
   { method: 'GET', path: '/system/info', handler: (ctx, g) => systemH.info(ctx, g) },
   { method: 'GET', path: '/system/export', handler: (ctx) => systemH.exportAll(ctx) },
   { method: 'POST', path: '/system/import', handler: (ctx) => systemH.importAll(ctx) },
+
+  // ---------- 配置同步（跨平台推送）----------
+  // 开启/关闭/查询：仅接收方自身管理员可操作（auth:true）
+  { method: 'POST', path: '/system/sync/open', auth: true, handler: (ctx) => syncH.openSync(ctx) },
+  { method: 'POST', path: '/system/sync/close', auth: true, handler: (ctx) => syncH.closeSync(ctx) },
+  { method: 'GET', path: '/system/sync/status', auth: true, handler: (ctx) => syncH.syncStatus(ctx) },
+  // 接收：对外开放（auth:false），由 handler 自身做「校验码 + 密码」双重校验；
+  // 发送方为跨站 POST，需在此处豁免同源 CSRF 校验（csrfExempt）
+  { method: 'POST', path: '/system/sync/receive', auth: false, csrfExempt: true, handler: (ctx) => syncH.receiveSync(ctx) },
 
   // ---------- config ----------
   { method: 'GET', path: '/config/global', handler: (ctx) => configH.get(ctx) },
@@ -160,7 +170,12 @@ export async function handleApi(ctx, subPath, global) {
     // 以管理员身份发起写入（如改 origin、清缓存、logout 踢人）。
     const WRITE_METHODS = new Set(['POST', 'PUT', 'DELETE', 'PATCH']);
     if (WRITE_METHODS.has(method)) {
-      await assertSameOrigin(ctx);
+      // 配置同步接收接口为跨站 POST（发送方推送），豁免同源校验；
+      // 其安全性由 sync.receiveSync 内部的「校验码 + 密码」双重校验保障，
+      // 不依赖 Origin 同源，故此处放行避免误杀合法跨站同步。
+      if (!matched.route.csrfExempt) {
+        await assertSameOrigin(ctx);
+      }
     }
 
     return await matched.route.handler(ctx, global, param);

@@ -176,6 +176,11 @@ export   async function renderSystem() {
     ]);
     wrap.appendChild(cfgCard);
 
+    // ---- 配置同步（跨平台推送）----
+    // 接收方：本机开启接收生成校验码，供发送方粘贴；
+    // 发送方：填写接收方 URL/校验码/密码，跨站推送本机完整配置镜像。
+    wrap.appendChild(buildSyncCard());
+
     // 注：原「调试响应头」「全站品牌与请求特征」两张卡片对应的 settings 字段
     // （settings.debug.*、settings.respHeaders.serverName/viaName、
     // settings.request.clientIpHeaders、settings.disguise.staticServerName）
@@ -279,3 +284,166 @@ export
 
   // 表单助手 --------------------------------------------------------------
   // 表单字段：label + 控件 + 可选的人话说明 hint（小白友好）
+
+  /**
+   * 配置同步卡片：接收方（开启/关闭 + 校验码展示 + 状态）+ 发送方（目标 URL/path/校验码/密码/推送）。
+   * 该卡片挂载进系统设置页，与全局配置、导入导出同处。
+   * @returns {HTMLElement}
+   */
+  function buildSyncCard() {
+    const card = el('div', { class: 'card-block' }, [el('h4', {}, '配置同步（跨平台推送）')]);
+
+    // ---------- 接收方子面板 ----------
+    const statusBadge = el('span', { class: 'badge badge-off', text: '状态：检测中…' });
+    const codeBox = el('input', { class: 'input', readonly: true, placeholder: '开启后此处显示校验码' });
+    const openBtn = el('button', { class: 'btn btn-primary', text: '开启接收' });
+    const closeBtn = el('button', { class: 'btn btn-danger', text: '关闭接收', disabled: true });
+    const copyBtn = el('button', { class: 'btn', text: '复制校验码', disabled: true });
+    let countdownTimer = null;
+
+    const renderStatus = (st) => {
+      if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+      const open = !!(st && st.open);
+      statusBadge.className = 'badge ' + (open ? 'badge-on' : 'badge-off');
+      if (open) {
+        statusBadge.textContent = '状态：已开放';
+        openBtn.disabled = true;
+        closeBtn.disabled = false;
+        copyBtn.disabled = !codeBox.value;
+        const expiresAt = st.expiresAt || 0;
+        countdownTimer = setInterval(() => {
+          const remainMs = expiresAt - Date.now();
+          if (remainMs <= 0) {
+            statusBadge.textContent = '状态：已关闭（已过期）';
+            if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+            openBtn.disabled = false;
+            closeBtn.disabled = true;
+            copyBtn.disabled = true;
+            codeBox.value = '';
+            return;
+          }
+          const s = Math.ceil(remainMs / 1000);
+          const m = Math.floor(s / 60);
+          statusBadge.textContent = `状态：已开放（剩余 ${m}:${String(s % 60).padStart(2, '0')}）`;
+        }, 1000);
+      } else {
+        statusBadge.textContent = '状态：已关闭';
+        openBtn.disabled = false;
+        closeBtn.disabled = true;
+        copyBtn.disabled = true;
+        codeBox.value = '';
+      }
+    };
+
+    const refreshStatus = async () => {
+      try {
+        const st = await API.sync.status();
+        renderStatus(st);
+      } catch (e) {
+        statusBadge.textContent = '状态：未知';
+        statusBadge.className = 'badge badge-off';
+      }
+    };
+
+    openBtn.onclick = async () => {
+      openBtn.disabled = true;
+      try {
+        const res = await API.sync.open();
+        codeBox.value = res.code || '';
+        renderStatus({ open: true, expiresAt: res.expiresAt });
+        // 让倒计时先跑一次，立刻显示剩余
+        toast('接收接口已开启，校验码已生成（10 分钟内有效）', 'ok');
+      } catch (e) {
+        toast(e.message, 'err');
+        openBtn.disabled = false;
+      }
+    };
+    closeBtn.onclick = async () => {
+      closeBtn.disabled = true;
+      try {
+        await API.sync.close();
+        renderStatus({ open: false });
+        toast('接收接口已关闭', 'ok');
+      } catch (e) {
+        toast(e.message, 'err');
+        closeBtn.disabled = false;
+      }
+    };
+    copyBtn.onclick = () => {
+      if (!codeBox.value) return;
+      navigator.clipboard?.writeText(codeBox.value).then(
+        () => toast('校验码已复制', 'ok'),
+        () => toast('复制失败，请手动选择', 'err')
+      );
+    };
+
+    const recvPanel = el('div', { class: 'sync-subpanel' }, [
+      el('div', { class: 'section-head-inline' }, [el('strong', {}, '接收方（本机作为目标）'), statusBadge]),
+      el('p', { class: 'muted small' },
+        '开启后生成一次性校验码，发送方凭「校验码 + 管理密码」可将配置推送至本机；' +
+        '接口默认关闭，推送成功后自动关闭，10 分钟未用也会自动失效。'),
+      el('div', { class: 'form-stack' }, [
+        field('校验码', codeBox),
+      ]),
+      el('div', { class: 'section-head' }, [openBtn, closeBtn, copyBtn]),
+    ]);
+
+    // ---------- 发送方子面板 ----------
+    const targetUrl = el('input', { class: 'input', placeholder: 'https://eo.example.com' });
+    const targetPath = el('input', { class: 'input', placeholder: '管理面路径，如 __panel（可留空）' });
+    const targetCode = el('input', { class: 'input', placeholder: '接收方提供的校验码' });
+    const targetPwd = el('input', { class: 'input', type: 'password', placeholder: '本机 ADMIN_PASSWORD' });
+    const pushBtn = el('button', { class: 'btn btn-primary', text: '推送本机配置' });
+    const pushOut = el('div', { class: 'muted small', text: '将把本机全部站点 / 源站池 / 全局规则推送到接收方。' });
+
+    pushBtn.onclick = async () => {
+      const url = targetUrl.value.trim();
+      const code = targetCode.value.trim();
+      const pwd = targetPwd.value;
+      if (!url || !code || !pwd) { toast('请填写接收方 URL、校验码与管理密码', 'err'); return; }
+      pushBtn.disabled = true;
+      pushOut.className = 'muted small';
+      pushOut.textContent = '正在拉取本机配置镜像并推送…';
+      try {
+        // 1) 取本机完整镜像（复用导出逻辑，payload 结构与接收方 importAll 一致）
+        const resp = await API.system.export();
+        const payload = await resp.json();
+        // 2) 跨站推送到接收方开放接口
+        const res = await API.sync.push(url, targetPath.value.trim(), code, pwd, payload);
+        const imp = res && res.imported ? res.imported : {};
+        const errs = res && Array.isArray(res.errors) && res.errors.length ? `，${res.errors.length} 项失败` : '';
+        pushOut.className = 'ok-text small';
+        pushOut.textContent =
+          `✅ 推送成功${errs}（站点 ${imp.sites || 0} / 源站池 ${imp.pools || 0} / 全局 ${imp.global ? 1 : 0} / 兜底规则 ${imp.globalRules ? 1 : 0}）；接收接口已自动关闭。`;
+        toast('配置已推送到接收方', 'ok');
+      } catch (e) {
+        pushOut.className = 'err-text small';
+        pushOut.textContent = '❌ 推送失败: ' + e.message;
+        toast(e.message, 'err');
+      } finally {
+        pushBtn.disabled = false;
+      }
+    };
+
+    const sendPanel = el('div', { class: 'sync-subpanel' }, [
+      el('div', { class: 'section-head-inline' }, [el('strong', {}, '发送方（本机作为源）')]),
+      el('p', { class: 'muted small' },
+        '填写接收方信息后，将把本机完整配置镜像跨站推送过去。' +
+        '校验码与管理密码仅在本次请求中用于接收方双重校验，不会留存。'),
+      el('div', { class: 'form-stack' }, [
+        field('接收方 URL', targetUrl),
+        field('管理面路径', targetPath),
+        field('校验码', targetCode),
+        field('本机管理密码', targetPwd),
+      ]),
+      el('div', { class: 'section-head' }, [pushBtn]),
+      pushOut,
+    ]);
+
+    card.appendChild(recvPanel);
+    card.appendChild(sendPanel);
+
+    // 初始化：拉一次接收状态
+    refreshStatus();
+    return card;
+  }

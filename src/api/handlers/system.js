@@ -12,6 +12,9 @@ import {
   putSite,
   putPool,
   getGlobal,
+  putGlobal,
+  getGlobalRules,
+  putGlobalRules,
   invalidateMemCache,
 } from '../../config/store.js';
 import { validateSite, validatePool } from '../../config/schema.js';
@@ -36,12 +39,31 @@ export async function info(ctx, global) {
   });
 }
 
-/** GET /system/export */
-export async function exportAll(ctx) {
-  const [siteResult, pools, global] = await Promise.all([
+/**
+ * 构建完整配置镜像（纯数据，不含 HTTP 语义）。
+ *
+ * 这是「配置导出」与「配置同步推送」的**唯一真相源**：两条链路必须产出完全一致的
+ * 镜像结构，否则同步过去的配置会与备份文件语义漂移。因此本函数被抽离为可复用核心，
+ * 由 exportAll（下载文件）与 sync.js（跨平台推送）共同调用。
+ *
+ * 镜像内容 = global + globalRules + 全部站点 + 全部源站池。
+ * 其中 globalRules（全站兜底规则）是旧版导出遗漏的部分——它同样属于「完整配置」，
+ * 缺失会导致同步后目标端兜底行为与源端不一致，故在此一并纳入。
+ *
+ * 安全：始终剥离 passwordHash / passwordSalt。镜像会落地成文件、也会跨公网传输，
+ * 密码哈希一旦外泄，在未配置 JWT_SECRET 的部署上可被用于伪造管理员 token
+ * （见 buildLimitations 的 jwtSecret 告警）。
+ *
+ * @param {import('../../contracts.js').Ctx} ctx
+ * @returns {Promise<{payload:Object, truncated:boolean}>}
+ *   payload 为镜像本体；truncated 表示站点数超出单次扫描上限、镜像不完整
+ */
+export async function buildConfigMirror(ctx) {
+  const [siteResult, pools, global, globalRules] = await Promise.all([
     listAllSites(ctx),
     listPools(ctx),
     getGlobal(ctx),
+    getGlobalRules(ctx),
   ]);
   const { sites, truncated } = siteResult;
 
@@ -54,6 +76,7 @@ export async function exportAll(ctx) {
     version: CONFIG_VERSION,
     exportedAt: new Date().toISOString(),
     global: safeGlobal,
+    globalRules,
     sites,
     pools,
     // 站点数超过扫描上限时导出内容不完整。必须显式标注：
@@ -67,6 +90,13 @@ export async function exportAll(ctx) {
       : {}),
   };
 
+  return { payload, truncated };
+}
+
+/** GET /system/export */
+export async function exportAll(ctx) {
+  const { payload } = await buildConfigMirror(ctx);
+
   return new Response(JSON.stringify(payload, null, 2), {
     headers: {
       'content-type': 'application/json; charset=utf-8',
@@ -76,28 +106,37 @@ export async function exportAll(ctx) {
   });
 }
 
-/** POST /system/import */
-export async function importAll(ctx) {
-  let body;
-  try {
-    body = await ctx.request.json();
-  } catch {
-    return fail(ERROR_CODES.BAD_REQUEST, '请求体不是合法的 JSON', 400);
-  }
-
-  if (!body || typeof body !== 'object') {
-    return fail(ERROR_CODES.BAD_REQUEST, '配置格式不正确', 400);
-  }
+/**
+ * 应用一份配置镜像（纯数据，不含 HTTP 语义）。
+ *
+ * 与 buildConfigMirror 对称，是「配置导入」与「配置同步接收」的唯一真相源。
+ * 所有写入都必须经 validatePool / validateSite / putGlobal / putGlobalRules 这些
+ * 既有的统一校验入口，**禁止裸写 KV**——否则会绕过 schema 规范化，写进无法被
+ * 管理面正确读取的脏配置。
+ *
+ * 写入顺序：源站池 → 站点 → 全局 → 全站规则。先源站后站点是硬性要求，
+ * 保证站点引用的 poolId 在落盘时已存在。
+ *
+ * 容错策略：单条配置校验/写入失败只累计到 errors 并继续处理其余条目（部分成功优于
+ * 全盘失败——同步/恢复场景下用户更需要「尽可能多恢复 + 明确告知哪几条坏了」）。
+ *
+ * @param {import('../../contracts.js').Ctx} ctx
+ * @param {Object} body 镜像数据（形如 buildConfigMirror 的 payload）
+ * @param {{includeGlobal?:boolean}} [options]
+ *        includeGlobal 是否一并导入 global / globalRules。
+ *        默认 false：手工导入沿用旧行为（仅站点+源站），避免用户误把
+ *        备份里的 adminPath 等全局项覆盖掉当前环境而把自己锁在管理面之外。
+ *        配置同步要求「完整镜像」，故由 sync.js 显式传 true。
+ * @returns {Promise<{imported:{sites:number,pools:number,global:boolean,globalRules:boolean}, errors:string[]}>}
+ */
+export async function applyConfigMirror(ctx, body, options = {}) {
+  const includeGlobal = options.includeGlobal === true;
 
   const sites = Array.isArray(body.sites) ? body.sites : [];
   const pools = Array.isArray(body.pools) ? body.pools : [];
 
-  if (sites.length === 0 && pools.length === 0) {
-    return fail(ERROR_CODES.BAD_REQUEST, '配置中没有可导入的站点或源站', 400);
-  }
-
   const errors = [];
-  const imported = { sites: 0, pools: 0 };
+  const imported = { sites: 0, pools: 0, global: false, globalRules: false };
 
   // 先导入源站，再导入站点，保证站点引用的源站已存在
   for (const p of pools) {
@@ -131,7 +170,62 @@ export async function importAll(ctx) {
     }
   }
 
+  if (includeGlobal && body.global && typeof body.global === 'object') {
+    try {
+      // 关键：镜像中不含密码哈希（导出时已剥离），必须保留**本机**的密码凭据，
+      // 否则同步一次就会把接收方管理员密码清空、任何人都能登录（或谁都登不进去）。
+      const current = await getGlobal(ctx);
+      const merged = {
+        ...body.global,
+        passwordHash: current.passwordHash || '',
+        passwordSalt: current.passwordSalt || '',
+      };
+      await putGlobal(ctx, merged);
+      imported.global = true;
+    } catch (e) {
+      errors.push(`全局配置写入失败: ${e.message}`);
+    }
+  }
+
+  if (includeGlobal && body.globalRules && typeof body.globalRules === 'object') {
+    try {
+      const r = await putGlobalRules(ctx, body.globalRules.stages);
+      if (r.ok) {
+        imported.globalRules = true;
+      } else {
+        errors.push(`全站规则: ${(r.errors || []).join('; ')}`);
+      }
+    } catch (e) {
+      errors.push(`全站规则写入失败: ${e.message}`);
+    }
+  }
+
   invalidateMemCache();
+
+  return { imported, errors };
+}
+
+/** POST /system/import */
+export async function importAll(ctx) {
+  let body;
+  try {
+    body = await ctx.request.json();
+  } catch {
+    return fail(ERROR_CODES.BAD_REQUEST, '请求体不是合法的 JSON', 400);
+  }
+
+  if (!body || typeof body !== 'object') {
+    return fail(ERROR_CODES.BAD_REQUEST, '配置格式不正确', 400);
+  }
+
+  const sites = Array.isArray(body.sites) ? body.sites : [];
+  const pools = Array.isArray(body.pools) ? body.pools : [];
+
+  if (sites.length === 0 && pools.length === 0) {
+    return fail(ERROR_CODES.BAD_REQUEST, '配置中没有可导入的站点或源站', 400);
+  }
+
+  const { imported, errors } = await applyConfigMirror(ctx, body);
 
   return ok({
     imported,

@@ -193,6 +193,56 @@ const API = {
     import: (config) => post('/system/import', config),
   },
 
+  sync: {
+    /** 接收方：开启接收，生成校验码（ttl 秒，默认 600） */
+    open: (ttl) => post('/system/sync/open', ttl ? { ttl } : {}),
+    /** 接收方：关闭接收，立即删除校验码 */
+    close: () => post('/system/sync/close', {}),
+    /** 接收方：查询当前接收状态（是否开放 + 剩余有效期 ms） */
+    status: () => get('/system/sync/status'),
+    /**
+     * 发送方：把本机配置镜像推送到接收方。
+     * 注意这是**跨站**请求，走接收方开放接口（免登录，校验码+密码双重校验），
+     * 不经过本机同源 API 封装；这里直接 fetch 接收方完整 URL。
+     *
+     * @param {string} targetUrl  接收方完整 URL，如 https://eo.example.com
+     * @param {string} adminPath  接收方管理面路径段，如 __panel
+     * @param {string} code       接收方生成的校验码
+     * @param {string} password   发送方自身的 ADMIN_PASSWORD（明文，仅用于本次推送校验）
+     * @param {object} payload    本机完整配置镜像（由 callExport 取回）
+     */
+    push: async (targetUrl, adminPath, code, password, payload) => {
+      const path = (adminPath || '').replace(/^\/+|\/+$/g, '');
+      const seg = path ? '/' + path : '';
+      const url = `${targetUrl.replace(/\/+$/, '')}${seg}/api/system/sync/receive`;
+      const init = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ code, password, payload }),
+      };
+      let resp;
+      try {
+        resp = await fetch(url, init);
+      } catch {
+        throw new ApiError('NETWORK', '无法连接接收方，请检查 URL 与网络', 0);
+      }
+      let data = null;
+      const text = await resp.text();
+      if (text) {
+        try { data = JSON.parse(text); } catch { data = null; }
+      }
+      if (!resp.ok || !data || data.ok !== true) {
+        const err = data && data.error ? data.error : {};
+        throw new ApiError(
+          err.code || httpFallbackCode(resp.status),
+          err.message || httpFallbackMessage(resp.status),
+          resp.status
+        );
+      }
+      return data.data;
+    },
+  },
+
   config: {
     get: () => get('/config/global'),
     save: (payload) => put('/config/global', payload),

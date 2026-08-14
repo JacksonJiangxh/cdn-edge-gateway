@@ -74,6 +74,9 @@
  *   pool:_index               源站池索引 { ids: string[] }
  *   hc:{poolId}:{originId}    熔断标记（值为失败次数，TTL 60s）
  *   lock:{ip}                 登录失败锁定（TTL 900s）
+ *   sync:token                配置同步接收开关：{ code, createdAt, expiresAt }
+ *                             （TTL 默认 600s，存在且未过期 = 接收接口开放；
+ *                              发送方一次推送成功后立即删除，实现一次性+自动收口）
  *   stat:{host}:{yyyymmddhh}:{shard}   统计分片
  */
 

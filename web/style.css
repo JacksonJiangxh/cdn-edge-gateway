@@ -567,6 +567,11 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
 .dot-down { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 20%, transparent); }
 .dot-unknown { background: var(--text-mute); }
 
+/* 配置同步面板：接收/发送两个子面板 */
+.sync-subpanel { margin-top: 14px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); }
+.sync-subpanel + .sync-subpanel { margin-top: 16px; }
+.section-head-inline { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+
 /* ==========================================================================
    状态：加载 / 空 / 错误
    ========================================================================== */
