@@ -1061,14 +1061,12 @@ export function validateGlobalOnlyStage(stage, input, base) {
   }
 
   switch (stage) {
-    // ① 匹配站点：请求 URL 缺协议时的补全协议
+    // ① 匹配站点：纯 host/path 维度匹配，无协议配置（协议纠正由 terminate 阶段 forceHttps 负责）
     case 'match':
       return {
         ok: errors.length === 0,
         errors,
-        value: {
-          defaultProtocol: enumOf(src.defaultProtocol, ['http', 'https'], def.defaultProtocol),
-        },
+        value: {},
       };
 
     // ② 安全校验：全站限速参数（跨请求维度，非单条规则动作）

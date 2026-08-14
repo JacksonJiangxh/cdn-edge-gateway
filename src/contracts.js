@@ -184,7 +184,7 @@
 /**
  * 匹配对象。对齐 EO「匹配类型」。
  * @typedef {'host'|'path'|'fullUrl'|'query'|'extension'|'filename'|'directory'
- *   |'method'|'protocol'|'header'|'cookie'|'clientIp'|'clientCountry'
+ *   |'method'|'header'|'cookie'|'clientIp'|'clientCountry'
  *   |'userAgent'|'referer'} MatchTarget
  */
 

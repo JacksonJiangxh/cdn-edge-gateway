@@ -1154,11 +1154,6 @@ function foldLegacySettingsIntoStages(stages, legacySettings) {
     }
   }
 
-  // settings.request.defaultProtocol → stages.match.defaultProtocol
-  if (s.request && typeof s.request === 'object') {
-    fill(stage('match'), 'defaultProtocol', s.request.defaultProtocol);
-  }
-
   // settings.security.* → stages.security（signedUrlParam / signedUrlTtl 已废弃，不迁移）
   if (s.security && typeof s.security === 'object') {
     const sec = stage('security');

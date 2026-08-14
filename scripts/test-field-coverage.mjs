@@ -469,20 +469,10 @@ async function testError() {
   }
 }
 
-// ---- 9. 匹配站点 match.defaultProtocol / defaultHostHeader ----
+// ---- 9. 匹配站点 match（defaultProtocol 已移除：匹配维度回归纯 host/path，协议纠正由 terminate.forceHttps 负责） ----
 async function testMatch() {
   console.log('\n【I】match 阶段（控制变量：非默认值）');
-  // 9.1 全站 match.defaultProtocol 作为「请求缺协议时的回落值」进入匹配维度 subject.protocol
-  {
-    const { buildMatchSubject } = await import('../src/proxy/matcher.js');
-    const ctx = makeCtx({ CLOUD_PLATFORM: PLATFORM, CDN_KV: createMockKV() }, `https://${HOST}/pic/photo.jpg`);
-    ctx.__globalStages = buildGlobalStages({ match: { defaultProtocol: 'http' } });
-    // 模拟「请求 URL 缺协议」这一防御场景，验证 defaultProtocol 真正生效（而非死配置）
-    Object.defineProperty(ctx.url, 'protocol', { value: '', configurable: true });
-    const subj = buildMatchSubject(ctx);
-    check(subj.protocol === 'http', 'I1 全站 defaultProtocol 在缺协议时回落为匹配维度 protocol=http', `protocol=${subj.protocol}`);
-  }
-  // 9.2 站点 defaultHostHeader=origin → 回源 Host 应为源站地址（CF 下 Host 由 URL 决定，故查 url hostname）
+  // 9.1 站点 defaultHostHeader=origin → 回源 Host 应为源站地址（CF 下 Host 由 URL 决定，故查 url hostname）
   {
     const { capture } = await run({ siteOverride: { defaultHostHeader: { mode: 'origin', custom: '' } } });
     let host = capture.host;
@@ -490,7 +480,7 @@ async function testMatch() {
       try { host = new URL(capture.url).hostname; } catch { host = null; }
     }
     const ok = host === ORIGIN_ADDR;
-    check(ok, 'I2 站点 defaultHostHeader=origin 回源 Host 为源站地址', `host=${host} url=${capture.url}`);
+    check(ok, 'I1 站点 defaultHostHeader=origin 回源 Host 为源站地址', `host=${host} url=${capture.url}`);
   }
 }
 

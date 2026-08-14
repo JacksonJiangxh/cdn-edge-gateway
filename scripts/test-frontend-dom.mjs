@@ -699,7 +699,7 @@ export async function runSharedConversionTest() {
     else { failed++; console.error(`  ✗ ${msg}`); }
   };
   try {
-    const { globalStageToAction, actionToGlobalStage } = await loadSharedConversion();
+    const { globalStageToAction, actionToGlobalStage, GLOBAL_STAGE_OPS } = await loadSharedConversion();
 
     // 读：扁平阶段 terminate 直接展开到 action 顶层（不得反向嵌套 {terminate:{...}}）
     const a1 = globalStageToAction('terminate', { forceHttps: true, forceHttpsStatus: 308, directResponse: { status: 403 } });
@@ -717,6 +717,12 @@ export async function runSharedConversionTest() {
     log(JSON.stringify(s1) === JSON.stringify({ forceHttps: true, forceHttpsStatus: 301 }),
       'actionToGlobalStage(terminate) 收集顶层字段并剥离规则专属键');
     log(!('terminate' in s1), 'actionToGlobalStage(terminate) 落盘值为扁平字段，不嵌套成 {terminate:{...}}');
+
+    // 结构性回归锚点：前端 GLOBAL_STAGE_OPS.terminate 必须显式含 forceHttpsStatus
+    // （与后端 ownedFieldsForStage('terminate') 同构），否则 forceHttpsStatus 会退化为
+    // 靠兜底循环隐式收集，一旦兜底收缩即静默丢失（与上一轮「勾选不落盘」同类根因）。
+    log(Array.isArray(GLOBAL_STAGE_OPS.terminate) && GLOBAL_STAGE_OPS.terminate.includes('forceHttpsStatus'),
+      'GLOBAL_STAGE_OPS.terminate 显式含 forceHttpsStatus（前后端 op 集合同构）');
 
     // 写：嵌套型阶段 rewrite 取 action[stage] 子对象整体作为落盘值（仍平铺）
     const s2 = actionToGlobalStage('rewrite', { rewrite: { type: 'none' }, id: 'r2', stage: 'rewrite' });

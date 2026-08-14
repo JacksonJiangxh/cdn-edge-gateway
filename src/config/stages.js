@@ -164,18 +164,7 @@ export const GLOBAL_ONLY_STAGE_OPS = {
     icon: '🛰️',
     order: 1,
     globalOnly: true,
-    fields: [
-      {
-        path: 'defaultProtocol',
-        label: '默认协议',
-        type: 'select',
-        options: [
-          { value: 'https', label: 'https（推荐）' },
-          { value: 'http', label: 'http' },
-        ],
-        hint: '请求 URL 未带协议时按此协议补全后再匹配站点。',
-      },
-    ],
+    fields: [],
   },
   security: {
     title: '安全校验（全站默认）',

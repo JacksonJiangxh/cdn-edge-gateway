@@ -85,6 +85,7 @@ import {
   validateGlobalRulesStages,
   stageValueToAction,
   actionToStageValue,
+  ownedFieldsForStage,
 } from '../src/config/schema.js';
 
 import {
@@ -192,7 +193,6 @@ test('buildMatchSubject 提取路径/扩展名/查询等特征', () => {
   assert.equal(s.extension, 'png'); // 小写化
   assert.equal(s.filename, 'photo.PNG');
   assert.equal(s.method, 'GET');
-  assert.equal(s.protocol, 'https');
 });
 
 test('evalCondition: exists / notExists 不受值缺失影响', () => {
@@ -1218,6 +1218,19 @@ test('stageValueToAction / actionToStageValue: 全扁平双向转换契约', () 
   // 写：嵌套型阶段 rewrite → 取 action[stage] 子对象整体作为落盘值（仍为扁平结构）
   const s2 = actionToStageValue('rewrite', { rewrite: { type: 'none' } });
   assert.deepEqual(s2, { type: 'none' }, 'actionToStageValue(rewrite) 取 action.rewrite 子对象整体平铺落盘');
+});
+
+test('终止阶段 op 集合同构契约：ownedFieldsForStage(terminate) 含 forceHttpsStatus', () => {
+  // 结构性回归锚点：前端 GLOBAL_STAGE_OPS.terminate 与后端 ownedFieldsForStage('terminate')
+  // 必须同构（都含 forceHttps/forceHttpsStatus/directResponse），否则 forceHttpsStatus
+  // 会退化为靠前端兜底循环隐式收集，一旦兜底收缩即静默丢失（上一轮「勾选不落盘」同类根因）。
+  const f = ownedFieldsForStage('terminate');
+  for (const k of ['forceHttps', 'forceHttpsStatus', 'directResponse']) {
+    assert.ok(f.has(k), `ownedFieldsForStage('terminate') 必须含 ${k}（前后端 op 集合同构）`);
+  }
+  // 反向确认：forceHttps 的 op 字段映射确实包含 forceHttpsStatus（后端真相源）
+  assert.deepEqual(STAGE_OP_FIELDS.forceHttps, ['forceHttps', 'forceHttpsStatus'],
+    'STAGE_OP_FIELDS.forceHttps 映射应包含 forceHttpsStatus');
 });
 
 test('validateGlobalRulesStages: 未知 stage key 被忽略，缺失阶段用 base 补全', () => {

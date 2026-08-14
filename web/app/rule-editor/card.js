@@ -50,7 +50,6 @@ export   function opSection(key, title, desc, opts, children) {
     { value: 'filename', label: '文件名称' },
     { value: 'directory', label: '目录' },
     { value: 'method', label: '请求方法' },
-    { value: 'protocol', label: '请求协议（HTTP/HTTPS）' },
     { value: 'header', label: '请求头' },
     { value: 'cookie', label: 'Cookie' },
     { value: 'clientIp', label: '客户端 IP' },

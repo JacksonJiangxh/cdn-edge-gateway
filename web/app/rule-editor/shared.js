@@ -10,7 +10,7 @@ const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
 export const GLOBAL_STAGE_OPS = {
   rewrite: ['rewrite'],
   redirect: ['redirect'],
-  terminate: ['forceHttps', 'directResponse'],
+  terminate: ['forceHttps', 'forceHttpsStatus', 'directResponse'],
   reqHeaders: ['reqHeaders'],
   origin: ['hostHeader', 'clientIp', 'followRedirect', 'originTimeout', 'originConn'],
   cache: ['cache'],
@@ -28,7 +28,7 @@ const RULE_OWNED_KEYS = new Set(['id', 'name', 'note', 'priority', 'match', 'ena
 // actionToStageValue 同构。
 
 // 判定嵌套型阶段：该 stage 的 allowedOps 仅含唯一元素且该元素名 == stage 本身
-// （如 GLOBAL_STAGE_OPS.rewrite=['rewrite']、terminate=['forceHttps','directResponse'] 非嵌套）。
+// （如 GLOBAL_STAGE_OPS.rewrite=['rewrite'] 为嵌套；terminate=['forceHttps','forceHttpsStatus','directResponse'] 为扁平）。
 function isNestedStage(stage) {
   const ops = GLOBAL_STAGE_OPS[stage];
   return Array.isArray(ops) && ops.length === 1 && ops[0] === stage;
