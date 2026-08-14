@@ -22,7 +22,7 @@
  */
 
 import { getKV } from '../platform/kv.js';
-import { BAKED_CONFIG } from './baked.generated.js';
+import { BAKE_DEFAULTS } from './baked.defaults.js';
 import {
   DEFAULT_GLOBAL,
   DEFAULT_SITE_INDEX,
@@ -382,7 +382,7 @@ export function invalidateMemCache() {
  * 是否处于「烘焙配置」模式（方案 A：静态部署 / 不依赖 KV）。
  *
  * 触发条件：环境变量 STATIC_CONFIG === '1'（ESA 端的 resolveEnv 会默认带上），
- * 且烘焙配置文件确实存在（BAKED_CONFIG 已 import）。在此模式下所有读取直接
+ * 且（可选地）存在部署专属的 baked.generated.js。在此模式下所有读取直接
  * 返回烘焙对象、所有写入被拒绝——ESA 成为纯只读的边缘执行壳。
  *
  * 该模式通过环境变量开关而非运行时探测，是为了让「是否使用烘焙配置」成为部署
@@ -409,13 +409,34 @@ function throwBakedReadOnly(ctx) {
 }
 
 /**
+ * 懒加载部署专属烘焙配置（baked.generated.js，git 不追踪、由 --bake 生成）。
+ * - 首次需要时动态 import（缓存结果，避免每次请求重复 import）；
+ * - 文件不存在（CI 干净检出且未 --bake）或解析失败时，回退到入库的 BAKE_DEFAULTS
+ *   （空占位），使 ESA 端走内置默认值——构建与运行都不会因模块缺失而崩。
+ * 本加载器只在 isBakedMode 分支内被调用，非烘焙模式不会触发动态 import。
+ * @returns {Promise<object>}
+ */
+let _bakedLoaded = null;
+async function loadBaked() {
+  if (_bakedLoaded) return _bakedLoaded;
+  try {
+    const mod = await import('./baked.generated.js');
+    _bakedLoaded = mod.BAKED_CONFIG && typeof mod.BAKED_CONFIG === 'object' ? mod.BAKED_CONFIG : BAKE_DEFAULTS;
+  } catch {
+    _bakedLoaded = BAKE_DEFAULTS;
+  }
+  return _bakedLoaded;
+}
+
+/**
  * 在烘焙模式下取出对应 key 的静态对象（供 getXxx 直接返回，跳过 KV 与 L1）。
  * 不存在则返回 null，由调用方回退到内置默认。
  * @param {'global'|'globalRules'|'sites'|'pools'} key
- * @returns {any}
+ * @returns {Promise<any>}
  */
-function bakedGet(key) {
-  const v = BAKED_CONFIG?.[key];
+async function bakedGet(key) {
+  const cfg = await loadBaked();
+  const v = cfg?.[key];
   if (v === undefined) return null;
   return v;
 }
@@ -475,7 +496,7 @@ async function writeJson(ctx, key, value) {
 export async function getGlobal(ctx) {
   // 烘焙模式：直接返回烤制的 global（合并内置默认补齐缺失字段），跳过 KV / 版本号 / L1。
   if (isBakedMode(ctx)) {
-    const raw = bakedGet('global');
+    const raw = await bakedGet('global');
     const cfg = raw ? validateGlobal(raw).value : cloneGlobal();
     // adminPath 同样允许 env 兜底（见下方非烘焙分支的同款逻辑）。
     const envPath = ctx.env?.ADMIN_PATH;
@@ -611,7 +632,7 @@ async function getSiteIndex(ctx) {
 
   // 烘焙模式：索引由烤制的 sites 列表现场构建（一次即可，结果仍进 L1 缓存）。
   if (isBakedMode(ctx)) {
-    const sites = bakedGet('sites') || [];
+    const sites = await bakedGet('sites') || [];
     const idx = {
       hosts: sites.filter((s) => s && typeof s.host === 'string').map((s) => String(s.host).toLowerCase()),
       wildcards: sites
@@ -680,7 +701,7 @@ export async function getSite(ctx, host, options = {}) {
   let site;
   // 烘焙模式：不读 KV，直接在内置 sites 里按 host 查（host 已小写化）。
   if (isBakedMode(ctx)) {
-    const sites = bakedGet('sites') || [];
+    const sites = await bakedGet('sites') || [];
     site = sites.find((s) => s && typeof s.host === 'string' && String(s.host).toLowerCase() === h) || null;
   }
 
@@ -698,7 +719,7 @@ export async function getSite(ctx, host, options = {}) {
     for (const w of sorted) {
       if (w?.pattern && wildcardMatch(w.pattern, h)) {
         if (isBakedMode(ctx)) {
-          const sites = bakedGet('sites') || [];
+          const sites = await bakedGet('sites') || [];
           site =
             sites.find(
               (s) => s && typeof s.host === 'string' && String(s.host).toLowerCase() === w.pattern.toLowerCase(),
@@ -894,7 +915,7 @@ export async function getPool(ctx, poolId) {
 
   // 烘焙模式：直接从烤制的 pools 数组查（poolId 已小写化）。
   if (isBakedMode(ctx)) {
-    const pools = bakedGet('pools') || [];
+    const pools = await bakedGet('pools') || [];
     const pool = pools.find((p) => p && typeof p.id === 'string' && String(p.id).toLowerCase() === poolId) || null;
     memSet(key, pool);
     return pool;
@@ -1170,7 +1191,7 @@ const ALL_GLOBAL_STAGE_KEYS = [...STAGE_ORDER, ...GLOBAL_ONLY_STAGE_ORDER];
 export async function getGlobalRules(ctx) {
   // 烘焙模式：直接返回烤制的 globalRules（合并内置默认补齐缺失阶段）。
   if (isBakedMode(ctx)) {
-    const raw = bakedGet('globalRules');
+    const raw = await bakedGet('globalRules');
     const merged = cloneGlobalRules();
     if (raw && raw.stages) {
       // 复用校验器做规范化（缺失阶段由 base 补全），与运行时读 KV 等价。

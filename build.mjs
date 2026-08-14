@@ -491,16 +491,17 @@ async function bakeConfigFile(file) {
 }
 
 /**
- * 主流程钩子：若指定了 --bake 则生成烘焙文件；否则跳过（保留已有 / 默认空配置）。
- * 空配置（无站点）也合法——ESA 端会回退到内置默认，仅功能受限。
+ * 主流程钩子：若指定了 --bake 则生成烘焙文件（含完整配置）；否则跳过。
+ * 不强制要求文件存在——src/config/baked.defaults.js 已入库（空占位，无机密），
+ * store.js 静态 import 它即可保证「干净检出未 --bake」时 import 永不失败；
+ * 运行时若检测到 baked.generated.js（git 不追踪）存在则加载其覆盖。
  */
 async function maybeBakeConfig() {
   if (!BAKE_FILE) {
-    // 未指定 --bake：若已存在烘焙文件则提示沿用，否则保持默认空配置（仍可被 ESA 部署为只读壳）。
     if (existsSync(BAKED_OUT)) {
       console.log('  · 沿用既有 src/config/baked.generated.js（未指定 --bake）');
     } else {
-      console.log('  · 未指定 --bake，ESA 将使用默认空配置（内置默认值）；如需完整配置请加 --bake <导出文件>');
+      console.log('  · 未指定 --bake，无需烘焙文件（将使用入库的默认空占位 + 内置默认值）；如需完整配置请加 --bake <导出文件>');
     }
     return;
   }
