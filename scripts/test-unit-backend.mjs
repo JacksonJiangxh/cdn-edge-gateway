@@ -36,10 +36,7 @@ import {
   hasVars,
   validateVarNames,
   extractVarNames,
-  CLIENT_IP_HEADERS,
 } from '../src/config/vars.js';
-
-import { DEFAULT_GLOBAL_SETTINGS, DEBUG_HEADER_NAMES } from '../src/config/defaults.js';
 
 import {
   buildCacheKey,
@@ -70,8 +67,8 @@ import {
   DEFAULT_RULE,
   DEFAULT_RULE_ACTION,
   DEFAULT_GLOBAL_RULES,
+  DEBUG_HEADER_NAMES,
   cloneGlobalRules,
-  cloneGlobalSettings,
   POOL_KINDS,
   MATCH_TARGETS,
   MATCH_OPERATORS,
@@ -91,9 +88,13 @@ import {
 import {
   STAGE_OPS,
   STAGE_ORDER,
+  GLOBAL_ONLY_STAGE_ORDER,
   STAGE_ALIASES,
   normalizeStage,
 } from '../src/config/stages.js';
+
+// 单轨化后全站阶段 = 规则阶段 + 全站独有阶段（match/security/error）
+const ALL_GLOBAL_STAGE_KEYS = [...STAGE_ORDER, ...GLOBAL_ONLY_STAGE_ORDER];
 
 import { DEFAULT_RETRY_ON, CONFIG_VERSION } from '../src/contracts.js';
 import { STAGE_OP_FIELDS } from '../src/config/schema.js';
@@ -1109,8 +1110,8 @@ test('mode=origin：完全不改写缓存头（源站 no-store 透传，不下�
 // ============================================================================
 console.log('\n[config/global-rules] 全站兜底规则（阶段→默认动作映射）');
 
-test('DEFAULT_GLOBAL_RULES 覆盖全部 STAGE_ORDER 且为阶段映射结构', () => {
-  assert.deepEqual(Object.keys(DEFAULT_GLOBAL_RULES).sort(), [...STAGE_ORDER].sort(), 'DEFAULT_GLOBAL_RULES 键应等于 STAGE_ORDER');
+test('DEFAULT_GLOBAL_RULES 覆盖全部阶段（含全站独有阶段）且为阶段映射结构', () => {
+  assert.deepEqual(Object.keys(DEFAULT_GLOBAL_RULES).sort(), ALL_GLOBAL_STAGE_KEYS.slice().sort(), 'DEFAULT_GLOBAL_RULES 键应等于全部阶段');
   // 安全基线：默认强制 HTTPS（301）
   assert.equal(DEFAULT_GLOBAL_RULES.terminate.forceHttps, true);
   assert.equal(DEFAULT_GLOBAL_RULES.terminate.forceHttpsStatus, 301);
@@ -1138,13 +1139,13 @@ test('validateGlobalRulesStages: 合法 stages 原样通过校验', () => {
   const input = cloneGlobalRules();
   const r = validateGlobalRulesStages(input);
   assert.equal(r.ok, true, `合法 stages 应校验通过，但得到: ${r.errors.join('; ')}`);
-  assert.deepEqual(Object.keys(r.value.stages).sort(), [...STAGE_ORDER].sort(), '校验后保留全部阶段');
+  assert.deepEqual(Object.keys(r.value.stages).sort(), ALL_GLOBAL_STAGE_KEYS.slice().sort(), '校验后保留全部阶段');
   // 不应保留冗余字段（value.stages 仅含合法 stage 的 action 片段）
-  for (const stage of STAGE_ORDER) {
+  for (const stage of ALL_GLOBAL_STAGE_KEYS) {
     assert.ok(r.value.stages[stage] !== undefined, `${stage} 应有默认动作`);
   }
-  // settings 段应随合法输入一并返回（与 stages 并列）
-  assert.ok(r.value.settings && typeof r.value.settings === 'object', '校验后应返回 settings 段');
+  // 单轨化后不应再返回 settings 段（其字段已归并入对应 stage）
+  assert.ok(!('settings' in r.value), '校验后不应返回 settings 段（单轨化）');
 });
 
 test('validateGlobalRulesStages: 未知 stage key 被忽略，缺失阶段用 base 补全', () => {
@@ -1212,7 +1213,7 @@ async function readVersionActual(kv) {
 }
 
 // T1. 模拟冷启动 seeding 落盘（空 KV）
-testA('T1 落盘(冷启动): 空 KV 经 putGlobalRules 播种全 7 阶段 + bump 一次', async () => {
+testA('T1 落盘(冷启动): 空 KV 经 ensureGlobalRulesSeeded 播种全部阶段（含全站独有阶段）+ bump 一次', async () => {
   const { ctx, kv } = makeGlobalCtx();
   invalidateMemCache();
   // 模拟触发：ensureGlobalRulesSeeded（无模块级 _seedPromise 时第一次进入）
@@ -1220,31 +1221,32 @@ testA('T1 落盘(冷启动): 空 KV 经 putGlobalRules 播种全 7 阶段 + bump
 
   // 期望 expected
   const expectedStages = cloneGlobalRules();
-  const expectedKeys = [...STAGE_ORDER].sort();
+  const expectedKeys = ALL_GLOBAL_STAGE_KEYS.slice().sort();
 
   // 实际 actual
   const actual = await readGlobalRulesActual(kv);
   assert.ok(actual !== null, '实际：KV 中 cfg:global_rules 应已落盘');
   assert.deepEqual(Object.keys(actual.stages).sort(), expectedKeys,
-    `实际 stages 键集应 === 全部 7 阶段，得到: ${Object.keys(actual.stages).sort().join(',')}`);
+    `实际 stages 键集应 === 全部阶段（含 match/security/error），得到: ${Object.keys(actual.stages).sort().join(',')}`);
   // 每阶段非空对象
-  for (const stage of STAGE_ORDER) {
+  for (const stage of ALL_GLOBAL_STAGE_KEYS) {
     assert.ok(actual.stages[stage] && typeof actual.stages[stage] === 'object',
       `实际：阶段 ${stage} 应为非空对象`);
   }
-  // 与期望结构一致
+  // 与期望结构一致（单轨化后无 settings 段）
   assert.deepEqual(Object.keys(actual.stages).sort(), Object.keys(expectedStages).sort(),
     '实际键集与期望 base 键集一致');
+  assert.ok(!('settings' in actual), '单轨化后落盘不应含 settings 段');
   // bumpVersion 恰好一次（从 0 → 1）
   const v = await readVersionActual(kv);
   assert.equal(v, 1, `实际 cfg:version 应 bump 一次到 1，得到: ${v}`);
 });
 
 // T2. 部分缺失 stages 读取补全
-testA('T2 读取补全: 部分缺失的非空 stages 由 base 合并补全 + bump 一次', async () => {
+testA('T2 读取补全: 部分缺失的非空 stages 由 base 合并补全（含全站独有阶段）+ bump 一次', async () => {
   const { ctx, kv } = makeGlobalCtx();
   invalidateMemCache();
-  // 设置：KV 仅 2/7 阶段
+  // 设置：KV 仅 2 阶段（旧数据可能还带已废弃的 settings 段，应被单轨化迁移删除）
   const partial = {
     stages: {
       rewrite: { type: 'prefix', value: '/v1' },
@@ -1257,9 +1259,9 @@ testA('T2 读取补全: 部分缺失的非空 stages 由 base 合并补全 + bum
   // 模拟触发：getGlobalRules
   const got = await getGlobalRules(ctx);
 
-  // 期望 expected：返回含全部 7 阶段，缺失阶段由 cloneGlobalRules 补全
-  assert.deepEqual(Object.keys(got.stages).sort(), [...STAGE_ORDER].sort(),
-    `期望返回全部 7 阶段，得到: ${Object.keys(got.stages).sort().join(',')}`);
+  // 期望 expected：返回含全部阶段，缺失阶段由 cloneGlobalRules 补全
+  assert.deepEqual(Object.keys(got.stages).sort(), ALL_GLOBAL_STAGE_KEYS.slice().sort(),
+    `期望返回全部阶段，得到: ${Object.keys(got.stages).sort().join(',')}`);
   assert.equal(got.stages.rewrite.type, 'prefix', '已有 rewrite.type 应保留 prefix');
   assert.equal(got.stages.cache.enabled, false, '已有 cache.enabled 应保留 false');
   assert.equal(got.stages.redirect.enabled, false, '缺失 redirect 由 base 补全为默认关闭');
@@ -1267,61 +1269,60 @@ testA('T2 读取补全: 部分缺失的非空 stages 由 base 合并补全 + bum
   assert.ok(got.stages.origin && typeof got.stages.origin === 'object', '缺失 origin 由 base 补全');
   assert.ok(got.stages.respHeaders && typeof got.stages.respHeaders === 'object', '缺失 respHeaders 由 base 补全');
   assert.ok(got.stages.terminate && typeof got.stages.terminate === 'object', '缺失 terminate 由 base 补全');
+  // 全站独有阶段由 base 补全
+  assert.ok(got.stages.match && typeof got.stages.match === 'object', '缺失 match 由 base 补全');
+  assert.ok(got.stages.security && typeof got.stages.security === 'object', '缺失 security 由 base 补全');
+  assert.ok(got.stages.error && typeof got.stages.error === 'object', '缺失 error 由 base 补全');
 
-  // 实际 actual：KV 应被改写为合并后全量（仅新增 key 时写回 + bump）
+  // 实际 actual：KV 应被改写为合并后全量，且 settings 段被物理删除（完成单轨化）
   const actual = await readGlobalRulesActual(kv);
-  assert.deepEqual(Object.keys(actual.stages).sort(), [...STAGE_ORDER].sort(),
-    '实际 KV 应被改写为合并后全量 7 阶段');
+  assert.deepEqual(Object.keys(actual.stages).sort(), ALL_GLOBAL_STAGE_KEYS.slice().sort(),
+    '实际 KV 应被改写为合并后全量阶段');
+  assert.ok(!('settings' in actual), '旧 settings 段应被单轨化迁移物理删除');
   const v = await readVersionActual(kv);
-  assert.equal(v, 1, `实际 cfg:version 应因新增 key 而 bump 一次到 1，得到: ${v}`);
+  assert.equal(v, 1, `实际 cfg:version 应因单轨化迁移而 bump 一次到 1，得到: ${v}`);
 });
 
 // T3. 模拟人工编辑调用 putGlobalRules
-testA('T3 模拟人工编辑: putGlobalRules 落盘后全 7 阶段 + rewrite.type=none', async () => {
+testA('T3 模拟人工编辑: putGlobalRules 落盘后全部阶段 + rewrite.type=none（单轨）', async () => {
   const { ctx, kv } = makeGlobalCtx();
   invalidateMemCache();
   // 先播种完整结构
   await ensureGlobalRulesSeeded(ctx);
 
   // 模拟触发：等价于前端 openGlobalRulesDrawer → API.rules.saveGlobal
-  // 输入仅改 rewrite.type='none'，其余阶段缺失由 validateGlobalRulesStages 补
+  // 输入仅改 rewrite.type='none'，其余阶段缺失由 validateGlobalRulesStages 补全（单参 stages）
   const inputStages = { rewrite: { type: 'none' } };
-  const inputSettings = { rulesVersion: 2, defaultUpstream: 'pool:edge' };
-  await putGlobalRules(ctx, inputStages, inputSettings);
+  const res = await putGlobalRules(ctx, inputStages);
+  assert.equal(res.ok, true, '期望：putGlobalRules 单参调用成功');
 
-  // 期望 expected：落盘后 stages 仍含全 7 阶段，rewrite.type==='none'，其余保留 base 默认
+  // 期望 expected：落盘后 stages 仍含全部阶段，rewrite.type==='none'，其余保留 base 默认
   const actual = await readGlobalRulesActual(kv);
-  assert.deepEqual(Object.keys(actual.stages).sort(), [...STAGE_ORDER].sort(),
-    '期望：落盘后保留全部 7 阶段（缺失由校验补全）');
+  assert.deepEqual(Object.keys(actual.stages).sort(), ALL_GLOBAL_STAGE_KEYS.slice().sort(),
+    '期望：落盘后保留全部阶段（缺失由校验补全）');
   assert.equal(actual.stages.rewrite.type, 'none', '期望：rewrite.type 应被人工编辑为 none');
   assert.equal(actual.stages.cache.enabled, false, '期望：未编辑的 cache 保留 base 默认关闭');
-  // settings 经 validateGlobalSettings 用内置默认基线裁剪/补全：未知字段(rulesVersion/defaultUpstream)被忽略，
-  // 合法段(security/request/...)保留内置默认。语义与人工在管理面编辑等价。
-  assert.ok(actual.settings && typeof actual.settings === 'object', '期望：settings 段存在且为对象');
-  assert.equal(actual.settings.security.rateLimitRpm, 600, '期望：settings.security 来自内置默认基线');
-  // clientIpHeaders 已下沉为引擎内部常量 CLIENT_IP_HEADERS（不再作为可配 settings.request 字段），
-  // 故 settings.request 不再含该 key；其提取结果经 ${client_ip} 暴露。断言下沉语义：
-  assert.ok(!('clientIpHeaders' in (actual.settings.request || {})),
-    '期望：settings.request 已不再暴露 clientIpHeaders（已下沉为引擎常量）');
-  assert.ok(Array.isArray(CLIENT_IP_HEADERS) && CLIENT_IP_HEADERS.includes('cf-connecting-ip'),
-    '期望：真实客户端 IP 提取优先级已下沉为引擎常量 CLIENT_IP_HEADERS');
-  // 与 T1 落盘结构对比：语义一致（程序自动化 == 人工逐一设置）
-  const expectedKeys = [...STAGE_ORDER].sort();
-  assert.deepEqual(Object.keys(actual.stages).sort(), expectedKeys, '实际键集与期望一致');
+  // 单轨化后不再有 settings 段（其字段已归并入对应 stage）
+  assert.ok(!('settings' in actual), '期望：落盘结构已单轨化，无 settings 段');
+  // 全站独有阶段缺省来自 base 默认（如 security.rateLimitRpm / error.blockBody）
+  assert.equal(actual.stages.security.rateLimitRpm, DEFAULT_GLOBAL_RULES.security.rateLimitRpm,
+    '期望：未编辑的 security.rateLimitRpm 保留 base 默认');
+  assert.equal(actual.stages.error.blockBody, DEFAULT_GLOBAL_RULES.error.blockBody,
+    '期望：未编辑的 error.blockBody 保留 base 默认');
 });
 
 // T4. 幂等：已全量时 getGlobalRules 不重复写回/bump
 testA('T4 幂等: 已全量时 getGlobalRules 不再写回、bumpVersion 不额外触发', async () => {
   const { ctx, kv } = makeGlobalCtx();
   invalidateMemCache();
-  // 设置：KV 已全量 7 阶段 = cloneGlobalRules()
-  await kv.put(GR_KEY, JSON.stringify({ stages: cloneGlobalRules(), settings: cloneGlobalSettings() }));
+  // 设置：KV 已全量阶段 = cloneGlobalRules()（无 settings 段）
+  await kv.put(GR_KEY, JSON.stringify({ stages: cloneGlobalRules() }));
   const vBefore = await readVersionActual(kv); // 0（未 bump 过）
 
   // 模拟触发：getGlobalRules（应直接原样返回，无新增 key → 不写回、不 bump）
   const got = await getGlobalRules(ctx);
-  assert.deepEqual(Object.keys(got.stages).sort(), [...STAGE_ORDER].sort(),
-    '已全量时应原样返回全部 7 阶段');
+  assert.deepEqual(Object.keys(got.stages).sort(), ALL_GLOBAL_STAGE_KEYS.slice().sort(),
+    '已全量时应原样返回全部阶段');
 
   const vAfter = await readVersionActual(kv);
   assert.equal(vAfter, vBefore, `幂等：已全量时 cfg:version 不应被额外 bump（前 ${vBefore} 后 ${vAfter}）`);
@@ -1454,8 +1455,10 @@ test('DEBUG_HEADER_NAMES 默认调试响应头（已下沉为引擎常量，默�
   assert.equal(DEBUG_HEADER_NAMES.ruleId, 'X-Rule-Id');
   assert.equal(DEBUG_HEADER_NAMES.retryCount, 'X-Retry-Count');
   assert.equal(DEBUG_HEADER_NAMES.edgeTime, 'X-Edge-Time');
-  assert.ok(!('debug' in DEFAULT_GLOBAL_SETTINGS),
-    '期望：DEFAULT_GLOBAL_SETTINGS 已不再含 debug 段（已下沉为引擎常量）');
+  assert.ok(!('settings' in DEFAULT_GLOBAL_RULES),
+    '期望：DEFAULT_GLOBAL_RULES 已单轨化，不再含 settings 双轨段（全站默认均归 stages）');
+  assert.ok(typeof DEFAULT_GLOBAL_RULES === 'object' && DEFAULT_GLOBAL_RULES.reqHeaders && DEFAULT_GLOBAL_RULES.cache,
+    '期望：DEFAULT_GLOBAL_RULES 以 stages 扁平结构为唯一真相源');
 });
 
 test('applyRewrite regexTo：捕获组 $1..$9 真正生效', () => {

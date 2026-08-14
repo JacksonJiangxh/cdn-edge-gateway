@@ -25,7 +25,7 @@ import { buildCacheKey, shouldBypassCache } from './cachekey.js';
 import { buildOriginUrl, resolveHostHeader, mergeRewrite, mergeHeaderOps, mergeStageHeaderOps } from './rewrite.js';
 import { getPool, getGlobal, getGlobalRules } from '../config/store.js';
 import { renderDisguise } from './disguise.js';
-import { DEFAULT_FAILOVER, DEFAULT_GLOBAL_SETTINGS, deepClone } from '../config/defaults.js';
+import { DEFAULT_FAILOVER, DEFAULT_GLOBAL_RULES, deepClone } from '../config/defaults.js';
 import { STAGE_ORDER } from '../config/stages.js';
 import { cacheMatch, cachePut, isCacheable } from '../platform/cache.js';
 import { checkSecurity } from '../security/guard.js';
@@ -112,17 +112,23 @@ export async function handleProxy(ctx) {
  * @returns {Promise<Response>} 响应
  */
 async function runPipeline(ctx) {
-  // ---- 0. 预取全站兜底规则（含 stages + settings）----
-  // 提前到最前面，使站点匹配 / 规则匹配（matcher 的 clientIp/protocol 提取）即可读到
-  // 运行时 settings。读取失败不影响主链路（退化为内置默认）。
+  // ---- 0. 预取全站兜底规则（stages 单轨）----
+  // 提前到最前面，使站点匹配 / 规则匹配（matcher 的 protocol 补全）即可读到运行时全站默认。
+  // 读取失败不影响主链路（各消费点自行退化为内置默认）。
+  //
+  // 单轨化：过去这里还会额外取一份 settings 段（ctx.__globalSettings）——那是一批
+  // 前端不可见、却在后端生效的隐藏配置（透传白名单 / 限速 / 拦截文案 / 伪装页 TTL…）。
+  // 现在它们都是某个阶段的默认动作，统一挂在 ctx.__globalStages 上供各模块读取。
   let globalStages = {};
   try {
     const g = await getGlobalRules(ctx);
     globalStages = (g && g.stages) || {};
-    ctx.__globalSettings = (g && g.settings) || undefined;
   } catch {
     // 读取兜底规则失败时不影响站点自身逻辑
   }
+  // 供下游模块（headers/guard/matcher/disguise/ratelimit/cache）读取全站阶段默认值。
+  // 只读，不要在管线里改写它——它就是本次请求的「全站默认快照」。
+  ctx.__globalStages = globalStages;
 
   // ---- 1. 匹配站点 ----
   const site = await matchSite(ctx);
@@ -168,7 +174,9 @@ async function runPipeline(ctx) {
 
   // ---- 4. 匹配规则（此时 ctx.origin 已就绪，规则可匹配 origin / originAddr）----
 
-  // 全站通用（兜底）规则 stages：已在函数开头预取并缓存到 globalStages / ctx.__globalSettings。
+  // 全站通用（兜底）规则 stages：已在函数开头预取并缓存到 globalStages / ctx.__globalStages。
+  // 注意：只遍历 STAGE_ORDER（7 个规则型阶段）。全站独有阶段（match/security/error）
+  // 不是规则动作、无法按 URL 差异化，故不参与此处的逐阶段合并，由各自模块直接读取。
   //
   // 合并模型（详见 docs/12-request-flow.md ④.2）：逐阶段独立、先全站后站点。
   // 按 STAGE_ORDER 遍历每个阶段：
@@ -561,7 +569,10 @@ function matchPathCaptureGroups(ctx, rule) {
  */
 function safeIsCacheable(ctx, cacheKey, resp, policy) {
   try {
-    const noCacheStatus = ctx.__globalSettings && ctx.__globalSettings.cache && ctx.__globalSettings.cache.noCacheStatus;
+    // 不缓存状态码来自缓存阶段的全站默认（stages.cache.noCacheStatus），
+    // 支持 4xx/5xx/52x 段通配与 !418 例外，用户可在「全站通用规则 · 缓存」里改。
+    const gc = ctx.__globalStages && ctx.__globalStages.cache;
+    const noCacheStatus = gc && gc.noCacheStatus;
     return isCacheable(cacheKey, resp, policy, noCacheStatus) === true;
   } catch {
     return false;
@@ -620,9 +631,10 @@ function errorResponse(status, title, detail, ctx) {
   if (brand.Server !== undefined) headers.set('Server', brand.Server);
   if (brand.Via !== undefined) headers.set('Via', brand.Via);
 
-  // 错误标题优先使用全站兜底 settings.error.messages 中对应的语义文案（可被用户调整），
+  // 错误标题优先使用「错误处理」阶段全站默认里的语义文案（用户可在管理面调整），
   // 未命中语义键时回退到调用方传入的字面量。
-  const messages = (ctx.__globalSettings && ctx.__globalSettings.error && ctx.__globalSettings.error.messages) || DEFAULT_GLOBAL_SETTINGS.error.messages;
+  const ge = ctx.__globalStages && ctx.__globalStages.error;
+  const messages = (ge && ge.messages) || DEFAULT_GLOBAL_RULES.error.messages;
   const MSG_MAP = {
     'Internal Server Error': messages.internal,
     'No Origin': messages.noOrigin,

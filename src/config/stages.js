@@ -129,3 +129,124 @@ export const STAGE_OPS = {
     hideTargetPool: true,
   },
 };
+
+// ----------------------------------------------------------------------------
+// 全站独有阶段（仅存在于「全站通用规则」，无站点级/规则级对应）
+// ----------------------------------------------------------------------------
+
+/**
+ * 全站独有阶段顺序。这些阶段承载「跨请求 / 全站维度」的默认参数，
+ * 它们不是某条路由规则的 action（不能按 URL 条件匹配），因此不进 STAGE_OPS，
+ * 也不出现在站点规则抽屉的可选动作里——否则会造成 action→stage 越界。
+ *
+ * 单轨化背景：这三个阶段的字段原先藏在与 stages 并列的 settings 段里，
+ * 对前端完全不可见（双轨）。现以「全站独有阶段」形式并入同一条 stages 轨道，
+ * 使其在「全站通用规则」视图可视、可改，后端也只从 stages 读取。
+ */
+export const GLOBAL_ONLY_STAGE_ORDER = ['match', 'security', 'error'];
+
+/**
+ * 全站独有阶段字典。结构与 STAGE_OPS 同构（title/en/icon/order/fields），
+ * 但用 `fields` 描述该阶段的标量配置项（而非 allowedOps 动作列表），
+ * 因为它们是「一组全站参数」而非「可叠加的规则动作」。
+ *
+ * fields[].type：
+ *   - 'text'   文本输入
+ *   - 'number' 数字输入（min/max/step 可选）
+ *   - 'select' 下拉（options: [{value,label}]）
+ * fields[].path：相对该阶段对象的取值路径（支持 'messages.internal' 点号嵌套）。
+ */
+export const GLOBAL_ONLY_STAGE_OPS = {
+  match: {
+    title: '匹配站点（全站默认）',
+    en: 'match',
+    owner: '全站通用规则编辑器 · 匹配站点',
+    icon: '🛰️',
+    order: 1,
+    globalOnly: true,
+    fields: [
+      {
+        path: 'defaultProtocol',
+        label: '默认协议',
+        type: 'select',
+        options: [
+          { value: 'https', label: 'https（推荐）' },
+          { value: 'http', label: 'http' },
+        ],
+        hint: '请求 URL 未带协议时按此协议补全后再匹配站点。',
+      },
+    ],
+  },
+  security: {
+    title: '安全校验（全站默认）',
+    en: 'security',
+    owner: '全站通用规则编辑器 · 安全校验',
+    icon: '🚧',
+    order: 2,
+    globalOnly: true,
+    fields: [
+      {
+        path: 'rateLimitRpm',
+        label: '默认限速（次/分钟）',
+        type: 'number',
+        min: 0,
+        max: 1000000,
+        hint: '站点未单独设置限速时使用此值；0 表示不限速。',
+      },
+      {
+        path: 'rlTtlSec',
+        label: '计数存活时长（秒）',
+        type: 'number',
+        min: 1,
+        max: 86400,
+        hint: '限速计数槽的存活秒数，一般为限速窗口的 2 倍。',
+      },
+      {
+        path: 'remoteSyncIntervalMs',
+        label: '多节点同步间隔（毫秒）',
+        type: 'number',
+        min: 1000,
+        max: 600000,
+        hint: '各边缘节点把本地限速计数同步到远端的间隔。越小越准、成本越高。',
+      },
+      {
+        path: 'memMaxEntries',
+        label: '内存计数表上限（条）',
+        type: 'number',
+        min: 100,
+        max: 1000000,
+        hint: '限速内存表最大条目数，防止节点内存无限增长。',
+      },
+    ],
+  },
+  error: {
+    title: '错误处理 / 拦截响应（全站默认）',
+    en: 'error',
+    owner: '全站通用规则编辑器 · 错误处理',
+    icon: '🛑',
+    order: 3,
+    globalOnly: true,
+    fields: [
+      {
+        path: 'blockBody',
+        label: '拦截响应体',
+        type: 'textarea',
+        hint: '被安全规则拦截（403）时返回的内容。可填纯文本或完整 HTML 自定义错误页。',
+      },
+      {
+        path: 'blockCacheControl',
+        label: '拦截响应 Cache-Control',
+        type: 'text',
+        hint: '拦截结果不应被缓存，建议保持 no-store。',
+      },
+      { path: 'messages.internal', label: '500 文案', type: 'text', hint: '网关内部错误时返回的文案。' },
+      { path: 'messages.noOrigin', label: '无可用源站文案', type: 'text', hint: '站点未配置源站时返回的文案。' },
+      { path: 'messages.configError', label: '配置错误文案', type: 'text', hint: '配置校验失败时返回的文案。' },
+    ],
+  },
+};
+
+/** 判断某阶段是否为「全站独有阶段」（仅全站通用规则可编辑）。 */
+export function isGlobalOnlyStage(s) {
+  return Object.prototype.hasOwnProperty.call(GLOBAL_ONLY_STAGE_OPS, s);
+}

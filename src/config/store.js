@@ -29,10 +29,9 @@ import {
   DEFAULT_GLOBAL_RULES,
   cloneGlobal,
   cloneGlobalRules,
-  cloneGlobalSettings,
   deepClone,
 } from './defaults.js';
-import { STAGE_ORDER } from './stages.js';
+import { STAGE_ORDER, GLOBAL_ONLY_STAGE_ORDER } from './stages.js';
 import { validateGlobal, validateGlobalRulesStages } from './schema.js';
 import { registerDomain, allocBytes, releaseBytes, syncEntries } from '../platform/memBudget.js';
 
@@ -866,16 +865,23 @@ function migrateGlobalRulesFromArray(data) {
   /** @type {Record<string, any>} */
   const stages = {};
   const rules = Array.isArray(data.rules) ? data.rules : [];
+  const base = cloneGlobalRules();
   for (const stage of STAGE_ORDER) {
     const first = rules.find((r) => r && r.stage === stage && r.action);
-    stages[stage] = first ? deepClone(first.action[stage]) : cloneGlobalRules()[stage];
+    stages[stage] = first ? deepClone(first.action[stage]) : base[stage];
+  }
+  // 全站独有阶段（match/security/error）从来不会出现在旧的 rules 数组里
+  // （它们不是规则动作），直接用内置默认铺底，后续由 foldLegacySettingsIntoStages
+  // 把老 settings 里的对应值覆盖上来。
+  for (const stage of GLOBAL_ONLY_STAGE_ORDER) {
+    stages[stage] = base[stage];
   }
   return stages;
 }
 
 /**
  * 冷启动主动播种：部署后 isolate 首次处理请求时，若 KV 中全站规则缺失/为空结构，
- * 则从内置 DEFAULT_GLOBAL_RULES / cloneGlobalSettings() 写入 KV，使后续管理面与数据面
+ * 则从内置 DEFAULT_GLOBAL_RULES 写入 KV，使后续管理面与数据面
  * 读取始终命中一致、非空的全站规则（规范化「内置写入落盘」的触发时机）。
  *
  * 设计：
@@ -899,7 +905,7 @@ export async function ensureGlobalRulesSeeded(ctx) {
       // 关键：经由统一写入入口 putGlobalRules 落盘，与人工在管理面编辑走同一
       // validateGlobalRulesStages 校验 + 落盘 + invalidateMemCache + bumpVersion 逻辑，
       // 禁止直接裸写 KV（满足「程序模拟人工编辑、与人工逐一设置完全等价」要求）。
-      await putGlobalRules(ctx, cloneGlobalRules(), cloneGlobalSettings());
+      await putGlobalRules(ctx, cloneGlobalRules());
     }
   })().catch((err) => {
     console.error('[store] 全站规则冷启动播种失败（忽略，由读取路径兜底）:', err?.message);
@@ -914,153 +920,211 @@ export async function ensureGlobalRulesSeeded(ctx) {
  * 读取全站通用（兜底）规则：阶段→默认动作映射，每个阶段 1 条、无条件。
  *
  * 兜底语义：KV 为空时写入内置保守默认（DEFAULT_GLOBAL_RULES）并返回，之后用户可改。
- * 旧版 Rule[] 结构会被一次性迁移为 stages 映射并写回，保证灰度无中断。
- * 返回结构为 { stages, settings }：stages 为各阶段默认动作映射，settings 为全局默认参数。
+ * 旧版 Rule[] 结构、以及旧版并列的 settings 段都会被一次性迁移进 stages 并写回，
+ * 保证灰度无中断。
+ *
+ * 单轨化后返回结构只有 { stages }：所有全站默认参数（含原 settings 段的
+ * 透传白名单 / 限速 / 拦截文案 / 伪装页 TTL 等）都是某个阶段的默认动作。
  * @param {import('../contracts.js').Ctx} ctx
- * @returns {Promise<{stages: Record<string, any>, settings: Record<string, any>}>}
+ * @returns {Promise<{stages: Record<string, any>}>}
  */
 /**
- * 将 settings.respHeaders 中的默认剥离列表并入 stages.respHeaders，
- * 使运行时「流量序列默认操作」的唯一真相源为 stages（settings 仅作为管理面可读来源）。
+ * 【一次性向后兼容迁移】把旧数据的 settings 段折叠进 stages（单轨化）。
  *
- * 注意：品牌头 Server/Via 已不再经 settings.respHeaders.serverName/viaName 中转，
- * 而是直接在 DEFAULT_GLOBAL_RULES.respHeaders.set 中以 ${product_name}（代码常量 PRODUCT_NAME）
- * 表达，故此处不再补全省牌头——stages 自带 server/via 即唯一真相源。
- * - stripDefaults 并入 stages.respHeaders.remove（去重）
- * 返回一个新的 stages 对象，不修改入参。
- * @param {Record<string, any>} stages
- * @param {Record<string, any>} settings
- * @returns {Record<string, any>}
+ * 历史背景：全站规则曾以 `{ stages, settings }` 双轨落盘——stages 是各阶段默认动作，
+ * settings 是一批「对前端完全隐藏」的全局参数（透传白名单 / 限速 / 拦截文案 / 伪装页 TTL…）。
+ * 用户在管理面看不到也改不了 settings，后端却按它生效，属于典型的双轨陷阱。
+ *
+ * 现已单轨化：所有原 settings 字段都归入其业务本质所属的阶段（见 defaults.js 的映射表），
+ * 运行时与管理面都只读 stages。本函数负责把老 KV 里残留的 settings 逐字段搬进 stages，
+ * 使升级后的首次读取即完成迁移（幂等：已迁移过的数据再跑一次结果不变）。
+ *
+ * 迁移原则：**stages 已有的用户值优先**，settings 只填补 stages 中缺失的字段。
+ * 因为 stages 是用户在管理面唯一能编辑的一轨，其值代表用户真实意图。
+ *
+ * @param {Record<string, any>} stages 新轨（阶段→默认动作）
+ * @param {Record<string, any>=} legacySettings 旧轨 settings 段（可能为 undefined）
+ * @returns {Record<string, any>} 新的 stages 对象（不修改入参）
  */
-function foldSettingsIntoStages(stages, settings) {
+function foldLegacySettingsIntoStages(stages, legacySettings) {
   const out = deepClone(stages);
-  const rph = settings && settings.respHeaders && typeof settings.respHeaders === 'object'
-    ? settings.respHeaders
-    : {};
-  const rh = (out.respHeaders && typeof out.respHeaders === 'object') ? out.respHeaders : (out.respHeaders = {});
-  const set = (rh.set && typeof rh.set === 'object') ? rh.set : (rh.set = {});
+  const s = legacySettings && typeof legacySettings === 'object' ? legacySettings : null;
+  if (!s) return out;
 
-  // 默认剥离列表并入 remove（去重）
-  if (Array.isArray(rph.stripDefaults) && rph.stripDefaults.length) {
-    const rem = Array.isArray(rh.remove) ? (rh.remove = [...rh.remove]) : (rh.remove = []);
-    for (const h of rph.stripDefaults) {
-      if (!rem.some((x) => String(x).toLowerCase() === String(h).toLowerCase())) rem.push(h);
+  /** 取/建某阶段对象 */
+  const stage = (k) => (out[k] && typeof out[k] === 'object' ? out[k] : (out[k] = {}));
+  /** 仅当目标字段缺失时才填入（stages 用户值优先） */
+  const fill = (obj, key, val) => {
+    if (val !== undefined && val !== null && obj[key] === undefined) obj[key] = deepClone(val);
+  };
+  /** 把数组并入目标数组并去重（大小写不敏感，用于头名） */
+  const mergeHeaderList = (obj, key, list) => {
+    if (!Array.isArray(list) || !list.length) return;
+    const arr = Array.isArray(obj[key]) ? (obj[key] = [...obj[key]]) : (obj[key] = []);
+    for (const h of list) {
+      if (!arr.some((x) => String(x).toLowerCase() === String(h).toLowerCase())) arr.push(h);
+    }
+  };
+
+  // settings.respHeaders.stripDefaults → stages.respHeaders.remove（去重合并）
+  if (s.respHeaders && typeof s.respHeaders === 'object') {
+    mergeHeaderList(stage('respHeaders'), 'remove', s.respHeaders.stripDefaults);
+  }
+
+  // settings.reqHeaders.{forwardWhitelist,stripPrefixes,stripExact} → stages.reqHeaders
+  if (s.reqHeaders && typeof s.reqHeaders === 'object') {
+    const rh = stage('reqHeaders');
+    fill(rh, 'forwardWhitelist', s.reqHeaders.forwardWhitelist);
+    // 旧的 stripPrefixes / stripExact 两个列表合并成统一 {type,value} 语法
+    if (rh.strip === undefined) {
+      const strip = [];
+      for (const p of s.reqHeaders.stripPrefixes || []) strip.push({ type: 'prefix', value: String(p) });
+      for (const e of s.reqHeaders.stripExact || []) strip.push({ type: 'exact', value: String(e) });
+      if (strip.length) rh.strip = strip;
+    }
+    // proxyUserAgent 已删除：反代统一复用 stages.reqHeaders.set['User-Agent']，不再单独配置。
+  }
+
+  // settings.cache.noCacheStatus → stages.cache.noCacheStatus
+  // settings.disguise.*         → stages.cache.disguise
+  if (s.cache && typeof s.cache === 'object') {
+    fill(stage('cache'), 'noCacheStatus', s.cache.noCacheStatus);
+  }
+  if (s.disguise && typeof s.disguise === 'object') {
+    const c = stage('cache');
+    if (c.disguise === undefined) {
+      const dg = {};
+      if (s.disguise.disguiseCdnMaxAge !== undefined) dg.cdnMaxAge = s.disguise.disguiseCdnMaxAge;
+      if (s.disguise.disguiseIsolateTtlMs !== undefined) dg.isolateTtlMs = s.disguise.disguiseIsolateTtlMs;
+      if (Object.keys(dg).length) c.disguise = dg;
     }
   }
+
+  // settings.origin.* → stages.origin.failover（消除与池级 failover 的双份真相源）
+  if (s.origin && typeof s.origin === 'object') {
+    const o = stage('origin');
+    const fo = (o.failover && typeof o.failover === 'object') ? o.failover : (o.failover = {});
+    for (const k of ['retryOn', 'maxRetries', 'timeoutMs', 'maxRetryBodyBytes']) {
+      fill(fo, k, s.origin[k]);
+    }
+  }
+
+  // settings.request.defaultProtocol → stages.match.defaultProtocol
+  if (s.request && typeof s.request === 'object') {
+    fill(stage('match'), 'defaultProtocol', s.request.defaultProtocol);
+  }
+
+  // settings.security.* → stages.security（signedUrlParam / signedUrlTtl 已废弃，不迁移）
+  if (s.security && typeof s.security === 'object') {
+    const sec = stage('security');
+    for (const k of ['rateLimitRpm', 'rlTtlSec', 'remoteSyncIntervalMs', 'memMaxEntries']) {
+      fill(sec, k, s.security[k]);
+    }
+  }
+
+  // settings.error.* → stages.error
+  if (s.error && typeof s.error === 'object') {
+    const e = stage('error');
+    fill(e, 'blockBody', s.error.blockBody);
+    fill(e, 'blockCacheControl', s.error.blockCacheControl);
+    if (s.error.messages && typeof s.error.messages === 'object') {
+      const m = (e.messages && typeof e.messages === 'object') ? e.messages : (e.messages = {});
+      for (const k of ['internal', 'noOrigin', 'configError']) fill(m, k, s.error.messages[k]);
+    }
+  }
+
   return out;
 }
 
+/**
+ * 全站规则的全部阶段 key（规则型 7 阶段 + 全站独有 3 阶段）。
+ * 单轨化后，原 settings 段的字段都落在 GLOBAL_ONLY_STAGE_ORDER 这三个阶段里，
+ * 因此补全缺失阶段时必须把它们一并算进来，否则升级后新阶段永远为空。
+ */
+const ALL_GLOBAL_STAGE_KEYS = [...STAGE_ORDER, ...GLOBAL_ONLY_STAGE_ORDER];
+
 export async function getGlobalRules(ctx) {
   const data = await readJson(ctx, K_GLOBAL_RULES);
-  // 旧结构：{ rules: [...] } —— 迁移后写回
-  if (data && Array.isArray(data.rules)) {
-    const stages = foldSettingsIntoStages(migrateGlobalRulesFromArray(data), cloneGlobalSettings());
-    const settings = cloneGlobalSettings();
+
+  /** 落盘 + 失效内存缓存 + bump 版本（失败只告警，不影响返回值） */
+  const persist = async (stages, why) => {
     try {
-      await writeJson(ctx, K_GLOBAL_RULES, { stages, settings });
+      await writeJson(ctx, K_GLOBAL_RULES, { stages });
       invalidateMemCache();
       await bumpVersion(ctx);
     } catch (err) {
-      console.error('[store] 全站规则旧结构迁移写回失败（忽略，仍返回映射）:', err?.message);
+      console.error(`[store] 全站规则${why}落盘失败（忽略，仍返回内存值）:`, err?.message);
     }
-    return { stages: deepClone(stages), settings: deepClone(settings) };
+  };
+
+  // 旧结构 A：{ rules: [...] } —— 数组时代的规则，迁移为 stages 映射后写回
+  if (data && Array.isArray(data.rules)) {
+    const stages = foldLegacySettingsIntoStages(migrateGlobalRulesFromArray(data), data.settings);
+    await persist(stages, '旧数组结构迁移');
+    return { stages: deepClone(stages) };
   }
-  // 新结构：{ stages: {...}, settings?: {...} }
+
+  // 新结构：{ stages: {...} }（旧数据可能还带一个已废弃的 settings 段）
   if (data && data.stages && typeof data.stages === 'object') {
     // 实质为空（stages 是空对象 {}，常见于「KV 被清空后残留一个空结构」或
     // putGlobalRules 收到空 stages 写入）时，不返回空值、改为补落盘内置默认，
     // 避免「全站规则 key 存在但所有阶段值空」的永久态。
     if (Object.keys(data.stages).length === 0) {
-      const def = { stages: cloneGlobalRules(), settings: cloneGlobalSettings() };
-      try {
-        await writeJson(ctx, K_GLOBAL_RULES, def);
-        invalidateMemCache();
-        await bumpVersion(ctx);
-      } catch (err) {
-        console.error('[store] 全站规则空结构补默认落盘失败（忽略，仍返回默认）:', err?.message);
-      }
-      return { stages: deepClone(foldSettingsIntoStages(def.stages, def.settings)), settings: deepClone(def.settings) };
+      const stages = cloneGlobalRules();
+      await persist(stages, '空结构补默认');
+      return { stages: deepClone(stages) };
     }
-    // settings 缺失（旧版仅含 stages）时用内置默认补全，保持向后兼容
-    const settings = data.settings && typeof data.settings === 'object'
-      ? deepClone(data.settings)
-      : cloneGlobalSettings();
+
+    // 单轨化迁移：先把老 settings 折进 stages（幂等；无 settings 时为恒等变换）
+    const folded = foldLegacySettingsIntoStages(data.stages, data.settings);
+
     // 逐阶段合并补全：内置默认铺底、用户已有值覆盖。
-    // 仅当 KV 中 stages 缺失个别 key（非空对象但部分阶段丢失）时，
-    // 用 cloneGlobalRules() 补全缺失阶段，并仅在有新增 key 时写回 + bumpVersion（幂等）。
-    // 这样可修复「KV 中 cfg:global_rules.stages 为部分缺失的非空对象时前端某些阶段空白」的 bug。
+    // 仅当 stages 缺失个别阶段 key 时补全，并且只在「确有新增」时写回 + bumpVersion（幂等），
+    // 避免每次读取都写 KV。这也是升级后自动补齐 match/security/error 三个新阶段的路径。
     const base = cloneGlobalRules();
     const merged = {};
     let added = false;
-    for (const stage of STAGE_ORDER) {
-      if (data.stages[stage] !== undefined) {
-        merged[stage] = deepClone(data.stages[stage]);
+    for (const stage of ALL_GLOBAL_STAGE_KEYS) {
+      if (folded[stage] !== undefined) {
+        merged[stage] = deepClone(folded[stage]);
       } else {
         merged[stage] = deepClone(base[stage]);
         added = true;
       }
     }
-    if (added) {
-      const def = { stages: merged, settings };
-      try {
-        await writeJson(ctx, K_GLOBAL_RULES, def);
-        invalidateMemCache();
-        await bumpVersion(ctx);
-      } catch (err) {
-        console.error('[store] 全站规则缺失阶段补全落盘失败（忽略，仍返回补全值）:', err?.message);
-      }
-      return { stages: deepClone(foldSettingsIntoStages(merged, settings)), settings: deepClone(settings) };
+    // 老数据带 settings 段时，即使阶段齐全也要写回一次以物理删除 settings（完成单轨化）
+    const hadLegacySettings = !!(data.settings && typeof data.settings === 'object');
+    if (added || hadLegacySettings) {
+      await persist(merged, hadLegacySettings ? 'settings 单轨化迁移' : '缺失阶段补全');
     }
-    return { stages: deepClone(foldSettingsIntoStages(data.stages, settings)), settings: deepClone(settings) };
+    return { stages: deepClone(merged) };
   }
+
   // 空值：落盘内置默认并返回（幂等由调用方并发容忍，失败不影响返回）
-  const def = { stages: cloneGlobalRules(), settings: cloneGlobalSettings() };
-  try {
-    await writeJson(ctx, K_GLOBAL_RULES, def);
-    invalidateMemCache();
-    await bumpVersion(ctx);
-  } catch (err) {
-    console.error('[store] 全站规则默认落盘失败（忽略，仍返回默认）:', err?.message);
-  }
-  return { stages: deepClone(foldSettingsIntoStages(def.stages, def.settings)), settings: deepClone(def.settings) };
+  const stages = cloneGlobalRules();
+  await persist(stages, '默认');
+  return { stages: deepClone(stages) };
 }
 
 /**
- * 覆盖写入全站通用（兜底）规则：阶段→默认动作映射 + 全局默认参数。
+ * 覆盖写入全站通用（兜底）规则：阶段→默认动作映射。
+ *
+ * 单轨化后只接收 stages 一个参数——原先并列的 settings 段已取消，
+ * 其字段全部作为对应阶段（含 match/security/error 三个全站独有阶段）的默认动作。
  * @param {import('../contracts.js').Ctx} ctx
- * @param {Record<string, any>} stages 键为 STAGE_ORDER，值为各阶段默认 action
- * @param {Record<string, any>=} settings 全局默认参数（可选，缺省保留原值或内置默认）
+ * @param {Record<string, any>} stages 键为 STAGE_ORDER + GLOBAL_ONLY_STAGE_ORDER，值为各阶段默认 action
  */
-export async function putGlobalRules(ctx, stages, settings) {
-  // 经统一校验入口规范化：缺失阶段由内置 base 补全，settings 由内置默认基线校验/补全。
+export async function putGlobalRules(ctx, stages) {
+  // 经统一校验入口规范化：缺失阶段由内置 base 补全。
   // 与人工在管理面经 PUT /rules/global 完全等价，禁止裸写 KV。
   const res = validateGlobalRulesStages(
-    { stages: stages && typeof stages === 'object' ? stages : {}, settings },
+    { stages: stages && typeof stages === 'object' ? stages : {} },
     cloneGlobalRules(),
   );
   if (!res.ok) return { ok: false, errors: res.errors };
-  const { stages: normStages, settings: normSettings } = res.value;
-  await writeJson(ctx, K_GLOBAL_RULES, { stages: normStages, settings: normSettings });
+  const { stages: normStages } = res.value;
+  await writeJson(ctx, K_GLOBAL_RULES, { stages: normStages });
   invalidateMemCache();
   await bumpVersion(ctx);
-  return { ok: true, value: { stages: normStages, settings: normSettings } };
-}
-
-/**
- * 读取全站兜底「全局默认参数」（settings 段）。
- * 优先从 KV 的全站规则读取；KV 读取异常时回退到内置冻结默认值，保证主链路不瘫痪。
- * 结果会被调用方缓存到 ctx.__globalSettings 复用。
- * @param {import('../contracts.js').Ctx} ctx
- * @returns {Promise<Record<string, any>>}
- */
-export async function getGlobalSettings(ctx) {
-  try {
-    const data = await readJson(ctx, K_GLOBAL_RULES);
-    if (data && data.settings && typeof data.settings === 'object') {
-      return deepClone(data.settings);
-    }
-  } catch (err) {
-    console.error('[store] 读取全站全局参数失败，回退内置默认:', err?.message);
-  }
-  return cloneGlobalSettings();
+  return { ok: true, value: { stages: normStages } };
 }

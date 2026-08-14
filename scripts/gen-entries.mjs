@@ -31,8 +31,22 @@ import { fileURLToPath } from 'node:url';
 // 不能直接用 dirname(import.meta.url)（那会是 scripts/），否则入口会写到 scripts/web/。
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** @type {readonly ['STAGE_ORDER', 'STAGE_OPS', 'STAGE_ALIASES', 'normalizeStage']} */
-const STAGE_SUBSET = ['STAGE_ORDER', 'STAGE_OPS', 'STAGE_ALIASES', 'normalizeStage'];
+/**
+ * 前端所需的阶段字典子集。
+ * 含「全站独有阶段」（GLOBAL_ONLY_*）：这些阶段承载原先藏在 settings 双轨里的
+ * 全站参数（匹配站点默认协议 / 安全校验限速 / 错误处理文案），单轨化后需由
+ * 前端「全站通用规则」视图渲染，故一并抽取到前端字典，保持单一真相源。
+ * @type {readonly string[]}
+ */
+const STAGE_SUBSET = [
+  'STAGE_ORDER',
+  'STAGE_OPS',
+  'STAGE_ALIASES',
+  'normalizeStage',
+  'GLOBAL_ONLY_STAGE_ORDER',
+  'GLOBAL_ONLY_STAGE_OPS',
+  'isGlobalOnlyStage',
+];
 
 /**
  * 生成 web/_stage.entry.js：显式 re-export src/config/stages.js 的前端子集。

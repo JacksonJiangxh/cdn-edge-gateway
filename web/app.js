@@ -20,7 +20,16 @@
 
 // 构建期生成：与后端 src/config/stages.js 逐字同源（见 build.mjs）。
 // eslint-disable-next-line import/no-unresolved
-import { STAGE_ORDER, STAGE_OPS, STAGE_ALIASES, normalizeStage } from './_stage.gen.js';
+import {
+  STAGE_ORDER,
+  STAGE_OPS,
+  STAGE_ALIASES,
+  normalizeStage,
+  // 全站独有阶段（匹配站点 / 安全校验 / 错误处理）：承载原先藏在后端隐藏配置里的
+  // 全站基线参数，非规则动作，用专属参数表单编辑。
+  GLOBAL_ONLY_STAGE_OPS,
+  isGlobalOnlyStage,
+} from './_stage.gen.js';
 // 安全 DOM / 模板工具层（单一真相源；禁止在本文件写 innerHTML 拼接）。
 // 所有节点构造统一走 dom.js 的 el/clear/$/escapeHtml，根绝 <> 标签丢失与注入。
 import { el, clear, $ } from './dom.js';
@@ -357,7 +366,8 @@ import { el, clear, $ } from './dom.js';
         ]),
       ];
     });
-    wrap.appendChild(table(['Host', '状态', '源站', '规则数', '代次', '操作'], rows));
+    // 「缓存版本」= 底层 cacheGen。展示成「第 N 版」比「代次 N」易懂得多。
+    wrap.appendChild(table(['Host', '状态', '源站', '规则数', '缓存版本', '操作'], rows));
     return wrap;
   }
 
@@ -610,13 +620,13 @@ import { el, clear, $ } from './dom.js';
 
       renderRuleStage('cache', '📥', 'Cache Rules（缓存请求设置）', '缓存策略（edgeTtl / SWR / browserTtl / 绕过缓存）等请求级缓存设置', null, STAGE_OPS['cache']);
 
-      // ── ⑫ 缓存键（可干预：站点 cacheGen）──────────────────────
-      flow.appendChild(seqGroup('⑫', '缓存键', '合并 policy = 默认 < 源站级 cache < cache 阶段(Cache Rules)；本环节可干预项：站点 cacheGen（代次）。'));
+      // ── ⑫ 缓存键（可干预：站点缓存版本）──────────────────────
+      flow.appendChild(seqGroup('⑫', '缓存键', '合并 policy = 默认 < 源站级 cache < cache 阶段(Cache Rules)；本环节可干预项：站点缓存版本（清空后旧版本自动失效）。'));
       const cacheRules = rules.filter((r) => ruleStage(r) === 'cache');
       const hasCache = cacheRules.some((r) => r.action.cache.enabled);
       flow.appendChild(seqStage('🔖', '⑫ 合并缓存策略 & 构造缓存键',
-        `⑪ 缓存动作 ${cacheRules.length} 条 · 站点 cacheGen=${site.cacheGen || 0}${hasCache ? '（已启用节点缓存）' : ''}`,
-        '推导', null, () => openCacheGenDrawer(site.host, cacheRules.length, hasCache), '缓存键抽屉（仅调整 cacheGen 代次）'));
+        `⑪ 缓存动作 ${cacheRules.length} 条 · 站点缓存版本 v${site.cacheGen || 0}${hasCache ? '（已启用节点缓存）' : ''}`,
+        '推导', null, () => openCacheGenDrawer(site.host, cacheRules.length, hasCache), '缓存键抽屉（仅调整清空缓存）'));
 
       // ── ⑬ 查边缘缓存（运行时，纯只读）──────────────────────────
       flow.appendChild(seqGroup('⑬', '查缓存', '命中则直接返回（X-Cache: HIT），未命中继续 ⑭ 真正回源。运行时行为。'));
@@ -790,12 +800,33 @@ import { el, clear, $ } from './dom.js';
         }
       }
 
+      // 全站独有阶段（匹配站点 / 安全校验 / 错误处理）：一组全站基线参数，
+      // 不是规则动作，故用参数表单抽屉编辑。
+      // 这些参数以前藏在后端隐藏配置里（前端只显示「未配置 / 暂不支持」，
+      // 而后端其实一直按内置值生效），现在一并搬到这里，可视可改。
+      function gParamStage(key, no, summary) {
+        const meta = GLOBAL_ONLY_STAGE_OPS[key];
+        if (!meta) return;
+        const value = (GLOBAL_STAGES && GLOBAL_STAGES[key]) || {};
+        const isBuiltin = !(GLOBAL_STAGES && GLOBAL_STAGES[key]);
+        // 摘要里直接把关键参数值摊开，避免「必须点进抽屉才知道当前生效值」
+        const parts = (meta.fields || []).slice(0, 3).map((f) => {
+          const v = f.path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), value);
+          return v === undefined || v === '' ? null : `${f.label} ${v}`;
+        }).filter(Boolean);
+        const text = parts.length ? `当前：${parts.join('；')}。${summary}` : summary;
+        flow.appendChild(seqStage(meta.icon, `${no} ${meta.title.replace('（全站默认）', '')}`, text,
+          isBuiltin ? '内置默认' : '已配置', 'sec-rules',
+          () => openGlobalOnlyStageDrawer(key), '全站通用规则编辑器'));
+      }
+
       flow.appendChild(seqGroup('全站', '全站通用规则（兜底默认）', '新阶段→默认动作映射，每个阶段恰好 1 条、无条件、无优先级。以下规则对任何站点都生效，仅当站点自身规则未命中（该阶段字段缺失）时才触发，相当于全局默认设置。点击阶段即可编辑该阶段的默认动作。'));
 
-      flow.appendChild(seqStage('🛰️', '① 匹配站点', '全站规则不参与匹配站点，仅作为兜底作用于已命中的站点。', '—', null, null, null));
+      gParamStage('match', '①', '请求 URL 没带协议时按此协议补全，然后再去匹配站点。');
 
-      flow.appendChild(seqGroup('②-③', '安全 / 首要分流（全站维度）', '全站通用规则当前不承载安全包与源站选择，阶段显示空。'));
-      flow.appendChild(seqStage('🚧', '②.1~②.5 安全包', '全站通用规则暂不含安全配置，安全在各站点自身配置。', '未配置', null, null, null));
+      flow.appendChild(seqGroup('②-④', '安全 / 首要分流（全站维度）', '全站安全基线与错误响应在此配置；具体的防盗链、IP 名单等仍在各站点自身设置。'));
+      gParamStage('security', '②.1~②.5', '全站默认限速与计数参数；站点自己设了限速就以站点为准。');
+      gParamStage('error', '②.6', '被拦截时返回什么内容，以及各类 5xx 错误的文案（可直接粘贴自定义错误页 HTML）。');
       flow.appendChild(seqStage('🎯', '③ 初始回源对象', '全站通用规则不选择初始源站，源站由各站点自身决定。', '未配置', null, null, null));
       flow.appendChild(seqStage('🔧', '④ URL 规范化', '全站通用规则暂不支持 URL 规范化。', '暂不支持', null, null, null));
 
@@ -1232,9 +1263,326 @@ import { el, clear, $ } from './dom.js';
     return `（${sec} 秒）`;
   }
 
+  // ---------------------------------------------------------------------------
+  // 状态码模式录入（与后端 contracts.js 的 STATUS_PATTERN_RE / matchStatusPattern 对齐）
+  // ---------------------------------------------------------------------------
+
+  /** 合法状态码模式：精确码 404、百位段 4xx、十位段 52x，可加 ! 前缀表示例外 */
+  const STATUS_PATTERN_RE = /^!?(?:[1-5]\d{2}|[1-5]xx|[1-5]\dx)$/i;
+  const STATUS_PATTERN_HINT = '支持三种写法：精确码 404；整段通配 4xx / 5xx；十位段 52x（CDN 扩展错误码）。加 ! 前缀表示例外，例如先写 4xx 再写 !418，就是「除 418 以外的所有 4xx」。';
+  /** 常用状态码模式速填组（含段通配，鼓励用户用通配而非逐个枚举） */
+  const STATUS_PATTERN_GROUPS = [
+    { label: '整段通配', values: ['4xx', '5xx', '52x'] },
+    ...ERROR_CODE_GROUPS.map((g) => ({ label: g.label, values: g.values.map(String) })),
+  ];
+
+  /**
+   * 状态码速填条：点一下就往列表里插一行，省得手打。
+   * @param {(v:string)=>void} onPick 选中某个模式时的回调
+   */
+  function statusQuickPick(onPick) {
+    return el('div', { class: 'chips' }, STATUS_PATTERN_GROUPS.map((g) => el('div', { class: 'chip-group' }, [
+      el('span', { class: 'muted', text: g.label + '：' }),
+      ...g.values.map((v) => el('button', {
+        class: 'btn btn-sm',
+        text: v,
+        onclick: (ev) => { ev.preventDefault(); onPick(v); },
+      })),
+    ])));
+  }
+
+  /**
+   * 「状态码 + 时长」行式编辑器（一行一条，点击添加/删除）。
+   *
+   * 取代原先「码:秒, 码:秒」的单一逗号分隔输入框——那种写法既看不出有几条、
+   * 也无法逐条删除，且用户很容易漏写冒号导致整条被静默丢弃。
+   * 行式录入与「修改响应头」的 set/remove 控件是同一种交互，前后一致。
+   *
+   * @param {Record<string, any>} initial 初始 {模式: 秒数}
+   * @returns {{root: HTMLElement, read: () => Record<string, number>}}
+   */
+  function statusTtlEditor(initial) {
+    const listWrap = el('div', { class: 'kv-list' });
+    const errBox = el('div', { class: 'field-hint muted' });
+
+    const validate = () => {
+      const bad = [];
+      Array.from(listWrap.children).forEach((row) => {
+        const codeInput = $('.st-code', row);
+        const code = codeInput.value.trim();
+        if (code && !STATUS_PATTERN_RE.test(code)) bad.push(code);
+        codeInput.classList.toggle('input-err', !!code && !STATUS_PATTERN_RE.test(code));
+      });
+      errBox.textContent = bad.length
+        ? `⚠ 写法不认识：${bad.join('、')}。${STATUS_PATTERN_HINT}`
+        : '';
+      return bad.length === 0;
+    };
+
+    const addRow = (code, ttl) => {
+      const codeInput = el('input', {
+        class: 'input st-code',
+        value: code || '',
+        placeholder: '404 / 4xx / 52x',
+      });
+      const ttlInput = el('input', {
+        class: 'input st-ttl',
+        type: 'number',
+        min: '0',
+        value: ttl == null ? '' : String(ttl),
+        placeholder: '秒（0 = 不缓存）',
+      });
+      const ttlHint = el('span', { class: 'field-hint muted' });
+      const syncTtlHint = () => {
+        const n = Number(ttlInput.value);
+        // 0 是「明确不缓存」而不是「缓存 0 秒」，必须讲清楚，
+        // 否则用户填 0 会以为只是很快过期、结果 CDN 仍可能返回旧副本。
+        ttlHint.textContent = ttlInput.value === ''
+          ? ''
+          : (n <= 0 ? '　= 完全不缓存（no-store）' : humanDuration(n));
+      };
+      ttlInput.addEventListener('input', syncTtlHint);
+      syncTtlHint();
+      codeInput.addEventListener('input', validate);
+
+      const row = el('div', { class: 'kv-row' }, [
+        codeInput,
+        el('div', { class: 'kv-val' }, [ttlInput, ttlHint]),
+        el('button', {
+          class: 'btn btn-sm btn-danger',
+          text: '×',
+          onclick: () => { row.remove(); validate(); },
+        }),
+      ]);
+      listWrap.appendChild(row);
+    };
+
+    Object.keys(initial || {}).forEach((k) => addRow(k, initial[k]));
+    if (!listWrap.children.length) addRow('', '');
+
+    const root = el('div', { class: 'header-editor' }, [
+      el('div', { class: 'kv-label' }, '状态码 → 缓存时长（一行一条）：'),
+      listWrap,
+      el('button', { class: 'btn btn-sm', text: '+ 添加一条', onclick: () => addRow('', '') }),
+      statusQuickPick((v) => { addRow(v, ''); validate(); }),
+      el('div', { class: 'field-hint muted', text: STATUS_PATTERN_HINT }),
+      errBox,
+    ]);
+
+    const read = () => {
+      const out = {};
+      Array.from(listWrap.children).forEach((row) => {
+        const code = $('.st-code', row).value.trim().toLowerCase();
+        const ttlRaw = $('.st-ttl', row).value.trim();
+        if (!code || !STATUS_PATTERN_RE.test(code) || ttlRaw === '') return;
+        const ttl = Number(ttlRaw);
+        if (!Number.isFinite(ttl) || ttl < 0) return;
+        out[code] = ttl;
+      });
+      return out;
+    };
+    return { root, read, validate };
+  }
+
+  /**
+   * 「不缓存的状态码」列表编辑器（一行一个模式，点击添加/删除）。
+   *
+   * 这是全站缓存阶段的配置：命中这些状态码的响应一律不写缓存。
+   * 与 statusTtl 同级——statusTtl 给某个码单独开缓存，此处则是「一律不缓存」名单。
+   *
+   * @param {Array<string|number>} initial 初始模式列表
+   * @returns {{root: HTMLElement, read: () => string[]}}
+   */
+  function statusPatternListEditor(initial) {
+    const listWrap = el('div', { class: 'kv-list' });
+    const errBox = el('div', { class: 'field-hint muted' });
+
+    const validate = () => {
+      const bad = [];
+      Array.from(listWrap.children).forEach((row) => {
+        const input = $('.st-code', row);
+        const v = input.value.trim();
+        if (v && !STATUS_PATTERN_RE.test(v)) bad.push(v);
+        input.classList.toggle('input-err', !!v && !STATUS_PATTERN_RE.test(v));
+      });
+      errBox.textContent = bad.length ? `⚠ 写法不认识：${bad.join('、')}。${STATUS_PATTERN_HINT}` : '';
+      return bad.length === 0;
+    };
+
+    const addRow = (v) => {
+      const input = el('input', {
+        class: 'input st-code',
+        value: v == null ? '' : String(v),
+        placeholder: '4xx / 5xx / 52x / !418',
+      });
+      input.addEventListener('input', validate);
+      const row = el('div', { class: 'kv-row' }, [
+        input,
+        el('span', { class: 'muted', text: '(不写缓存)' }),
+        el('button', {
+          class: 'btn btn-sm btn-danger',
+          text: '×',
+          onclick: () => { row.remove(); validate(); },
+        }),
+      ]);
+      listWrap.appendChild(row);
+    };
+
+    (Array.isArray(initial) ? initial : []).forEach((v) => addRow(v));
+    if (!listWrap.children.length) addRow('');
+
+    const root = el('div', { class: 'header-editor' }, [
+      el('div', { class: 'kv-label' }, '这些状态码的响应不写缓存（一行一个）：'),
+      listWrap,
+      el('button', { class: 'btn btn-sm', text: '+ 添加一条', onclick: () => addRow('') }),
+      statusQuickPick((v) => { addRow(v); validate(); }),
+      el('div', { class: 'field-hint muted', text: STATUS_PATTERN_HINT + ' 清空整个列表则表示「不按状态码拦缓存」。' }),
+      errBox,
+    ]);
+
+    const read = () => {
+      const out = [];
+      Array.from(listWrap.children).forEach((row) => {
+        const v = $('.st-code', row).value.trim().toLowerCase();
+        if (v && STATUS_PATTERN_RE.test(v) && !out.includes(v)) out.push(v);
+      });
+      return out;
+    };
+    return { root, read, validate };
+  }
+
+  /**
+   * 请求头「剥离规则」编辑器（统一 {type,value} 语法，一行一条）。
+   *
+   * type：prefix（按头名前缀）/ exact（按头名精确）/ regex（按正则匹配头名）。
+   * 用于「修改请求头」阶段的全站默认——决定哪些客户端请求头在回源前被丢掉。
+   *
+   * @param {Array<any>} initial 初始规则列表
+   * @returns {{root: HTMLElement, read: () => Array<{type:string,value:string}>}}
+   */
+  function stripRuleEditor(initial) {
+    const listWrap = el('div', { class: 'kv-list' });
+    const errBox = el('div', { class: 'field-hint muted' });
+
+    const validate = () => {
+      const bad = [];
+      Array.from(listWrap.children).forEach((row) => {
+        const type = $('.sr-type', row).value;
+        const input = $('.sr-val', row);
+        const v = input.value.trim();
+        let okRow = true;
+        if (v && type === 'regex') {
+          // 正则写错会导致「配置看着生效、实际没剥离」，必须当场报错
+          try { new RegExp(v); } catch { okRow = false; }
+        }
+        if (!okRow) bad.push(v);
+        input.classList.toggle('input-err', !okRow);
+      });
+      errBox.textContent = bad.length ? `⚠ 正则写法不合法：${bad.join('、')}` : '';
+      return bad.length === 0;
+    };
+
+    const addRow = (type, value) => {
+      const typeSel = select('', [
+        { value: 'prefix', label: '按前缀（如 cf- 去掉所有 cf-* 头）' },
+        { value: 'exact', label: '按完整头名（如 forwarded）' },
+        { value: 'regex', label: '按正则匹配头名（高级）' },
+      ], type || 'prefix');
+      typeSel.className = 'input sr-type';
+      const valInput = el('input', {
+        class: 'input sr-val',
+        value: value || '',
+        placeholder: 'cf- / true-client-ip / ^x-.*-id$',
+      });
+      valInput.addEventListener('input', validate);
+      typeSel.addEventListener('change', validate);
+      const row = el('div', { class: 'kv-row' }, [
+        typeSel,
+        el('div', { class: 'kv-val' }, [valInput]),
+        el('button', {
+          class: 'btn btn-sm btn-danger',
+          text: '×',
+          onclick: () => { row.remove(); validate(); },
+        }),
+      ]);
+      listWrap.appendChild(row);
+    };
+
+    (Array.isArray(initial) ? initial : []).forEach((item) => {
+      if (typeof item === 'string') addRow('exact', item);
+      else if (item && typeof item === 'object') addRow(item.type, item.value);
+    });
+    if (!listWrap.children.length) addRow('prefix', '');
+
+    const root = el('div', { class: 'header-editor' }, [
+      el('div', { class: 'kv-label' }, '额外剥离的请求头（一行一条）：'),
+      listWrap,
+      el('button', { class: 'btn btn-sm', text: '+ 添加一条', onclick: () => addRow('prefix', '') }),
+      el('div', {
+        class: 'field-hint muted',
+        text: '白名单之外的头本来就不会透传；这里是再加一层保险，专门用来去掉 CDN / 反代自动注入的追踪头（cf-*、x-forwarded-* 等），避免把访客真实 IP 和链路信息泄露给源站。',
+      }),
+      errBox,
+    ]);
+
+    const read = () => {
+      const out = [];
+      Array.from(listWrap.children).forEach((row) => {
+        const type = $('.sr-type', row).value;
+        const value = $('.sr-val', row).value.trim().toLowerCase();
+        if (!value) return;
+        if (type === 'regex') { try { new RegExp(value); } catch { return; } }
+        if (!out.some((x) => x.type === type && x.value === value)) out.push({ type, value });
+      });
+      return out;
+    };
+    return { root, read, validate };
+  }
+
+  /**
+   * 简单字符串列表编辑器（一行一个），用于回源请求头透传白名单等。
+   * @param {string[]} initial
+   * @param {{label:string, placeholder?:string, hint?:string, tag?:string}} opts
+   */
+  function stringListEditor(initial, opts) {
+    opts = opts || {};
+    const listWrap = el('div', { class: 'kv-list' });
+    const addRow = (v) => {
+      const row = el('div', { class: 'kv-row' }, [
+        el('input', { class: 'input sl-val', value: v || '', placeholder: opts.placeholder || '' }),
+        el('span', { class: 'muted', text: opts.tag || '' }),
+        el('button', { class: 'btn btn-sm btn-danger', text: '×', onclick: () => row.remove() }),
+      ]);
+      listWrap.appendChild(row);
+    };
+    (Array.isArray(initial) ? initial : []).forEach((v) => addRow(v));
+    if (!listWrap.children.length) addRow('');
+    const root = el('div', { class: 'header-editor' }, [
+      el('div', { class: 'kv-label' }, opts.label || ''),
+      listWrap,
+      el('button', { class: 'btn btn-sm', text: '+ 添加一条', onclick: () => addRow('') }),
+      opts.hint ? el('div', { class: 'field-hint muted', text: opts.hint }) : null,
+    ]);
+    const read = () => {
+      const out = [];
+      Array.from(listWrap.children).forEach((row) => {
+        const v = $('.sl-val', row).value.trim().toLowerCase();
+        if (v && !out.includes(v)) out.push(v);
+      });
+      return out;
+    };
+    return { root, read };
+  }
+
   // 缓存策略编辑器（对齐 EO 缓存配置 + 自定义 Cache Key）
-  function cacheEditor(c) {
+  //
+  // opts.globalScope=true 时额外渲染「全站专属」子字段：不缓存的状态码名单、
+  // 伪装页缓存时长。它们只在全站默认层面有意义（不能按 URL 差异化），
+  // 单轨化前藏在后端 settings 段里、前端完全不可见。
+  function cacheEditor(c, opts) {
     c = c || {};
+    opts = opts || {};
+    const globalScope = opts.globalScope === true;
     const key = c.key || {};
     const mode = select('', [
       { value: 'ttl', label: '自定义缓存时间（推荐新手）' },
@@ -1255,34 +1603,19 @@ import { el, clear, $ } from './dom.js';
     const ckHeaders = el('input', { class: 'input', value: (key.headers || []).join(', '), placeholder: '如 accept-language' });
     const ckCookies = el('input', { class: 'input', value: (key.cookies || []).join(', '), placeholder: '如 tier' });
 
-    // 高级
-    const errDlId = 'err-presets-dl-' + Math.random().toString(36).slice(2);
-    const errDl = el('datalist', { id: errDlId }, ERROR_CODE_PRESETS.map((e) =>
-      el('option', { value: e })));
-    const statusTtl = el('input', {
-      class: 'input',
-      value: Object.entries(c.statusTtl || {}).map(([k, v]) => k + ':' + v).join(', '),
-      placeholder: '如 404:10, 500:5',
-      list: errDlId,
-    });
-    // 错误码候选：EO/CF 风格分类多选下拉（替代平铺 chips）。
-    // 点击候选追加「码:」前缀（再手填秒数）；已选指值框里含「码:…」；保留手填码:秒能力。
-    const errMs = multiSelectPanel({
-      presets: ERROR_CODE_PRESETS,
-      groups: ERROR_CODE_GROUPS,
-      getValue: () => statusTtl.value,
-      setValue: (t) => { statusTtl.value = t; statusTtl.focus(); },
-      tokenOf: (code) => String(code) + ':',
-      isSelected: (code) => {
-        const prefix = String(code) + ':';
-        return statusTtl.value.split(',').map((s) => s.trim()).filter(Boolean)
-          .some((p) => p === prefix || p.startsWith(prefix));
-      },
-      render: (code) => String(code),
-      placeholder: '选择错误码（可多选）',
-    });
-    const errTriggerWrap = el('div', { class: 'ms-trigger-wrap' }, [errMs.trigger]);
-    statusTtl.addEventListener('input', () => errMs.syncFromInput());
+    // 高级：状态码缓存时长（行式录入，支持 4xx/5xx/52x 通配）
+    const statusTtlEd = statusTtlEditor(c.statusTtl || {});
+    // 全站专属：不缓存的状态码名单 + 伪装页缓存时长
+    const noCacheEd = globalScope
+      ? statusPatternListEditor(Array.isArray(c.noCacheStatus) ? c.noCacheStatus : ['4xx', '5xx', '52x'])
+      : null;
+    const dgInit = (c.disguise && typeof c.disguise === 'object') ? c.disguise : {};
+    const dgCdn = globalScope
+      ? el('input', { class: 'input', type: 'number', min: '0', value: dgInit.cdnMaxAge != null ? dgInit.cdnMaxAge : 86400 })
+      : null;
+    const dgIso = globalScope
+      ? el('input', { class: 'input', type: 'number', min: '0', value: dgInit.isolateTtlMs != null ? dgInit.isolateTtlMs : 600000 })
+      : null;
     const preRefresh = el('input', { type: 'checkbox', checked: !!c.preRefresh });
     const preP = el('input', { class: 'input', type: 'number', value: c.preRefreshPercent || 80, placeholder: '%' });
     const offline = el('input', { type: 'checkbox', checked: !!c.offlineCache });
@@ -1329,13 +1662,27 @@ import { el, clear, $ } from './dom.js';
         field('额外按 Cookie 来区分（逗号分隔）', ckCookies, '例如 tier（会员等级）。一般不用填。'),
       ]),
       section('高级缓存', '状态码缓存 / 预刷新 / 离线兜底——一般用不到，保持默认即可', [
-        field('给错误页也加缓存（格式 码:秒，逗号分隔）', statusTtl, '例如 404:10 表示 404 页面也缓存 10 秒，减轻源站压力。', [errDl, errTriggerWrap]),
+        el('div', { class: 'kv-label' }, '给错误页也加缓存：'),
+        el('div', { class: 'field-hint muted', text: '例如填 404 → 10 秒，表示 404 页面也缓存 10 秒，挡住对源站的重复穿透。填 0 秒表示该状态码完全不缓存。' }),
+        statusTtlEd.root,
         el('div', { class: 'grid2' }, [
           el('label', { class: 'check' }, [preRefresh, el('span', { text: '缓存即将过期时提前回源刷新' })]),
           el('label', { class: 'check' }, [offline, el('span', { text: '源站挂了就用旧缓存顶着' })]),
         ]),
         prePField,
       ]),
+      // ---- 以下为全站默认专属（不随单条规则差异化）----
+      globalScope ? section('不缓存的状态码（全站）', '哪些状态码的响应一律不写缓存——与上面的「给错误页加缓存」相反', [
+        el('div', {
+          class: 'field-hint muted',
+          text: '默认拦住所有 4xx / 5xx / 52x，避免把错误页当成正常内容缓存下来。若上面「给错误页也加缓存」里为某个码填了时长，那个码以上面的设置为准。',
+        }),
+        noCacheEd.root,
+      ]) : null,
+      globalScope ? section('伪装页缓存时长（全站）', '站点未匹配时返回的伪装页缓存多久', [
+        field('CDN 缓存时长（秒）', dgCdn, '伪装页在 CDN 层缓存多久。伪装页内容固定，建议保持较长时间以减少函数调用。'),
+        field('节点内存缓存时长（毫秒）', dgIso, '反代型伪装页在边缘节点内存里缓存多久，避免每次都去拉取伪装目标站。'),
+      ]) : null,
     ]);
     // 只有「自定义缓存时间」才需要填 TTL；「不缓存」则隐藏所有缓存细节
     const syncMode = () => {
@@ -1352,12 +1699,7 @@ import { el, clear, $ } from './dom.js';
     ]);
 
     const read = () => {
-      const st = {};
-      statusTtl.value.split(',').map((s) => s.trim()).filter(Boolean).forEach((pair) => {
-        const [k, v] = pair.split(':').map((x) => (x || '').trim());
-        if (k && v && !isNaN(Number(k)) && !isNaN(Number(v))) st[k] = Number(v);
-      });
-      return {
+      const out = {
         enabled: mode.value !== 'noCache',
         mode: mode.value,
         edgeTtl: Number(edge.value) || 0,
@@ -1370,11 +1712,19 @@ import { el, clear, $ } from './dom.js';
           headers: ckHeaders.value.split(',').map((s) => s.trim()).filter(Boolean),
           cookies: ckCookies.value.split(',').map((s) => s.trim()).filter(Boolean),
         },
-        statusTtl: st,
+        statusTtl: statusTtlEd.read(),
         preRefresh: preRefresh.checked,
         preRefreshPercent: Number(preP.value) || 80,
         offlineCache: offline.checked,
       };
+      if (globalScope) {
+        out.noCacheStatus = noCacheEd.read();
+        out.disguise = {
+          cdnMaxAge: Number(dgCdn.value) || 0,
+          isolateTtlMs: Number(dgIso.value) || 0,
+        };
+      }
+      return out;
     };
     return { root, read };
   }
@@ -1535,6 +1885,12 @@ import { el, clear, $ } from './dom.js';
     // 为 null 表示「完整规则编辑器」（通用抽屉，含全部规则阶段 ⑤~⑯），不做限制。
     const allowed = opts.allowedOps ? new Set(opts.allowedOps) : null;
     const hideTargetPool = !!opts.hideTargetPool;
+    // globalScope：本卡片编辑的是「全站通用规则」的阶段默认动作，而非某站点的一条规则。
+    // 为 true 时，缓存/请求头等编辑器会额外显示「全站专属」子字段
+    // （不缓存的状态码名单、伪装页缓存时长、回源请求头透传白名单、剥离规则）。
+    // 这些字段无法按 URL 条件差异化，只在全站默认层面成立——单轨化前它们藏在后端
+    // settings 段里，前端完全不可见，用户既看不到也改不了。
+    const globalScope = opts.globalScope === true;
     // 新建规则的 action 默认「不缓存」（enabled:false）——此前误默认 enabled:true，
     // 导致在 ⑯「改写响应头」等受限抽屉新建的纯头操作规则，保存后也带着 enabled:true
     // 而被 ⑪「Cache Rules」误判命中、越界出现在缓存阶段。仅在用户确实配置了缓存时才挂缓存。
@@ -1605,7 +1961,10 @@ import { el, clear, $ } from './dom.js';
     // 提升为可见性：赋值给外层 _OP_BUILDERS，使末尾测试钩子可访问（见文件底部）
     _OP_BUILDERS = {
       cache(a) {
-        const ed = cacheEditor(a.cache);
+        // globalScope：编辑「全站通用规则」时额外显示全站专属子字段
+        // （不缓存的状态码名单、伪装页缓存时长）——它们无法按 URL 差异化，
+        // 只在全站默认层面有意义，故站点规则抽屉里不出现。
+        const ed = cacheEditor(a.cache, { globalScope });
         // 与 reqHeaders/respHeaders/rewrite 同理：cacheEditor.read() 返回扁平结构，
         // 必须包成 { cache: {...} } 才能被汇总 read() 的 Object.assign(action, r()) 正确合并
         // （后端 normRule 从 a.cache 读取嵌套字段）。
@@ -1686,11 +2045,35 @@ import { el, clear, $ } from './dom.js';
         ], read);
       },
       reqHeaders(a) {
-        const ed = headerEditor(a.reqHeaders);
+        const rh = a.reqHeaders || {};
+        const ed = headerEditor(rh);
+        // 全站专属：透传白名单 + 额外剥离规则。
+        // 这两项决定「客户端的哪些请求头会被带到源站」，是整站级的隐私/伪装基线，
+        // 不能按 URL 差异化，故只在全站通用规则里出现。
+        const wlEd = globalScope ? stringListEditor(rh.forwardWhitelist, {
+          label: '允许透传到源站的客户端请求头（一行一个）：',
+          placeholder: 'accept-language',
+          tag: '(透传)',
+          hint: '只有列在这里的客户端请求头才会被带到源站，其余（Cookie、Referer、Origin 等）一律丢弃。清空则表示一个都不透传（最严格）。',
+        }) : null;
+        const stripEd = globalScope ? stripRuleEditor(rh.strip) : null;
+        const extra = globalScope ? [
+          el('hr', { class: 'sep' }),
+          el('div', { class: 'kv-label' }, '—— 以下为全站默认专属（不随单条规则变化）——'),
+          wlEd.root,
+          stripEd.root,
+        ] : [];
         // 注意：汇总 read() 用 Object.assign(action, r()) 合并各 op，
         // 必须返回嵌套结构 { reqHeaders: {set, remove} }（与其它 op 一致），
         // 不能返回扁平 {set, remove}——否则会被挂到 action 顶层，后端 schema 不识别而丢失。
-        return opNode('reqHeaders', '回源请求头', '转发到源站前修改', [ed.root], () => ({ reqHeaders: ed.read() }));
+        return opNode('reqHeaders', '回源请求头', '转发到源站前修改', [ed.root, ...extra], () => {
+          const v = ed.read();
+          if (globalScope) {
+            v.forwardWhitelist = wlEd.read();
+            v.strip = stripEd.read();
+          }
+          return { reqHeaders: v };
+        });
       },
       respHeaders(a) {
         const ed = headerEditor(a.respHeaders);
@@ -1929,6 +2312,9 @@ import { el, clear, $ } from './dom.js';
 
   // 全站通用规则（兜底）编辑器：规则对所有站点生效，仅当站点自身规则未命中时触发
   async function openGlobalRulesDrawer(stage, opts) {
+    // 全站独有阶段（匹配站点 / 安全校验 / 错误处理）不是「规则动作」，
+    // 不能按 URL 条件差异化，因此走专属的参数表单抽屉，而非规则卡片编辑器。
+    if (isGlobalOnlyStage(stage)) return openGlobalOnlyStageDrawer(stage);
     // 全站通用规则编辑器：新阶段→默认动作映射，编辑「该阶段恰好 1 条」的默认动作。
     // stage/opts 缺省时回落到 cache（缓存阶段），确保任何入口都不会打开越界编辑器。
     const effStage = stage && STAGE_OPS[stage] ? stage : 'cache';
@@ -1939,6 +2325,9 @@ import { el, clear, $ } from './dom.js';
       stage: effStage,
       allowedOps: (GLOBAL_STAGE_OPS[effStage] || STAGE_OPS[effStage].allowedOps || []).slice(),
       hideTargetPool: true,
+      // 让缓存 / 请求头编辑器额外渲染「全站专属」子字段（不缓存状态码名单、
+      // 伪装页缓存时长、透传白名单、剥离规则）——这些在站点规则里不出现。
+      globalScope: true,
     };
     // 读取全站阶段映射（优先用已预取的 GLOBAL_STAGES，缺失再拉一次保证新鲜）
     let stages = GLOBAL_STAGES || {};
@@ -2008,29 +2397,172 @@ import { el, clear, $ } from './dom.js';
     openDrawer('全站兜底默认 · ' + effOpts.title, '编辑该阶段对所有站点生效的默认动作（兜底）', body, onSave);
   }
 
-  // ⑫ 缓存键阶段的专属抽屉：只编辑「站点缓存代次 cacheGen」，不与 ① 站点基础抽屉重复联动。
-  // ⑪ Cache Rules 的缓存策略由「路由规则」抽屉管理；这里的 cacheGen 才是 ⑫ 阶段唯一可干预项。
+  /**
+   * 「全站独有阶段」参数抽屉（匹配站点 / 安全校验 / 错误处理）。
+   *
+   * 这三个阶段承载的是跨请求、全站维度的参数（默认协议、限速阈值、拦截响应与错误文案），
+   * 天然没有「匹配条件 + 动作」的结构，所以不用规则卡片，而是按字段渲染成一张普通表单。
+   * 字段定义来自 GLOBAL_ONLY_STAGE_OPS（与后端 src/config/stages.js 同一真相源）。
+   *
+   * 这些参数原先藏在后端 settings 段里——前端看不见、也没有任何入口能改，
+   * 但它们确实在后端生效（比如全站默认限速、被拦截时返回什么内容）。
+   * 单轨化后它们和其他阶段一样出现在「全站通用规则」里，可视、可改、可回滚。
+   */
+  async function openGlobalOnlyStageDrawer(stage) {
+    const meta = GLOBAL_ONLY_STAGE_OPS[stage];
+    if (!meta) { toast('未知的全站阶段：' + stage, 'err'); return; }
+
+    // 读取全站阶段映射（优先用已预取的 GLOBAL_STAGES，缺失再拉一次保证新鲜）
+    let stages = GLOBAL_STAGES || {};
+    if (!stages[stage]) {
+      try {
+        const data = await API.rules.global();
+        stages = (data && data.stages) || {};
+      } catch (e) {
+        toast('读取全站通用规则失败：' + (e && e.message ? e.message : '未知错误'), 'err');
+        return;
+      }
+    }
+    const cur = (stages[stage] && typeof stages[stage] === 'object') ? stages[stage] : {};
+
+    /** 按点号路径取值（支持 messages.internal 这类嵌套字段） */
+    const getPath = (obj, path) => path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
+    /** 按点号路径写值，自动补建中间对象 */
+    const setPath = (obj, path, val) => {
+      const keys = path.split('.');
+      let cursor = obj;
+      for (let i = 0; i < keys.length - 1; i++) {
+        if (!cursor[keys[i]] || typeof cursor[keys[i]] !== 'object') cursor[keys[i]] = {};
+        cursor = cursor[keys[i]];
+      }
+      cursor[keys[keys.length - 1]] = val;
+    };
+
+    /** @type {Array<{path:string, type:string, input:HTMLElement}>} */
+    const bound = [];
+    const fields = (meta.fields || []).map((f) => {
+      const cv = getPath(cur, f.path);
+      let input;
+      if (f.type === 'select') {
+        input = select('', f.options || [], cv == null ? '' : String(cv));
+        input.className = 'input';
+      } else if (f.type === 'number') {
+        input = el('input', {
+          class: 'input',
+          type: 'number',
+          value: cv == null ? '' : String(cv),
+          ...(f.min !== undefined ? { min: String(f.min) } : {}),
+          ...(f.max !== undefined ? { max: String(f.max) } : {}),
+        });
+      } else if (f.type === 'textarea') {
+        input = el('textarea', { class: 'input', rows: '8', value: cv == null ? '' : String(cv) });
+      } else {
+        input = el('input', { class: 'input', value: cv == null ? '' : String(cv) });
+      }
+      bound.push({ path: f.path, type: f.type, input });
+
+      // 数字字段附带「人类可读时长」提示：600000 毫秒到底是多久，光看数字很难有体感
+      const extras = [];
+      if (f.type === 'number' && /Ms$/.test(f.path)) {
+        const dur = el('div', { class: 'field-hint muted' });
+        const sync = () => {
+          const n = Number(input.value);
+          dur.textContent = Number.isFinite(n) && n > 0 ? '≈ ' + humanDuration(Math.round(n / 1000)) : '';
+        };
+        input.addEventListener('input', sync);
+        sync();
+        extras.push(dur);
+      } else if (f.type === 'number' && /Sec$/.test(f.path)) {
+        const dur = el('div', { class: 'field-hint muted' });
+        const sync = () => {
+          const n = Number(input.value);
+          dur.textContent = Number.isFinite(n) && n > 0 ? '≈ ' + humanDuration(n) : '';
+        };
+        input.addEventListener('input', sync);
+        sync();
+        extras.push(dur);
+      }
+      return field(f.label, input, f.hint || '', extras);
+    });
+
+    const resetBtn = el('button', { class: 'btn btn-sm', text: '↺ 恢复内置默认' });
+    resetBtn.onclick = () => {
+      // 清空全部输入：保存时后端 validateGlobalOnlyStage 会用内置默认逐字段补全，
+      // 因此「清空 + 保存」等价于恢复该阶段内置默认，无需前端再抄一份默认值（避免双份真相源）。
+      bound.forEach((b) => {
+        if (b.type === 'select') return;
+        b.input.value = '';
+        b.input.dispatchEvent(new Event('input'));
+      });
+      toast('已清空，保存后将恢复内置默认', 'ok');
+    };
+
+    const body = el('div', { class: 'drawer-body' }, [
+      el('p', { class: 'hint' },
+        '这一组参数对所有站点生效，属于全站基线设置（不能按 URL 差异化，所以不放在路由规则里）。留空的字段保存时会自动填回内置默认值。'),
+      el('div', { class: 'subhead' }, [el('span', {}, '全站默认 · ' + meta.title), resetBtn]),
+      el('div', {}, fields),
+    ]);
+
+    const onSave = async () => {
+      const next = {};
+      for (const b of bound) {
+        const raw = b.input.value;
+        if (b.type === 'number') {
+          const n = Number(raw);
+          // 空值/非法值不写入 → 交给后端补内置默认（宽进严出，避免前端塞进 NaN）
+          if (raw !== '' && Number.isFinite(n)) setPath(next, b.path, n);
+        } else if (raw !== '') {
+          setPath(next, b.path, raw);
+        }
+      }
+      const nextStages = { ...stages, [stage]: next };
+      try {
+        const saved = await API.rules.saveGlobal({ stages: nextStages });
+        toast('已保存全站默认设置', 'ok');
+        // 用后端规范化后的结果回填本地缓存，避免「前端留空、后端补默认」造成的显示不一致
+        GLOBAL_STAGES = (saved && saved.stages) || nextStages;
+        refreshData();
+      } catch (e) {
+        toast('保存失败：' + (e && e.message ? e.message : '未知错误'), 'err');
+      }
+    };
+
+    openDrawer('全站默认 · ' + meta.title, '编辑对所有站点生效的全站基线参数', body, onSave);
+  }
+
+  // ⑫ 缓存键阶段的专属抽屉：清空该站点的边缘缓存。
+  //
+  // 底层实现是给缓存 key 加一个自增的「版本号」（旧称 cacheGen「缓存代次」）——
+  // 版本号一变，所有旧 key 全部失配，等价于清空缓存。
+  // 但「代次」是实现细节，用户看不懂也不需要懂，所以界面上只呈现「清空缓存」这个动作，
+  // 不再让用户手填一个数字（手填还容易改小、反而让已失效的旧缓存复活）。
   async function openCacheGenDrawer(host, cacheRuleCount, hasCache) {
     if (host === '__global__' || host === '__all__') { toast('全站通用规则请使用全站规则编辑器', 'info'); return; }
     if (!host) { toast('请先创建站点', 'err'); return; }
     let site;
     try { site = await API.sites.get(host); } catch (e) { toast(e.message, 'err'); return; }
-    const fGen = el('input', { class: 'input', id: 'f-cachegen', type: 'number', min: '0', value: site.cacheGen || 0 });
+    const curGen = Math.max(0, Number(site.cacheGen) || 0);
+
+    const doClear = el('input', { type: 'checkbox' });
     const body = el('div', {}, [
-      el('div', { class: 'subhead' }, [el('span', {}, '⑫ 缓存键 · 缓存代次')]),
+      el('div', { class: 'subhead' }, [el('span', {}, '⑫ 缓存键 · 清空缓存')]),
       el('div', { class: 'hint' },
-        '本抽屉只管理「缓存代次（cacheGen）」这一项，用于一键批量让旧缓存失效（代次 +1 后旧 key 自然失配）。'
-        + '其它缓存设置（edgeTtl / SWR / browserTtl / 绕过缓存）属于 ⑪「Cache Rules」阶段，请在对应阶段的规则抽屉里配置，避免与 ① 站点基础重复。'),
-      field('缓存代次 cacheGen', fGen, '整数，默认 0。修改并保存后即视为「代次 +1」语义（旧缓存 key 失配，下次回源重新填充）。'),
+        '在这里可以一键清空本站点在边缘节点上的全部缓存：勾选后保存，访客的下一次访问会重新回源取最新内容。'
+        + '适合刚更新了页面 / 图片、但访客还看到旧版本的情况。'),
+      el('label', { class: 'check' }, [doClear, el('span', { text: '清空该站点的全部边缘缓存（立即生效，不可撤销）' })]),
       el('div', { class: 'hint' },
-        `当前站点 ⑪ 缓存动作 ${cacheRuleCount} 条${hasCache ? '（已启用节点缓存）' : '（未启用节点缓存）'}；代次变更仅影响 cacheKey 维度，不影响缓存策略本身。`),
+        `当前缓存版本：第 ${curGen + 1} 版（已清空过 ${curGen} 次）。清空不会改动任何缓存策略，只是让旧缓存立刻失效。`),
+      el('div', { class: 'hint' },
+        `本站点的缓存规则共 ${cacheRuleCount} 条${hasCache ? '（已启用节点缓存）' : '（未启用节点缓存，清空后也不会产生新缓存）'}。`
+        + '缓存时长、是否缓存等设置属于「Cache Rules（缓存规则）」阶段，请到该阶段的规则抽屉里调整。'),
     ]);
-    openDrawer('⑫ 缓存键: ' + host, '仅调整缓存代次，使旧缓存批量失效。', body, async () => {
-      const gen = Math.max(0, Number(fGen.value) || 0);
-      const patch = { cacheGen: gen };
+    openDrawer('⑫ 缓存键: ' + host, '一键清空本站点的边缘缓存。', body, async () => {
+      if (!doClear.checked) { toast('未勾选「清空缓存」，无改动', 'info'); return; }
+      // 版本号只增不减：递增即代表清空一次。绝不允许回退，否则旧缓存会「复活」。
       try {
-        await API.sites.saveBasics(host, patch);
-        toast('已保存缓存代次', 'ok');
+        await API.sites.saveBasics(host, { cacheGen: curGen + 1 });
+        toast('已清空该站点缓存，访客下次访问将重新回源', 'ok');
         await refreshData();
       } catch (e) { toast(e.message, 'err'); }
     });
@@ -2865,7 +3397,10 @@ import { el, clear, $ } from './dom.js';
     if (id) {
       try { pool = await API.pools.get(id); } catch (e) { toast(e.message, 'err'); return; }
     } else {
-      pool = { id: '', name: '', kind: forceKind || 'pool', strategy: 'chain', origins: [], failover: { enabled: true, maxRetries: 2, timeoutMs: 10000, retryOn: [500, 502, 503, 504, 522, 524] } };
+      // 新建源站池的回源重试参数「跟随全站默认」：不在此写死一份，
+      // 而是留空交给后端回落到「源站」阶段的全站默认（stages.origin.failover）。
+      // 前端硬编码一份默认值就等于又造了一个真相源——全站默认改了、新建的池却还是老值。
+      pool = { id: '', name: '', kind: forceKind || 'pool', strategy: 'chain', origins: [], failover: null };
     }
     // 类型一经创建不可随意切换：single→pool 允许（加源站即升级），pool→single 会丢数据故禁止
     const kind = forceKind || poolKind(pool);
@@ -3052,7 +3587,9 @@ import { el, clear, $ } from './dom.js';
         kind,
         strategy: isSingle ? 'chain' : strategySel.value,
         origins,
-        failover: pool.failover || { enabled: true, maxRetries: 2, timeoutMs: 10000, retryOn: [500, 502, 503, 504, 522, 524] },
+        // 池级未单独配置时不下发 failover，由后端回落到「源站」阶段的全站默认，
+        // 保证「改一处全站生效」，不产生双份真相源。
+        ...(pool.failover ? { failover: pool.failover } : {}),
         ...(pool.createdBy ? { createdBy: pool.createdBy } : {}),
       };
       // 编辑（有 id）走 PUT；新建（无 id）走 POST，机器 id 由后端生成
@@ -3092,24 +3629,24 @@ import { el, clear, $ } from './dom.js';
       return wrap;
     }
     const rows = APP_DATA.sites.map((s) => [
-      s.host, String(s.cacheGen || 0),
+      s.host, 'v' + String(s.cacheGen || 0),
       actions([
-        { label: '代次失效', onClick: () => purgeSite(s.host) },
+        { label: '清空缓存', onClick: () => purgeSite(s.host) },
       ]),
     ]);
-    wrap.appendChild(table(['Host', '当前代次', '操作'], rows));
+    wrap.appendChild(table(['Host', '缓存版本', '操作'], rows));
     return wrap;
   }
 
   async function purgeSite(host) {
     const ok = await confirmDialog(
-      '清除缓存',
-      '站点 ' + host + '\n操作：代次失效（递增缓存代次，新请求全部回源），是否继续？'
+      '清空缓存',
+      '站点 ' + host + '\n操作：清空缓存（递增缓存版本，新请求全部回源），是否继续？'
     );
     if (!ok) return;
     try {
       await API.cache.purge({ host });
-      toast('已触发代次失效', 'ok');
+      toast('已触发清空缓存', 'ok');
       await refreshData();
       await route(location.hash);
     } catch (e) { toast(e.message, 'err'); }

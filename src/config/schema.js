@@ -25,7 +25,6 @@ import {
   DEFAULT_FAILOVER,
   DEFAULT_HOST_HEADER,
   DEFAULT_SITE_HOST_HEADER,
-  DEFAULT_SIGNED_URL,
   DEFAULT_RATE_LIMIT,
   DEFAULT_BOT_MANAGEMENT,
   DEFAULT_CACHE_KEY,
@@ -34,12 +33,12 @@ import {
   DEFAULT_CLIENT_IP_HEADER,
   MATCH_TARGETS,
   MATCH_OPERATORS,
-  DEFAULT_GLOBAL_SETTINGS,
-  cloneGlobalSettings,
+  DEFAULT_GLOBAL_RULES,
   deepClone,
 } from './defaults.js';
 // 阶段字典：落库「按阶段裁剪 action 字段」的唯一真相源（与前端 web/app.js 同构副本一致）。
-import { STAGE_OPS, normalizeStage, STAGE_ORDER } from './stages.js';
+// GLOBAL_ONLY_STAGE_ORDER：全站独有阶段（match/security/error），承载原 settings 双轨字段。
+import { STAGE_OPS, normalizeStage, STAGE_ORDER, GLOBAL_ONLY_STAGE_ORDER } from './stages.js';
 // 动态变量校验：规则动作值支持 ${var} 引用，校验变量名白名单
 import { validateVarNames, hasVars } from './vars.js';
 
@@ -117,7 +116,7 @@ function buildActionByStage(a, normed, stage) {
   }
   return out;
 }
-import { DEFAULT_RETRY_ON, CONFIG_VERSION } from '../contracts.js';
+import { DEFAULT_RETRY_ON, CONFIG_VERSION, STATUS_PATTERN_RE } from '../contracts.js';
 // node:crypto 在 build.mjs 的 EXTERNAL_MODULES 中（CF/EO nodejs_compat 与 Node 均提供），
 // 用于 webcrypto.getRandomValues 兜底；edge worker 中优先用 globalThis.crypto（WebCrypto）。
 import { webcrypto as nodeWebcrypto } from 'node:crypto';
@@ -644,15 +643,10 @@ function normSecurity(input) {
   const d = DEFAULT_SECURITY;
   if (!isObj(input)) return { value: deepClone(d), errors };
 
-  const su = isObj(input.signedUrl) ? input.signedUrl : {};
+  // 注意：input.signedUrl 会被静默丢弃——签名 URL 功能已全项目移除，
+  // 老配置里残留该字段不报错，只是不再落盘（宽进严出）。
   const rl = isObj(input.rateLimit) ? input.rateLimit : {};
   const bm = isObj(input.botManagement) ? input.botManagement : {};
-
-  const signedEnabled = bool(su.enabled, DEFAULT_SIGNED_URL.enabled);
-  const signedSecret = str(su.secret, '', 512);
-  if (signedEnabled && !signedSecret) {
-    errors.push('启用签名 URL 时必须设置 secret');
-  }
 
   return {
     value: {
@@ -662,12 +656,6 @@ function normSecurity(input) {
       uaBlacklist: strArr(input.uaBlacklist),
       ipBlacklist: strArr(input.ipBlacklist, LIMITS.LIST_MAX, 64),
       ipWhitelist: strArr(input.ipWhitelist, LIMITS.LIST_MAX, 64),
-      signedUrl: {
-        enabled: signedEnabled,
-        secret: signedSecret,
-        ttl: int(su.ttl, DEFAULT_SIGNED_URL.ttl, 30, 86400 * 7),
-        param: str(su.param, DEFAULT_SIGNED_URL.param, 32) || 'sign',
-      },
       rateLimit: {
         enabled: bool(rl.enabled, DEFAULT_RATE_LIMIT.enabled),
         rpm: int(rl.rpm, DEFAULT_RATE_LIMIT.rpm, 1, 1000000),
@@ -774,6 +762,107 @@ export function validateRule(input) {
 }
 
 /**
+ * 规范化「全站专属子字段」——只在全站阶段默认值里才有意义的那些字段。
+ *
+ * 为什么需要单独一支：normRule 是按「一条路由规则的动作」裁剪字段的，
+ * 而下面这些字段描述的是「整站的回源/缓存行为基线」，不能按 URL 条件差异化，
+ * 因此不属于规则动作，会被 normRule 裁掉。它们单轨化前藏在 settings 段里
+ * （前端完全不可见），现在作为对应阶段的全站专属子字段呈现与落盘。
+ *
+ * @param {string} stage 阶段名
+ * @param {any} raw 用户提交的该阶段原始值
+ * @param {any} base 该阶段的内置默认（用于缺失回落）
+ * @returns {{value: Record<string, any>, errors: string[]}}
+ */
+function normGlobalOnlySubFields(stage, raw, base) {
+  const errors = [];
+  /** @type {Record<string, any>} */
+  const out = {};
+  const src = isObj(raw) ? raw : {};
+  const def = isObj(base) ? base : {};
+
+  if (stage === 'reqHeaders') {
+    // 透传白名单：客户端请求头只有列在这里的才会带到源站。
+    // 允许用户清空（= 一个头都不透传，最严格的伪装），故不用「空则回落默认」。
+    out.forwardWhitelist = Array.isArray(src.forwardWhitelist)
+      ? strArr(src.forwardWhitelist, LIMITS.HEADERS_MAX, 128)
+        .map((s) => s.toLowerCase())
+        .filter((s) => {
+          if (!isValidHeaderName(s)) {
+            errors.push(`forwardWhitelist 中存在非法头名: ${s}`);
+            return false;
+          }
+          return true;
+        })
+      : deepClone(def.forwardWhitelist || []);
+
+    // 额外剥离规则：统一 {type,value} 语法，type ∈ prefix|exact|regex。
+    if (Array.isArray(src.strip)) {
+      const strip = [];
+      for (const item of src.strip) {
+        if (strip.length >= LIMITS.HEADERS_MAX) break;
+        // 兼容纯字符串写法：视为 exact
+        const obj = isObj(item) ? item : { type: 'exact', value: item };
+        const type = enumOf(obj.type, ['prefix', 'exact', 'regex'], 'exact');
+        const value = str(obj.value, '', 256).toLowerCase();
+        if (!value) continue;
+        // regex 必须可编译，否则回源时会静默不剥离，属于「配置看着生效实则没生效」的坑
+        if (type === 'regex') {
+          try {
+            new RegExp(value);
+          } catch {
+            errors.push(`strip 中存在非法正则: ${value}`);
+            continue;
+          }
+        } else if (type === 'exact' && !isValidHeaderName(value)) {
+          errors.push(`strip(exact) 中存在非法头名: ${value}`);
+          continue;
+        }
+        strip.push({ type, value });
+      }
+      out.strip = strip;
+    } else {
+      out.strip = deepClone(def.strip || []);
+    }
+    return { value: out, errors };
+  }
+
+  if (stage === 'cache') {
+    // 不缓存状态码：支持 4xx/5xx/52x 段通配与 !418 例外（见 contracts.matchStatusPattern）。
+    // 允许清空（= 不做状态码黑名单），故 Array 判断而非「空则回落」。
+    if (Array.isArray(src.noCacheStatus)) {
+      const list = [];
+      for (const item of src.noCacheStatus) {
+        if (list.length >= 60) break;
+        const p = str(item, '', 8).toLowerCase();
+        if (!p) continue;
+        if (!STATUS_PATTERN_RE.test(p)) {
+          errors.push(`noCacheStatus 中存在非法状态码模式: ${p}（应为 404 / 4xx / 52x / !418 这类写法）`);
+          continue;
+        }
+        if (!list.includes(p)) list.push(p);
+      }
+      out.noCacheStatus = list;
+    } else {
+      out.noCacheStatus = deepClone(def.noCacheStatus || []);
+    }
+
+    // 伪装页缓存时长（伪装页有独立生成路径，但「缓存多久」本质是缓存配置）
+    const dgSrc = isObj(src.disguise) ? src.disguise : {};
+    const dgDef = isObj(def.disguise) ? def.disguise : {};
+    out.disguise = {
+      cdnMaxAge: int(dgSrc.cdnMaxAge, dgDef.cdnMaxAge ?? 86400, 0, 31536000),
+      isolateTtlMs: int(dgSrc.isolateTtlMs, dgDef.isolateTtlMs ?? 600000, 0, 3600000),
+    };
+    return { value: out, errors };
+  }
+
+  // 其余阶段（rewrite/redirect/terminate/origin/respHeaders）没有全站专属子字段：
+  // origin.failover 已由 normRule 校验，respHeaders.remove 就是普通规则字段。
+  return { value: out, errors };
+}
+
+/**
  * 校验「全站通用（兜底）规则」的 stages 映射结构。
  *
  * 全站兜底规则是「阶段→默认动作」映射（见 store.getGlobalRules）：每个阶段恰好 1 条、
@@ -784,13 +873,13 @@ export function validateRule(input) {
  *   - 未知 stage key 会被忽略（不参与落库）。
  *   - 某阶段缺失则保留内置默认（调用方应以 DEFAULT_GLOBAL_RULES 兜底补全）。
  * @param {import('./defaults.js').DEFAULT_GLOBAL_RULES} [base] 补全基线（缺失阶段用它的同阶段值）
- * @returns {{ ok: boolean, value: {stages: Record<string, any>, settings: Record<string, any>}, errors: string[] }}
+ * @returns {{ ok: boolean, value: {stages: Record<string, any>}, errors: string[] }}
  */
 export function validateGlobalRulesStages(input, base) {
   const errors = [];
   // 顶层结构必须是对象（{stages} 或直接 stages 映射），数组/字符串/null 一律拒绝。
   if (!isObj(input) || Array.isArray(input)) {
-    return { ok: false, value: { stages: {}, settings: cloneGlobalSettings() }, errors: ['全站规则结构应为对象 { stages: { 阶段: 默认动作 }, settings: {...} }，而非数组/字符串'] };
+    return { ok: false, value: { stages: {} }, errors: ['全站规则结构应为对象 { stages: { 阶段: 默认动作 } }，而非数组/字符串'] };
   }
   const rawStages = isObj(input.stages) ? input.stages : input;
   /** @type {Record<string, any>} */
@@ -823,109 +912,97 @@ export function validateGlobalRulesStages(input, base) {
     } else if (base && isObj(base[stage])) {
       out[stage] = deepClone(base[stage]);
     }
+    // 全站专属子字段回补：normRule 按「规则语义」裁剪字段，会丢掉那些
+    // 只在全站层面才有意义的子字段（如回源请求头透传白名单、不缓存状态码）。
+    // 这些字段单轨化前藏在 settings 段，现作为对应阶段的全站专属子字段存在，
+    // 故在规则级裁剪之后单独校验并挂回。
+    if (isObj(out[stage])) {
+      const globalOnly = normGlobalOnlySubFields(stage, v, base && base[stage]);
+      if (globalOnly.errors.length) {
+        errors.push(...globalOnly.errors.map((e) => `全站规则[${stage}] ${e}`));
+      }
+      Object.assign(out[stage], globalOnly.value);
+    }
   }
-  // 全局默认参数（settings 段）：用内置默认做基线，逐字段钳制；未知 key 忽略，缺失补全。
-  const settings = validateGlobalSettings(isObj(input.settings) ? input.settings : undefined);
-  if (settings.errors.length) errors.push(...settings.errors.map((e) => `全站规则[settings] ${e}`));
-  return { ok: errors.length === 0, value: { stages: out, settings: settings.value }, errors };
+  // 全站独有阶段（match / security / error）：这些阶段不是规则动作（不能按 URL 匹配），
+  // 而是「一组全站默认参数」，故不走 normRule，改用专用的逐字段钳制校验。
+  // 单轨化前它们藏在与 stages 并列的 settings 段里（前端不可见）；现已并入同一条 stages 轨道。
+  for (const stage of GLOBAL_ONLY_STAGE_ORDER) {
+    const baseVal = base && isObj(base[stage]) ? base[stage] : undefined;
+    const r = validateGlobalOnlyStage(stage, rawStages[stage], baseVal);
+    if (r.errors.length) errors.push(...r.errors.map((e) => `全站规则[${stage}] ${e}`));
+    out[stage] = r.value;
+  }
+  return { ok: errors.length === 0, value: { stages: out }, errors };
 }
 
 /**
- * 校验并规范化「全站兜底全局默认参数」（settings 段）。
- * 采用「宽进严出」：以 DEFAULT_GLOBAL_SETTINGS 为基线，对用户输入的已知字段做类型/范围钳制，
+ * 校验并规范化「全站独有阶段」（match / security / error）的默认参数。
+ *
+ * 采用「宽进严出」：以内置默认为基线，对用户输入的已知字段做类型/范围钳制，
  * 未知字段忽略、缺失字段补全内置默认，保证落盘结构稳定、可读、安全。
- * @param {any} input 用户提交的 settings（可能为空 / 部分字段）
+ *
+ * @param {'match'|'security'|'error'} stage 阶段名
+ * @param {any} input 用户提交的该阶段值（可能为空 / 部分字段）
+ * @param {Record<string, any>=} base 补全基线（默认取 DEFAULT_GLOBAL_RULES 同阶段值）
  * @returns {{ok:boolean, value: Record<string, any>, errors: string[]}}
  */
-export function validateGlobalSettings(input) {
-  const def = DEFAULT_GLOBAL_SETTINGS;
+export function validateGlobalOnlyStage(stage, input, base) {
   const errors = [];
-  const out = {};
+  const def = isObj(base) ? base : (DEFAULT_GLOBAL_RULES[stage] || {});
   const src = isObj(input) ? input : {};
 
-  // request：请求接收层
-  // 注意：clientIpHeaders 已下沉为 vars.js 引擎内部常量（CLIENT_IP_HEADERS），
-  // 不再作为可配 settings；此处仅保留 defaultProtocol。
-  const req = src.request && isObj(src.request) ? src.request : {};
-  out.request = {
-    defaultProtocol: enumOf(req.defaultProtocol, ['http', 'https'], def.request.defaultProtocol),
-  };
+  if (input !== undefined && input !== null && !isObj(input)) {
+    errors.push('必须是对象');
+  }
 
-  // origin：回源策略兜底（池级 failover 未配置时的回落值）
-  const og = src.origin && isObj(src.origin) ? src.origin : {};
-  out.origin = {
-    retryOn: Array.isArray(og.retryOn) && og.retryOn.length
-      ? og.retryOn.map((x) => int(x, 0, 100, 599)).filter((c) => c >= 100)
-      : [...def.origin.retryOn],
-    maxRetries: int(og.maxRetries, def.origin.maxRetries, 0, 10),
-    timeoutMs: int(og.timeoutMs, def.origin.timeoutMs, 500, 60000),
-    maxRetryBodyBytes: int(og.maxRetryBodyBytes, def.origin.maxRetryBodyBytes, 0, 32 * 1024 * 1024),
-  };
+  switch (stage) {
+    // ① 匹配站点：请求 URL 缺协议时的补全协议
+    case 'match':
+      return {
+        ok: errors.length === 0,
+        errors,
+        value: {
+          defaultProtocol: enumOf(src.defaultProtocol, ['http', 'https'], def.defaultProtocol),
+        },
+      };
 
-  // reqHeaders：回源请求构造全局策略
-  const rh = src.reqHeaders && isObj(src.reqHeaders) ? src.reqHeaders : {};
-  out.reqHeaders = {
-    forwardWhitelist: Array.isArray(rh.forwardWhitelist) && rh.forwardWhitelist.length
-      ? rh.forwardWhitelist.map((x) => str(x, '').toLowerCase()).filter(Boolean)
-      : [...def.reqHeaders.forwardWhitelist],
-    stripPrefixes: Array.isArray(rh.stripPrefixes) && rh.stripPrefixes.length
-      ? rh.stripPrefixes.map((x) => str(x, '').toLowerCase()).filter(Boolean)
-      : [...def.reqHeaders.stripPrefixes],
-    stripExact: Array.isArray(rh.stripExact) && rh.stripExact.length
-      ? rh.stripExact.map((x) => str(x, '').toLowerCase()).filter(Boolean)
-      : [...def.reqHeaders.stripExact],
-    proxyUserAgent: str(rh.proxyUserAgent, def.reqHeaders.proxyUserAgent, 512),
-  };
+    // ② 安全校验：全站限速参数（跨请求维度，非单条规则动作）
+    case 'security':
+      return {
+        ok: errors.length === 0,
+        errors,
+        value: {
+          rateLimitRpm: int(src.rateLimitRpm, def.rateLimitRpm, 0, 1000000),
+          rlTtlSec: int(src.rlTtlSec, def.rlTtlSec, 1, 86400),
+          remoteSyncIntervalMs: int(src.remoteSyncIntervalMs, def.remoteSyncIntervalMs, 1000, 3600000),
+          memMaxEntries: int(src.memMaxEntries, def.memMaxEntries, 100, 1000000),
+        },
+      };
 
-  // respHeaders：默认剥离（跨请求全局语义）。
-  // 注意：Server/Via 已下沉到 DEFAULT_GLOBAL_RULES 的 stages.respHeaders.set（${product_name}），
-  // 不再作为可配 settings；此处仅保留 stripDefaults。
-  const rph = src.respHeaders && isObj(src.respHeaders) ? src.respHeaders : {};
-  out.respHeaders = {
-    stripDefaults: Array.isArray(rph.stripDefaults) && rph.stripDefaults.length
-      ? rph.stripDefaults.map((x) => str(x, '').toLowerCase()).filter(Boolean)
-      : [...def.respHeaders.stripDefaults],
-  };
+    // ③ 错误处理：拦截响应与 5xx 文案。
+    // blockBody 放宽到 64KB，以便用户直接粘贴完整的自定义错误页 HTML。
+    case 'error': {
+      const msgs = isObj(src.messages) ? src.messages : {};
+      const defMsgs = isObj(def.messages) ? def.messages : {};
+      return {
+        ok: errors.length === 0,
+        errors,
+        value: {
+          blockBody: str(src.blockBody, def.blockBody, 65536),
+          blockCacheControl: str(src.blockCacheControl, def.blockCacheControl, 128),
+          messages: {
+            internal: str(msgs.internal, defMsgs.internal, 256),
+            noOrigin: str(msgs.noOrigin, defMsgs.noOrigin, 256),
+            configError: str(msgs.configError, defMsgs.configError, 256),
+          },
+        },
+      };
+    }
 
-  // cache：缓存可写性判定（全局生效）
-  const cp = src.cache && isObj(src.cache) ? src.cache : {};
-  out.cache = {
-    noCacheStatus: Array.isArray(cp.noCacheStatus) && cp.noCacheStatus.length
-      ? cp.noCacheStatus.map((x) => int(x, 0, 100, 599)).filter((c) => c >= 100)
-      : [...def.cache.noCacheStatus],
-  };
-
-  // security：限速 / 签名 URL
-  const sec = src.security && isObj(src.security) ? src.security : {};
-  out.security = {
-    rateLimitRpm: int(sec.rateLimitRpm, def.security.rateLimitRpm, 0, 1000000),
-    rlTtlSec: int(sec.rlTtlSec, def.security.rlTtlSec, 1, 86400),
-    remoteSyncIntervalMs: int(sec.remoteSyncIntervalMs, def.security.remoteSyncIntervalMs, 1000, 3600000),
-    memMaxEntries: int(sec.memMaxEntries, def.security.memMaxEntries, 100, 1000000),
-    signedUrlParam: str(sec.signedUrlParam, def.security.signedUrlParam, 64),
-    signedUrlTtl: int(sec.signedUrlTtl, def.security.signedUrlTtl, 1, 86400 * 30),
-  };
-
-  // error：错误与拦截响应
-  const err = src.error && isObj(src.error) ? src.error : {};
-  out.error = {
-    blockBody: str(err.blockBody, def.error.blockBody, 4096),
-    blockCacheControl: str(err.blockCacheControl, def.error.blockCacheControl, 128),
-    messages: {
-      internal: str(err.messages && err.messages.internal, def.error.messages.internal, 256),
-      noOrigin: str(err.messages && err.messages.noOrigin, def.error.messages.noOrigin, 256),
-      configError: str(err.messages && err.messages.configError, def.error.messages.configError, 256),
-    },
-  };
-
-  // disguise：伪装页 TTL（独立生成路径）
-  const dg = src.disguise && isObj(src.disguise) ? src.disguise : {};
-  out.disguise = {
-    disguiseCdnMaxAge: int(dg.disguiseCdnMaxAge, def.disguise.disguiseCdnMaxAge, 0, 31536000),
-    disguiseIsolateTtlMs: int(dg.disguiseIsolateTtlMs, def.disguise.disguiseIsolateTtlMs, 0, 3600000),
-  };
-
-  return { ok: errors.length === 0, value: out, errors };
+    default:
+      return { ok: false, value: {}, errors: [`未知的全站独有阶段 ${stage}`] };
+  }
 }
 
 /**
@@ -1201,8 +1278,19 @@ function normOrigin(input, idx) {
   };
 }
 
+/**
+ * 规范化源站池的回源重试（failover）配置。
+ *
+ * 单轨化：默认值取自「源站」阶段的全站默认 DEFAULT_GLOBAL_RULES.origin.failover，
+ * 而不是另写一份池级默认——这样「新建源站池」与「全站默认」共用同一个真相源，
+ * 用户在「全站通用规则 · 源站」里调完重试策略，新建的池就自动跟随。
+ *
+ * 入参为空（前端「跟随全站默认」时不下发 failover）即直接返回全站默认副本。
+ */
 function normFailover(input) {
-  const d = DEFAULT_FAILOVER;
+  // DEFAULT_FAILOVER 仅作最后兜底（防止全站默认结构异常时拿不到值）
+  const g = DEFAULT_GLOBAL_RULES.origin && DEFAULT_GLOBAL_RULES.origin.failover;
+  const d = isObj(g) ? g : DEFAULT_FAILOVER;
   if (!isObj(input)) return deepClone(d);
 
   let retryOn = [];
@@ -1216,13 +1304,16 @@ function normFailover(input) {
       }
     }
   }
-  if (retryOn.length === 0) retryOn = [...DEFAULT_RETRY_ON];
+  if (retryOn.length === 0) retryOn = [...(d.retryOn || DEFAULT_RETRY_ON)];
 
   return {
     enabled: bool(input.enabled, d.enabled),
     retryOn,
     maxRetries: int(input.maxRetries, d.maxRetries, 0, 10),
     timeoutMs: int(input.timeoutMs, d.timeoutMs, 1000, 60000),
+    // maxRetryBodyBytes：重试时物化请求体的上限。原先只存在于全站默认里、池级无法调整，
+    // 现随 failover 一起落盘，使池级也能覆盖（缺省仍跟随全站默认）。
+    maxRetryBodyBytes: int(input.maxRetryBodyBytes, d.maxRetryBodyBytes ?? 5242880, 0, 32 * 1024 * 1024),
   };
 }
 

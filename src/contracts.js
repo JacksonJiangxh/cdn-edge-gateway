@@ -298,7 +298,6 @@
  * @property {string[]} uaBlacklist
  * @property {string[]} ipBlacklist
  * @property {string[]} ipWhitelist
- * @property {{enabled:boolean,secret:string,ttl:number,param:string}} signedUrl
  * @property {{enabled:boolean,rpm:number}} rateLimit
  */
 
@@ -464,6 +463,72 @@ export const NO_CACHE_STATUS = Object.freeze(new Set([
   500, 501, 502, 503, 504, 505, 506, 507, 508, 510, 511,
   520, 521, 522, 523, 524, 525, 526, 527,
 ]));
+
+/**
+ * 状态码「模式」的合法写法（用于校验用户输入与文档提示）。
+ *
+ * 支持三种写法（见 docs/状态码）：
+ *  - 精确码：`404`、`502`
+ *  - 百位段通配：`4xx`、`5xx`（即 400-499 / 500-599）
+ *  - 十位段通配：`52x`（即 520-529，ESA / Cloudflare 的扩展状态码段）
+ * 任一写法都可加 `!` 前缀表示**例外**（从已匹配集合中排除），
+ * 例如 `['4xx', '!418']` = 除 418 外的所有 4xx。
+ */
+export const STATUS_PATTERN_RE = /^!?(?:[1-5]\d{2}|[1-5]xx|[1-5]\dx)$/i;
+
+/**
+ * 判断某个状态码是否命中「状态码模式列表」。
+ *
+ * 单轨化背景：不缓存状态码（原 settings.cache.noCacheStatus）过去只能写死一串精确码，
+ * 用户既看不见也无法用「所有 5xx」这类自然表达。现在它是缓存阶段的可视配置，
+ * 因此需要支持段通配与例外，同时保持 O(n) 且无正则回溯的低成本判定（每请求都会调用）。
+ *
+ * 匹配规则：
+ *  1. 先看是否命中任一「肯定项」（无 `!` 前缀）；
+ *  2. 若命中，再看是否被任一「例外项」（`!` 前缀）排除；
+ *  3. 只有「命中肯定项且未被排除」才返回 true。
+ *
+ * @param {number} status HTTP 状态码
+ * @param {ReadonlyArray<string|number>|Set<number>} patterns 模式列表（也兼容纯数字列表 / Set，向后兼容旧数据）
+ * @returns {boolean} 是否命中
+ */
+export function matchStatusPattern(status, patterns) {
+  const code = Number(status);
+  if (!Number.isFinite(code)) return false;
+  // 向后兼容：旧数据可能是 Set<number>（如 NO_CACHE_STATUS 常量）
+  if (patterns instanceof Set) return patterns.has(code);
+  if (!Array.isArray(patterns) || patterns.length === 0) return false;
+
+  const s = String(code);
+  let hit = false;
+  let excluded = false;
+
+  for (const raw of patterns) {
+    if (raw === null || raw === undefined) continue;
+    let p = String(raw).trim().toLowerCase();
+    if (!p) continue;
+    const negate = p.charCodeAt(0) === 33; /* '!' */
+    if (negate) p = p.slice(1);
+    if (!p) continue;
+
+    // 逐字符比较：'x' 为通配位，其余位必须完全相同。
+    // 定长 3 位比较，避免为每个模式构造正则（每请求热路径）。
+    let ok = p.length === 3;
+    if (ok) {
+      for (let i = 0; i < 3; i++) {
+        const pc = p.charCodeAt(i);
+        if (pc !== 120 /* 'x' */ && pc !== s.charCodeAt(i)) { ok = false; break; }
+      }
+    } else {
+      // 也容忍纯数字型（如数字 404 被 String() 成 '404'，已在上面处理）
+      ok = p === s;
+    }
+    if (!ok) continue;
+    if (negate) excluded = true;
+    else hit = true;
+  }
+  return hit && !excluded;
+}
 
 /**
  * 回源请求头白名单 —— 只有这些客户端请求头会被透传到源站。

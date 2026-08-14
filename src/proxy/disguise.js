@@ -17,11 +17,11 @@
  * ============================================================================
  */
 
-import { DEFAULT_DISGUISE, DEFAULT_GLOBAL_SETTINGS } from '../config/defaults.js';
+import { DEFAULT_DISGUISE, DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
 
 /**
- * 伪装页 Server 头指纹（下沉自旧 settings.disguise.staticServerName，默认 'nginx'）。
- * 此值本质是「流量序列内部量」——伪装页要表现得像一台普通 nginx，不再作为可配 settings。
+ * 伪装页 Server 头指纹（默认 'nginx'）。
+ * 此值本质是「流量序列内部量」——伪装页要表现得像一台普通 nginx，故不作为可配项。
  * 若需变更伪装指纹，改此引擎常量即可，无需在管理面板暴露。
  */
 const DISGUISE_SERVER_NAME = 'nginx';
@@ -62,10 +62,14 @@ Commercial support is available at
 // ============================================================================
 // 伪装页缓存策略
 // ============================================================================
-// 伪装页 TTL / isolate 缓存时长 / 静态页品牌头 / 反代 UA 等参数，已从本文件的
-// 硬编码常量迁移至「全站兜底规则」settings.disguise（见 config/defaults.js），
-// 运行时由 renderDisguise 从 ctx.__globalSettings 读取，用户可在管理面板调整，
-// 无需改代码。下方常量已删除，避免与全站兜底规则出现「双重真相源」。
+// 伪装页 TTL / isolate 缓存时长等参数，已从本文件的硬编码常量迁移到
+// 「缓存」阶段的全站默认动作 stages.cache.disguise（见 config/defaults.js）——
+// 因为「伪装页缓存多久」本质是缓存配置，理应和其他缓存项在同一处可视化。
+// 运行时由 renderDisguise 从 ctx.__globalStages.cache.disguise 读取，用户改完即生效。
+//
+// 反代模式的伪装 UA 不再单独配置：直接复用「修改请求头」阶段的默认 User-Agent
+// （stages.reqHeaders.set['User-Agent']），避免同一个「回源时假装成什么浏览器」
+// 的语义在两处各配一份。
 
 /** 反代模式 isolate 级缓存：{ key, body, status, headers, cachedAt } */
 let _proxyDisguiseCache = null;
@@ -79,9 +83,18 @@ let _proxyDisguiseCache = null;
  */
 export async function renderDisguise(ctx, disguise) {
   const cfg = disguise || DEFAULT_DISGUISE;
-  // 全站兜底 settings：伪装页 TTL / isolate 缓存时长 / 静态页品牌头 / 反代 UA
-  const dg = (ctx.__globalSettings && ctx.__globalSettings.disguise) || DEFAULT_GLOBAL_SETTINGS.disguise;
-  const proxyUA = (ctx.__globalSettings && ctx.__globalSettings.reqHeaders && ctx.__globalSettings.reqHeaders.proxyUserAgent) || DEFAULT_GLOBAL_SETTINGS.reqHeaders.proxyUserAgent;
+  // 伪装页缓存参数来自「缓存」阶段的全站默认（stages.cache.disguise）
+  const gStages = ctx.__globalStages || {};
+  const gCache = (gStages.cache && typeof gStages.cache === 'object') ? gStages.cache : DEFAULT_GLOBAL_RULES.cache;
+  const dg = (gCache.disguise && typeof gCache.disguise === 'object')
+    ? gCache.disguise
+    : DEFAULT_GLOBAL_RULES.cache.disguise;
+  // 反代伪装 UA 复用「修改请求头」阶段的默认 User-Agent（单一真相源，见文件头说明）
+  const gReq = (gStages.reqHeaders && typeof gStages.reqHeaders === 'object')
+    ? gStages.reqHeaders
+    : DEFAULT_GLOBAL_RULES.reqHeaders;
+  const proxyUA = (gReq.set && (gReq.set['User-Agent'] || gReq.set['user-agent']))
+    || DEFAULT_GLOBAL_RULES.reqHeaders.set['User-Agent'];
 
   try {
     if (cfg.mode === 'none') {
@@ -107,14 +120,14 @@ export async function renderDisguise(ctx, disguise) {
 /**
  * 静态伪装页。
  * @param {number} [status]
- * @param {{disguiseCdnMaxAge:number}} dg 全站兜底伪装页参数
+ * @param {{cdnMaxAge:number}} dg 伪装页缓存参数（stages.cache.disguise）
  * @returns {Response}
  */
 function staticDisguise(status, dg) {
   const code = Number.isInteger(status) && status >= 200 && status <= 599 ? status : 200;
-  const maxAge = dg?.disguiseCdnMaxAge ?? 86400;
+  const maxAge = dg?.cdnMaxAge ?? 86400;
   // 伪装成普通 nginx 的服务端指纹：Server 名取自引擎常量 DISGUISE_SERVER_NAME（'nginx'），
-  // 不再经 settings.disguise.staticServerName 中转。
+  // 属引擎内部量，不作为可配项。
   const serverName = DISGUISE_SERVER_NAME;
   return new Response(STATIC_HTML, {
     status: code,
@@ -137,13 +150,13 @@ function staticDisguise(status, dg) {
  *
  * @param {import('../contracts.js').Ctx} ctx
  * @param {string} target 绝对 URL（schema 已保证 http/https）
- * @param {{disguiseCdnMaxAge:number, disguiseIsolateTtlMs:number}} dg 全站兜底伪装页参数
- * @param {string} proxyUA 反代模式使用的伪装 UA
+ * @param {{cdnMaxAge:number, isolateTtlMs:number}} dg 伪装页缓存参数（stages.cache.disguise）
+ * @param {string} proxyUA 反代模式使用的伪装 UA（复用 stages.reqHeaders.set 的 User-Agent）
  * @returns {Promise<Response|null>} 失败返回 null 交由调用方降级
  */
 async function proxyDisguise(ctx, target, dg, proxyUA) {
   // isolate 级缓存：同一 target 在 isolate 生命周期内只 fetch 一次
-  const isolateTtl = dg?.disguiseIsolateTtlMs ?? 600000;
+  const isolateTtl = dg?.isolateTtlMs ?? 600000;
   const now = Date.now();
   if (_proxyDisguiseCache && _proxyDisguiseCache.key === target &&
       (now - _proxyDisguiseCache.cachedAt) < isolateTtl) {
@@ -157,7 +170,7 @@ async function proxyDisguise(ctx, target, dg, proxyUA) {
     const upstream = await fetch(target, {
       method: 'GET',
       headers: {
-        // 使用通用 UA（来自全站兜底 settings.reqHeaders.proxyUserAgent），不透传访客的任何身份信息
+        // 使用通用 UA（来自 stages.reqHeaders.set['User-Agent']），不透传访客的任何身份信息
         'user-agent': proxyUA,
         accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       },
@@ -174,9 +187,9 @@ async function proxyDisguise(ctx, target, dg, proxyUA) {
     if (buf.byteLength > MAX_BODY) return null;
     const body = new TextDecoder().decode(buf);
     const ct = upstream.headers.get('content-type');
-    const maxAge = dg?.disguiseCdnMaxAge ?? 86400;
+    const maxAge = dg?.cdnMaxAge ?? 86400;
     // 伪装成普通 nginx 的服务端指纹：Server 名取自引擎常量 DISGUISE_SERVER_NAME（'nginx'），
-    // 不再经 settings.disguise.staticServerName 中转。
+    // 属引擎内部量，不作为可配项。
     const serverName = DISGUISE_SERVER_NAME;
 
     const headers = {

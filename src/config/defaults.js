@@ -326,14 +326,36 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
       'Accept-Encoding': 'gzip, deflate, br',
     }),
     remove: Object.freeze([]),
+    // 单轨化：以下三项原在 settings.reqHeaders（隐藏双轨），现并入本阶段默认 action，
+    // 使「回源请求头如何构造」的全部配置都在「修改请求头」阶段一处可视、可改。
+    //
+    // forwardWhitelist：客户端请求头透传白名单。只有列出的头会被带到源站，
+    // 其余（Cookie / Referer / Origin / CF- 前缀等）一律丢弃。
+    forwardWhitelist: Object.freeze([...FORWARD_HEADER_WHITELIST]),
+    // strip：白名单之外的「额外剥离规则」，统一语法 {type, value}：
+    //   - prefix：按头名前缀剥离（如 cf- 剥离所有 cf-* 头）
+    //   - exact ：按头名精确剥离
+    //   - regex ：按正则匹配头名剥离（用户高级用法）
+    // 原 settings.reqHeaders.stripPrefixes / stripExact 合并为此单一列表。
+    strip: Object.freeze([
+      Object.freeze({ type: 'prefix', value: 'cf-' }),
+      Object.freeze({ type: 'prefix', value: 'x-forwarded-' }),
+      Object.freeze({ type: 'prefix', value: 'x-real-ip' }),
+      Object.freeze({ type: 'exact', value: 'forwarded' }),
+      Object.freeze({ type: 'exact', value: 'true-client-ip' }),
+    ]),
   }),
   origin: Object.freeze({
     hostHeader: deepUnfreeze(DEFAULT_HOST_HEADER),
     clientIpHeader: deepUnfreeze(DEFAULT_CLIENT_IP_HEADER),
     followRedirect: true,
     originTimeoutMs: 0,
-    // 故障转移策略：全站兜底默认值。站点/源站级可覆盖（见 DEFAULT_FAILOVER）。
-    // maxRetryBodyBytes：判定源站「可重试错误响应」的最大响应体字节（failover.js 写死 5MB）。
+    // 故障转移 / 回源重试策略：全站兜底默认值，同时也是「新建源站池」的默认参数。
+    //
+    // 单轨化：原先此处与 settings.origin 各写一份完全相同的默认值（双份真相源，
+    // 前者作用于规则/源站、后者作用于池），现统一为本处唯一真相源：
+    // 池级 failover 未配置时回落到这里，源站池 UI 提供「跟随全局默认」开关。
+    // maxRetryBodyBytes：判定源站「可重试错误响应」的最大响应体字节。
     failover: Object.freeze({
       enabled: true,
       retryOn: DEFAULT_RETRY_ON,
@@ -342,12 +364,47 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
       maxRetryBodyBytes: 5242880,
     }),
   }),
+  // 单轨化新增阶段：安全校验（全站维度）。
+  // 原 settings.security.*（隐藏双轨）。限速是跨请求的全站级判定，不属于某条规则的
+  // action，但它确实是流量序列「② 安全包」阶段的配置，故以独立 stage 承载并可视化。
+  // 注意：原 settings.security.signedUrlParam / signedUrlTtl 已随不完善的签名 URL
+  // 逻辑一并从全项目删除，不再出现在任何默认值中。
+  security: Object.freeze({
+    // 全站默认限速（每分钟请求数）。站点自身的限速配置优先。
+    rateLimitRpm: 600,
+    // 限速计数槽在 KV / 内存中的存活秒数
+    rlTtlSec: 120,
+    // 多节点限速计数的远端同步间隔（毫秒）
+    remoteSyncIntervalMs: 30000,
+    // 限速内存表最大条目数（防止 isolate 内存无限增长）
+    memMaxEntries: 5000,
+  }),
+  // 单轨化新增阶段：错误处理 / 拦截响应。
+  // 原 settings.error.*（隐藏双轨）。拦截与错误页是流量序列的终止型输出，
+  // 与 terminate.directResponse 同族，故以独立 stage 承载并可视化。
+  error: Object.freeze({
+    // 被安全规则拦截时返回的响应体
+    blockBody: 'Forbidden',
+    // 拦截响应的 Cache-Control（拦截结果不该被缓存）
+    blockCacheControl: 'no-store',
+    // 5xx 系列错误文案
+    messages: Object.freeze({
+      internal: 'Internal Server Error',
+      noOrigin: 'No Origin',
+      configError: 'Config Error',
+    }),
+  }),
+  // 单轨化新增阶段：匹配站点。
+  // 原 settings.request.defaultProtocol（隐藏双轨）。请求 URL 缺协议时按此协议补全，
+  // 属于「① 匹配站点」阶段的输入规范化配置。
+  match: Object.freeze({
+    defaultProtocol: 'https',
+  }),
   cache: Object.freeze({
     // 未显式开启就不缓存，避免误缓存动态内容 / 登录态响应。
     // edgeTtl / browserTtl / staleWhileRevalidate 为「开启缓存后的默认回落值」，
     // 与旧 headers.js 写死的 TIER_CDN_DEFAULT_EDGE_TTL=15552000 / BROWSER_TTL=1800 /
-    // stale-while-revalidate=86400 一致。noCacheStatus（不应缓存状态码黑名单）为全局判定，
-    // 始终生效，故单独收进 settings.cache（见 DEFAULT_GLOBAL_SETTINGS）。
+    // stale-while-revalidate=86400 一致。
     enabled: false,
     mode: 'ttl',
     edgeTtl: 86400,
@@ -360,6 +417,19 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
     preRefresh: true,
     preRefreshPercent: 80,
     offlineCache: true,
+    // 单轨化：原 settings.cache.noCacheStatus（隐藏双轨），现并入缓存阶段，与 statusTtl 同级。
+    // 语义：命中这些状态码的响应「不写缓存」。支持段通配（4xx / 5xx / 52x，52x 为 ESA 扩展段，
+    // 见 docs/状态码）与精确码枚举；`!` 前缀表示例外（如 ['4xx', '!418'] = 除 418 外的所有 4xx）。
+    // 判定逻辑见 platform/cache.js 的 matchStatusPattern。
+    noCacheStatus: Object.freeze(['4xx', '5xx', '52x']),
+    // 单轨化：原 settings.disguise.*（隐藏双轨），现并入缓存阶段。
+    // 伪装页有独立生成路径（不进 7 阶段序列），但其「缓存多久」本质是缓存配置。
+    disguise: Object.freeze({
+      // 伪装页在 CDN 层的缓存时长（秒）
+      cdnMaxAge: 86400,
+      // 伪装页在本地 isolate 内存里的缓存时长（毫秒）
+      isolateTtlMs: 600000,
+    }),
   }),
   respHeaders: Object.freeze({
     // 全站兜底「默认响应头」。所有响应默认注入本项目品牌头 Server / Via，
@@ -395,135 +465,51 @@ export function cloneGlobalRules() {
 }
 
 // ----------------------------------------------------------------------------
-// 全站兜底「全局默认参数」（settings 段）
+// 引擎级常量（代码真相源，非用户配置）
 // ----------------------------------------------------------------------------
-// 与 stages 段并列，存放「不属于任何规则 stage action、但贯穿整条流量序列」的全局默认。
-// 例如：请求接收层（clientIp 提取）、回源请求构造策略（透传白名单 / 前缀剥离）、
-// 限速 / 签名 URL / 拦截响应 / 错误文案 / 伪装页 TTL 等。
-// 这些项无法用某一 stage 的 HeaderOps / CachePolicy 等 action 字段表达（前缀/白名单/跨请求语义），
-// 故独立成 settings，与 stages 一起落盘、一起版本号广播。
+// 单轨化说明：原先此处还有一个与 stages 并列的 DEFAULT_GLOBAL_SETTINGS（settings 段），
+// 存放「不属于任何规则 stage action」的全局默认（透传白名单 / 限速 / 拦截文案 / 伪装页 TTL 等）。
+// 那套设计造成「同一个配置在 stages 和 settings 各有一份、且 settings 对前端完全隐藏」的双轨问题：
+// 用户在管理面看不到、改不了，后端却按 settings 生效。
+//
+// 现已全部并入 DEFAULT_GLOBAL_RULES 的对应阶段默认 action（单轨）：
+//   settings.request.defaultProtocol  → stages.match.defaultProtocol
+//   settings.origin.*                 → stages.origin.failover（消除与池级的双份真相源）
+//   settings.reqHeaders.forwardWhitelist → stages.reqHeaders.forwardWhitelist
+//   settings.reqHeaders.stripPrefixes/stripExact → stages.reqHeaders.strip（统一 {type,value} 语法）
+//   settings.reqHeaders.proxyUserAgent → 删除，反代复用 stages.reqHeaders.set 的 User-Agent
+//   settings.respHeaders.stripDefaults → stages.respHeaders.remove
+//   settings.cache.noCacheStatus      → stages.cache.noCacheStatus（支持 4xx/5xx/52x 通配）
+//   settings.security.*               → stages.security
+//   settings.security.signedUrl*      → 删除（签名 URL 逻辑不完善，已全项目移除）
+//   settings.error.*                  → stages.error
+//   settings.disguise.*               → stages.cache.disguise
+//
+// 下面保留的常量是「代码级默认填充值」，仅用于给上述 stages 字段提供初值与校验参考，
+// 不再构成独立的配置轨道。
 
 /**
- * 不应缓存的状态码全集（源自 contracts.js 的 NO_CACHE_STATUS）。
- * 用于 isCacheable 判定：命中即视为不可缓存。
+ * 不应缓存的状态码枚举全集（源自 contracts.js 的 NO_CACHE_STATUS）。
+ * 仅作为「把段通配展开成精确码」时的参考集合与向后兼容回落值；
+ * 实际判定走 stages.cache.noCacheStatus + matchStatusPattern。
  * @type {readonly number[]}
  */
 export const NO_CACHE_STATUS_LIST = Object.freeze([...NO_CACHE_STATUS]);
 
 /**
  * 回源请求头透传白名单（源自 contracts.js 的 FORWARD_HEADER_WHITELIST）。
- * 只有这些客户端请求头会被透传到源站，其余一律丢弃。
+ * 作为 stages.reqHeaders.forwardWhitelist 的默认填充值。
  * @type {readonly string[]}
  */
 export const FORWARD_HEADER_WHITELIST_LIST = Object.freeze([...FORWARD_HEADER_WHITELIST]);
-
-/**
- * 回源请求头默认剥离前缀 / 精确名（旧 headers.js 的 FORBIDDEN_PREFIXES / FORBIDDEN_EXACT）。
- * 凡以此类前缀开头、或精确命中的客户端请求头，构造回源请求时一律剔除。
- * @type {{prefixes: readonly string[], exact: readonly string[]}}
- */
-export const STRIP_REQ_HEADERS = Object.freeze({
-  prefixes: Object.freeze(['cf-', 'x-forwarded-', 'x-real-ip']),
-  exact: Object.freeze(['forwarded', 'true-client-ip']),
-});
-
-/** 全站兜底全局默认参数。 */
-export const DEFAULT_GLOBAL_SETTINGS = Object.freeze({
-  // 请求接收层
-  request: Object.freeze({
-    // 默认协议（matcher.js 默认 https）
-    defaultProtocol: 'https',
-  }),
-  // 回源策略兜底（池级 failover 未配置时的回落值；与 stages.origin.failover 层级不同：
-  // 此处作用于「池」，stages.origin.failover 作用于「源站/规则」）
-  origin: Object.freeze({
-    retryOn: DEFAULT_RETRY_ON,
-    maxRetries: 2,
-    timeoutMs: 10000,
-    maxRetryBodyBytes: 5242880,
-  }),
-  // 回源请求构造全局策略（无法用 reqHeaders.set 表达前缀/白名单语义）
-  reqHeaders: Object.freeze({
-    forwardWhitelist: FORWARD_HEADER_WHITELIST_LIST,
-    stripPrefixes: STRIP_REQ_HEADERS.prefixes,
-    stripExact: STRIP_REQ_HEADERS.exact,
-    // 反代模式（disguise=proxy）使用的伪装 UA（旧 disguise.js 写死 Chrome/120.0）
-    proxyUserAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  }),
-  // 响应头设置（默认剥离，无法用单一规则 action 表达跨请求全局语义）。
-  // 注意：Server / Via 品牌头不再在此中转，而是由 DEFAULT_GLOBAL_RULES 的
-  // stages.respHeaders.set 通过 ${product_name} 变量直接表达（PRODUCT_NAME 为代码常量）。
-  respHeaders: Object.freeze({
-    // 默认删除的源站响应头（旧 contracts.js 的 DEFAULT_STRIP_RESP_HEADERS）
-    stripDefaults: Object.freeze([
-      'cross-origin-resource-policy',
-      'cross-origin-embedder-policy',
-      'content-security-policy',
-      'content-security-policy-report-only',
-      'x-frame-options',
-      'set-cookie',
-    ]),
-  }),
-  // 缓存可写性判定（全局生效，与某条 cache 规则无关）
-  cache: Object.freeze({
-    noCacheStatus: NO_CACHE_STATUS_LIST,
-  }),
-  // 安全防护（独立于 7 阶段流量序列）
-  security: Object.freeze({
-    // 限流（旧 DEFAULT_RATE_LIMIT.rpm=600 / ratelimit.js 写死 RL_TTL_SEC=120 等）
-    rateLimitRpm: 600,
-    rlTtlSec: 120,
-    remoteSyncIntervalMs: 30000,
-    memMaxEntries: 5000,
-    // 签名 URL（旧 guard.js 写死 param='sign' / ttl=3600）
-    signedUrlParam: 'sign',
-    signedUrlTtl: 3600,
-  }),
-  // 错误与拦截响应
-  error: Object.freeze({
-    // 拦截体（旧 guard.js 写死 'Forbidden'）
-    blockBody: 'Forbidden',
-    // 拦截响应缓存控制（旧 guard.js 写死 'no-store'）
-    blockCacheControl: 'no-store',
-    // 5xx 错误文案（旧 app.js errorResponse 写死）
-    messages: Object.freeze({
-      internal: 'Internal Server Error',
-      noOrigin: 'No Origin',
-      configError: 'Config Error',
-    }),
-  }),
-  // 伪装页（disguise 独立生成路径，不进 7 阶段序列）
-  disguise: Object.freeze({
-    // 伪装页在 CDN 层的缓存时长（旧 disguise.js 写死 86400）
-    disguiseCdnMaxAge: 86400,
-    // 伪装页在本地的 isolate 内存缓存时长（旧 disguise.js 写死 600000=10min）
-    disguiseIsolateTtlMs: 600000,
-  }),
-});
-
-/**
- * 生成一份可写全站兜底全局默认参数（深拷贝）。
- * @returns {Record<string, any>} 新对象
- */
-export function cloneGlobalSettings() {
-  return deepUnfreeze(DEFAULT_GLOBAL_SETTINGS);
-}
 
 // ----------------------------------------------------------------------------
 // 安全策略
 // ----------------------------------------------------------------------------
 
-/**
- * 默认签名 URL 配置（关闭）。
- * @type {Readonly<{enabled:boolean,secret:string,ttl:number,param:string}>}
- */
-export const DEFAULT_SIGNED_URL = Object.freeze({
-  enabled: false,
-  secret: '',
-  ttl: 3600,
-  param: 'sign',
-});
+// 说明：此处原有 DEFAULT_SIGNED_URL（站点级签名 URL 配置）。
+// 签名 URL 功能实现不完整（无签发入口、与 CDN 缓存键冲突），已全项目移除，
+// 站点安全策略不再包含 signedUrl 字段。防盗链请使用 Referer 校验。
 
 /**
  * 默认限流配置（关闭）。
@@ -558,7 +544,6 @@ export const DEFAULT_SECURITY = Object.freeze({
   uaBlacklist: Object.freeze([]),
   ipBlacklist: Object.freeze([]),
   ipWhitelist: Object.freeze([]),
-  signedUrl: DEFAULT_SIGNED_URL,
   rateLimit: DEFAULT_RATE_LIMIT,
   botManagement: DEFAULT_BOT_MANAGEMENT,
 });

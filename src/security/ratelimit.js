@@ -36,7 +36,7 @@ import {
   getDomainQuota,
   touchBudget,
 } from '../platform/memBudget.js';
-import { DEFAULT_GLOBAL_SETTINGS } from '../config/defaults.js';
+import { DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
 
 // ============================================================================
 // 常量
@@ -46,20 +46,23 @@ import { DEFAULT_GLOBAL_SETTINGS } from '../config/defaults.js';
 const RL_PREFIX = 'rl:';
 
 /**
- * 全站兜底「限流参数」读取。
+ * 全站「安全校验」阶段的限流参数读取。
+ *
+ * 单轨化：这些参数原先藏在与 stages 并列的 settings.security 段里（前端不可见），
+ * 现在是「安全校验」阶段的全站默认动作（stages.security），用户可在
+ * 「全站通用规则 · 安全校验」里可视化调整，改完即生效。
+ *
  * 模块级无 ctx 的工具函数（rlEntryCap 等）使用静态内置默认；
- * 热路径 checkRateLimit（有 ctx）优先使用运行时 settings（用户改 KV 即生效）。
- * 默认值见 DEFAULT_GLOBAL_SETTINGS.security。
+ * 热路径 checkRateLimit（有 ctx）优先使用运行时值。
  */
 function secSettings(ctx) {
-  if (ctx && ctx.__globalSettings && ctx.__globalSettings.security) {
-    return ctx.__globalSettings.security;
-  }
-  return DEFAULT_GLOBAL_SETTINGS.security;
+  const s = ctx && ctx.__globalStages && ctx.__globalStages.security;
+  if (s && typeof s === 'object') return s;
+  return DEFAULT_GLOBAL_RULES.security;
 }
 
 /** 内存表最大条目数（兜底最大值），超出则整体清理，防止内存无限增长导致 isolate OOM。 */
-const MEM_MAX_ENTRIES = DEFAULT_GLOBAL_SETTINGS.security.memMaxEntries;
+const MEM_MAX_ENTRIES = DEFAULT_GLOBAL_RULES.security.memMaxEntries;
 
 /**
  * 单条限流计数槽的估算字节（用于 memBudget 记账与配额推导）。

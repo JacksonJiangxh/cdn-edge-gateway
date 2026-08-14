@@ -21,6 +21,7 @@
  */
 
 import { NO_CACHE_STATUS_LIST } from '../config/defaults.js';
+import { matchStatusPattern } from '../contracts.js';
 import { detectCaps } from './caps.js';
 
 /**
@@ -277,7 +278,7 @@ export function resetCacheStats() {
  *       控制（仅 GET 进缓存写路径，cacheKey 为 null 时 HEAD 不会把空 body 写入缓存，
  *       避免缓存投毒——详见 pipeline.js ⑥⑦）。
  *  3. 请求不能带 Range 头（分片响应缓存语义复杂，直接跳过）
- *  4. 响应状态码不能落在 NO_CACHE_STATUS（4xx/5xx/52x）里
+ *  4. 响应状态码不能命中「不缓存状态码」模式（默认 4xx/5xx/52x）
  *  5. 响应不能带 Set-Cookie（个性化内容，缓存会造成串号）
  *  6. 响应不能是 206 Partial Content（CF 也不允许 put）
  *  7. 响应 Cache-Control 明确声明 no-store / private 时不缓存
@@ -285,7 +286,9 @@ export function resetCacheStats() {
  * @param {Request} request 客户端请求
  * @param {Response} response 源站响应
  * @param {import('../contracts.js').CachePolicy} policy 缓存策略
- * @param {number[]|Set<number>} [noCacheStatus] 不应缓存的状态码黑名单（默认取全站兜底 settings.cache.noCacheStatus）
+ * @param {ReadonlyArray<string|number>|Set<number>} [noCacheStatus] 不缓存状态码模式列表，
+ *   支持 `4xx`/`5xx`/`52x` 段通配与 `!418` 例外（来自缓存阶段的 stages.cache.noCacheStatus，用户可改）。
+ *   缺省时回落到引擎内置枚举 NO_CACHE_STATUS_LIST。
  * @returns {boolean} 是否可缓存
  */
 export function isCacheable(request, response, policy, noCacheStatus) {
@@ -304,10 +307,14 @@ export function isCacheable(request, response, policy, noCacheStatus) {
     /* headers 不可用时忽略此项 */
   }
 
-  // 4. 状态码黑名单（应来自全站兜底 settings.cache.noCacheStatus，可被用户调整）
-  const blacklist = noCacheStatus || NO_CACHE_STATUS_LIST;
+  // 4. 不缓存状态码（来自缓存阶段 stages.cache.noCacheStatus，用户可在「全站通用规则」里改）。
+  // 支持 4xx/5xx/52x 段通配与 !418 例外；空列表表示「不做状态码黑名单过滤」，
+  // 因此这里用 `!= null && length` 判断而非 `||`，避免用户「清空列表」被静默回落成内置枚举。
+  const patterns = (Array.isArray(noCacheStatus) && noCacheStatus.length) || noCacheStatus instanceof Set
+    ? noCacheStatus
+    : (noCacheStatus === undefined || noCacheStatus === null ? NO_CACHE_STATUS_LIST : null);
   const status = response.status;
-  if (blacklist instanceof Set ? blacklist.has(status) : blacklist.includes(status)) return false;
+  if (patterns && matchStatusPattern(status, patterns)) return false;
   // 6. 206 不在黑名单里但同样不可缓存
   if (status === 206) return false;
 

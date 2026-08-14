@@ -22,7 +22,7 @@ import { handleProxy } from '../src/proxy/pipeline.js';
 import { invalidateMemCache } from '../src/config/store.js';
 import { detectCaps, resetCapsCache } from '../src/platform/caps.js';
 import { encodeKey } from '../src/platform/keyCodec.js';
-import { DEFAULT_GLOBAL_SETTINGS } from '../src/config/defaults.js';
+import { DEFAULT_GLOBAL_RULES } from '../src/config/defaults.js';
 
 // ----------------------------------------------------------------------------
 // 常量与配置
@@ -273,14 +273,14 @@ async function runHttpsScenario() {
     const resp = await handleProxy(ctx);
 
     // ---------- 步骤 0：预取全局兜底 ----------
-    const gStages = ctx.__globalSettings ? 'settings 就位' : '∅';
-    const stageCount = ctx.__globalSettings ? 7 : 0;
+    const gStages = ctx.__globalStages ? 'stages 就位' : '∅';
+    const stageCount = ctx.__globalStages ? Object.keys(ctx.__globalStages).length : 0;
     const ok0 = check(
-      ctx.__globalSettings && typeof ctx.__globalSettings === 'object',
+      ctx.__globalStages && typeof ctx.__globalStages === 'object',
       'S0 预取全站兜底',
-      `ctx.__globalSettings 应被写入（实际: ${gStages}）`
+      `ctx.__globalStages 应被写入（实际: ${gStages}）`
     );
-    rows.push(row('0 预取兜底', 'getGlobalRules', 'DEFAULT_GLOBAL_RULES.stages + settings', 'stages=7 阶段 + ctx.__globalSettings 就位', `settings 就位(${stageCount} 阶段)`, ok0));
+    rows.push(row('0 预取兜底', 'getGlobalRules', 'DEFAULT_GLOBAL_RULES.stages（单轨化）', 'stages 各阶段 + ctx.__globalStages 就位', `stages 就位(${stageCount} 阶段)`, ok0));
 
     // ---------- 步骤 1：匹配站点 ----------
     const ok1 = check(ctx.debug.siteId === HOST, 'S1 匹配站点', `应命中 example.com（实际 siteId=${fmt(ctx.debug.siteId)}）`);

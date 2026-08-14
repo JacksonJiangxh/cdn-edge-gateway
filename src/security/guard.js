@@ -19,16 +19,20 @@
  * ============================================================================
  */
 
-// 注意：签名 URL 校验位于数据面热路径（每请求都跑），
-// 必须用 HMAC（微秒级），绝不能用 PBKDF2（30~80ms CPU，会直接打爆 CPU 配额）。
-import { hmacSha256, verifyHmacSha256 } from '../utils/crypto.js';
 import { getClientIp } from './loginGuard.js';
 import { checkRateLimit } from './ratelimit.js';
-import { DEFAULT_GLOBAL_SETTINGS } from '../config/defaults.js';
+import { DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
 
 /**
  * 构造统一的拦截响应。
- * 拦截体 / 缓存控制来自全站兜底 settings.error（可被用户在管理面板调整，无需改代码）。
+ *
+ * 拦截体 / 缓存控制来自「错误处理」阶段的全站默认（stages.error），
+ * 用户可在「全站通用规则 · 错误处理」里改（含直接粘贴一整页自定义错误页 HTML），
+ * 无需改代码。单轨化前这两项藏在 settings.error 里，前端完全不可见。
+ *
+ * 响应 Content-Type 依据 blockBody 是否为 HTML 自动判定：
+ * 用户粘贴 HTML 却仍以 text/plain 下发会让浏览器显示源码，是很常见的坑。
+ *
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
  * @param {string} reason 内部原因标记，仅写入 debug，不进响应体
  * @param {number} [status=403] HTTP 状态码
@@ -40,11 +44,13 @@ function block(ctx, reason, status = 403) {
   } catch {
     /* ignore */
   }
-  const err = (ctx && ctx.__globalSettings && ctx.__globalSettings.error) || DEFAULT_GLOBAL_SETTINGS.error;
-  return new Response(err.blockBody || 'Forbidden', {
+  const err = (ctx && ctx.__globalStages && ctx.__globalStages.error) || DEFAULT_GLOBAL_RULES.error;
+  const body = err.blockBody || 'Forbidden';
+  const isHtml = /^\s*(?:<!doctype html|<html)/i.test(body);
+  return new Response(body, {
     status,
     headers: {
-      'Content-Type': 'text/plain; charset=utf-8',
+      'Content-Type': isHtml ? 'text/html; charset=utf-8' : 'text/plain; charset=utf-8',
       'Cache-Control': err.blockCacheControl || 'no-store',
     },
   });
@@ -244,84 +250,10 @@ function refererBlocked(request, sec) {
   return hit;
 }
 
-// ============================================================================
-// 5. 签名 URL
-// ============================================================================
-
-/**
- * 校验签名 URL。
- *
- * 约定：`?{param}={signature}&t={expire}`
- *   signature = HMAC-SHA256(secret, `${path}${expire}`)，**base64url 编码**
- *               （`utils/crypto.js` 的 hmacSha256 原生返回该格式，可直接放进
- *               查询串，无需 percent-encoding）
- *   expire    = 绝对过期时间（Unix 秒）
- *
- * 校验点：
- *   - 缺参 / expire 非法 → 拦截
- *   - 当前时间 > expire  → 拦截（过期）
- *   - 签名不匹配         → 拦截（恒定时间比较，防时序侧信道逐字节爆破）
- *
- * @param {import('../contracts.js').Ctx} ctx 请求上下文
- * @param {{enabled:boolean, secret:string, ttl:number, param:string}} cfg 签名配置
- * @returns {Promise<boolean>} true = 应当拦截
- */
-/**
- * 构造签名原文。校验侧与生成侧必须使用同一函数，任何不对称都会导致全部签名失效。
- *
- * 原文包含 host，使签名与站点绑定，防止链接被跨站重放。
- * 用 `\n` 作分隔符（host/path 中均不可能出现），避免
- * `host=a.com,path=/b` 与 `host=a.com/b,path=''` 被拼成同一串的歧义。
- *
- * @param {string} host 请求主机名
- * @param {string} pathname 资源路径
- * @param {number|string} expire 过期时间戳（秒）
- * @returns {string} 用于 HMAC 的签名原文
- */
-function signaturePayload(host, pathname, expire) {
-  return `${String(host || '').toLowerCase()}\n${pathname}\n${expire}`;
-}
-
-async function signedUrlBlocked(ctx, cfg) {
-  const signedUrl = (ctx.__globalSettings && ctx.__globalSettings.security) || DEFAULT_GLOBAL_SETTINGS.security;
-  const param = String(cfg.param || signedUrl.signedUrlParam || 'sign');
-  const secret = String(cfg.secret || '');
-  // 未配置密钥时无法校验；此时拦截而不是放行，避免「开了开关却形同虚设」
-  if (!secret) return true;
-
-  const q = ctx.url.searchParams;
-  const provided = q.get(param);
-  const expireRaw = q.get('t');
-  if (!provided || !expireRaw) return true;
-
-  if (!/^\d{1,15}$/.test(expireRaw)) return true;
-  const expire = parseInt(expireRaw, 10);
-  if (!Number.isFinite(expire)) return true;
-
-  const nowSec = Math.floor(Date.now() / 1000);
-  if (nowSec > expire) return true;
-
-  // 可选的最大有效期约束：防止签发一个 100 年后过期的永久链接
-  const ttl = Number(cfg.ttl);
-  if (Number.isFinite(ttl) && ttl > 0 && expire - nowSec > ttl) return true;
-
-  try {
-    // verifyHmacSha256 内部重算签名并做恒定时间比较，异常吞掉返回 false。
-    // 注意签名是 base64url，**大小写敏感**，绝不能做 toLowerCase 归一化。
-    //
-    // 签名串包含 host：否则同一密钥签出的链接可在任意共用该配置的站点间复用
-    // （跨站重放）。host 取自 Host 头并小写归一，与 buildSignedQuery 严格对称。
-    const okSig = await verifyHmacSha256(
-      secret,
-      signaturePayload(ctx.url.hostname, ctx.url.pathname, expire),
-      String(provided)
-    );
-    return !okSig;
-  } catch {
-    // 计算失败时保守拦截
-    return true;
-  }
-}
+// 说明：此处原有「5. 签名 URL」一节（signaturePayload / signedUrlBlocked）。
+// 该功能实现不完整（管理面无签发入口、密钥缺失时的行为反直觉、与 CDN 缓存键
+// 相互冲突），属于「看着有、实际不可用」的半成品，已整体移除，
+// 避免用户以为开关一开就有防盗链保护。防盗链请使用 Referer 校验（第 4 节）。
 
 // ============================================================================
 // 主入口
@@ -374,12 +306,7 @@ export async function checkSecurity(ctx, site) {
     // ---- 4. Referer 防盗链 ----
     if (refererBlocked(request, sec)) return block(ctx, 'referer');
 
-    // ---- 5. 签名 URL ----
-    if (sec.signedUrl && sec.signedUrl.enabled === true) {
-      if (await signedUrlBlocked(ctx, sec.signedUrl)) return block(ctx, 'signed-url');
-    }
-
-    // ---- 6. 限流 ----
+    // ---- 5. 限流 ----
     if (sec.rateLimit && sec.rateLimit.enabled === true) {
       const host = (site && site.host) || ctx.url.hostname;
       const r = await checkRateLimit(ctx, host, ip, sec.rateLimit.rpm);
@@ -401,7 +328,7 @@ export async function checkSecurity(ctx, site) {
     //
     // 早期实现在此 return null（fail-open），这是一个严重缺陷：任何异常
     // —— KV 抖动导致限流读失败、正则回溯超时、配置字段类型异常 ——
-    // 都会让防盗链 / IP 黑名单 / 限流 / 签名 URL 全部静默失效，
+    // 都会让防盗链 / IP 黑名单 / 限流全部静默失效，
     // 且攻击者可以主动构造畸形输入触发异常来绕过所有防护。
     //
     // 之所以能安全地改为 fail-closed：进入 catch 的前提是 sec 存在且合法
@@ -424,23 +351,5 @@ export async function checkSecurity(ctx, site) {
   }
 }
 
-/**
- * 生成一个签名 URL 的查询串，供管理后台「生成防盗链地址」功能使用。
- *
- * @param {string} pathname 资源路径（如 `/img/a.jpg`）
- * @param {string} secret 签名密钥
- * @param {number} ttl 有效期（秒）
- * @param {string} [param='sign'] 签名参数名
- * @param {string} [host=''] 链接所属主机名，**必须**与访问时的 Host 一致，
- *   否则校验必定失败。签名与 host 绑定是为了防止跨站重放。
- * @returns {Promise<string>} 形如 `sign=abc...&t=1712345678` 的查询串
- */
-export async function buildSignedQuery(pathname, secret, ttl, param = DEFAULT_GLOBAL_SETTINGS.security.signedUrlParam, host = '') {
-  const signedUrl = DEFAULT_GLOBAL_SETTINGS.security;
-  const expire = Math.floor(Date.now() / 1000) + (Number(ttl) > 0 ? Math.floor(Number(ttl)) : (signedUrl.signedUrlTtl || 3600));
-  // 与 signedUrlBlocked 严格对称：共用 signaturePayload() 构造原文，
-  // 同样的 base64url 编码。base64url 字符集（A-Za-z0-9-_）本身即 URL 安全，
-  // 无需再 encodeURIComponent。
-  const sig = await hmacSha256(String(secret || ''), signaturePayload(host, pathname, expire));
-  return `${encodeURIComponent(param)}=${sig}&t=${expire}`;
-}
+// 说明：此处原有 buildSignedQuery（供管理后台「生成防盗链地址」用），
+// 随签名 URL 功能一并移除——管理面并未接入该入口，属于死代码。

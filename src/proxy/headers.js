@@ -11,21 +11,37 @@
  * 只带对内容协商真正必要的头（Range / Accept / If-None-Match ...）。
  */
 
-import { getGlobalSettings } from '../config/store.js';
-import { DEFAULT_GLOBAL_SETTINGS, DEFAULT_GLOBAL_RULES, DEBUG_HEADER_NAMES } from '../config/defaults.js';
+import { getGlobalRules } from '../config/store.js';
+import { DEFAULT_GLOBAL_RULES, DEBUG_HEADER_NAMES } from '../config/defaults.js';
+import { matchStatusPattern } from '../contracts.js';
 import { expandVars, pickClientIp } from '../config/vars.js';
 
 /**
- * 获取全站兜底「全局默认参数」（settings 段）。
- * 优先读 ctx.__globalSettings（pipeline 已缓存），缺失时回退内置冻结默认值。
+ * 读取某个全站阶段的默认动作（单轨：唯一真相源是全站规则的 stages）。
+ *
+ * 优先读 ctx.__globalStages（pipeline 开头已预取并缓存），缺失时兜底自行读取一次并缓存，
+ * 最终回落到内置冻结默认值，保证「管理面没配过」与「KV 读失败」都不会让主链路崩。
+ *
+ * 单轨化：过去这里读的是与 stages 并列的 settings 段（ctx.__globalSettings）——
+ * 一批前端看不见却在后端生效的隐藏配置。现在它们都是对应阶段的默认动作。
+ *
  * @param {import('../contracts.js').Ctx} ctx
- * @returns {Promise<Record<string, any>>}
+ * @param {string} stage 阶段名（如 'reqHeaders' / 'cache'）
+ * @returns {Promise<Record<string, any>>} 该阶段的默认动作（永不为 null）
  */
-async function getSettings(ctx) {
-  if (ctx && ctx.__globalSettings) return ctx.__globalSettings;
-  const s = await getGlobalSettings(ctx);
-  if (ctx) ctx.__globalSettings = s;
-  return s;
+async function getGlobalStage(ctx, stage) {
+  let stages = ctx && ctx.__globalStages;
+  if (!stages) {
+    try {
+      const g = await getGlobalRules(ctx);
+      stages = (g && g.stages) || {};
+    } catch {
+      stages = {};
+    }
+    if (ctx) ctx.__globalStages = stages;
+  }
+  const v = stages[stage];
+  return (v && typeof v === 'object') ? v : (DEFAULT_GLOBAL_RULES[stage] || {});
 }
 
 /**
@@ -46,12 +62,11 @@ async function getSettings(ctx) {
  * @returns {Headers} 回源请求头
  */
 export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) {
-  const S = await getSettings(ctx);
-  const rh = S.reqHeaders || DEFAULT_GLOBAL_SETTINGS.reqHeaders;
-  // 透传白名单 / 前缀剥离（来自全站兜底 settings，可被用户调整）
-  const forwardWhitelist = new Set((rh.forwardWhitelist || []).map((h) => h.toLowerCase()));
-  const stripPrefixes = (rh.stripPrefixes || []).map((p) => p.toLowerCase());
-  const stripExact = new Set((rh.stripExact || []).map((h) => h.toLowerCase()));
+  // 透传白名单 / 剥离规则来自「修改请求头」阶段的全站默认（stages.reqHeaders），
+  // 用户可在「全站通用规则 · 修改请求头」里可视化调整。
+  const rh = await getGlobalStage(ctx, 'reqHeaders');
+  const forwardWhitelist = new Set((rh.forwardWhitelist || []).map((h) => String(h).toLowerCase()));
+  const stripRules = normalizeStripRules(rh.strip);
   const out = new Headers();
 
   // ---- 1. 白名单透传 ----
@@ -88,7 +103,7 @@ export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) 
   applyHeaderOps(out, ops, ctx, env);
 
   // ---- 5. 兜底剥离敏感头 ----
-  stripForbidden(out, stripPrefixes, stripExact);
+  stripForbidden(out, stripRules);
 
   // ---- 6. 客户端 IP 回源头 ----
   // 必须放在 stripForbidden 之后：默认头名 X-Forwarded-For 命中禁用前缀，
@@ -125,10 +140,13 @@ export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) 
  * @returns {Headers} 返回给客户端的响应头
  */
 export async function buildClientHeaders(ctx, originResp, policy, ops) {
-  const S = await getSettings(ctx);
-  const noCacheStatus = new Set((S.cache?.noCacheStatus) || DEFAULT_GLOBAL_SETTINGS.cache.noCacheStatus);
-  // 三个缓存头 TTL 回落值：优先用 policy（已含全站兜底默认 edgeTtl/browserTtl），
-  // 再回落到 settings.respHeaders 无关，这里 edgeTtl/browserTtl 来自 policy 默认。
+  // 不缓存状态码来自「缓存」阶段的全站默认（stages.cache.noCacheStatus，与 statusTtl 同级）。
+  // 支持 4xx/5xx/52x 段通配与 !418 例外，用户可在「全站通用规则 · 缓存」里改。
+  const gCache = await getGlobalStage(ctx, 'cache');
+  const noCacheStatus = Array.isArray(gCache.noCacheStatus)
+    ? gCache.noCacheStatus
+    : DEFAULT_GLOBAL_RULES.cache.noCacheStatus;
+  // 三个缓存头 TTL 回落值：优先用 policy（已含全站兜底默认 edgeTtl/browserTtl）。
   const DEFAULT_EDGE_TTL = Number(policy?.edgeTtl) || 15552000;
   const DEFAULT_BROWSER_TTL = Number(policy?.browserTtl) || 1800;
   const out = new Headers(originResp.headers);
@@ -160,7 +178,9 @@ export async function buildClientHeaders(ctx, originResp, policy, ops) {
   // 哪个字段消费都能拿到正确 TTL（CF Workers Cache 按 RFC 9111 透传 Cache-Control；
   // 标准 CDN-Cache-Control / Cloudflare-CDN-Cache-Control 供各 CDN 边缘决策）。
   const status = originResp.status;
-  const statusTtl = policy?.statusTtl?.[String(status)];
+  // statusTtl 支持段通配键（4xx/5xx/52x），与 noCacheStatus 语法统一：
+  // 精确码优先，未命中再按通配键查找（多个通配键命中时取最具体的，即 'x' 最少的）。
+  const statusTtl = lookupStatusTtl(policy?.statusTtl, status);
   const isCf = ctx?.caps?.platform === 'cf';
 
   // 剥离源站带回的一切「不缓存」信号（兜底，确保可缓存内容真被边缘缓存）
@@ -179,10 +199,20 @@ export async function buildClientHeaders(ctx, originResp, policy, ops) {
   };
 
   if (statusTtl !== undefined) {
-    // 状态码缓存 TTL 优先级最高：允许把 404 等错误码短时间缓存，挡住对源站的重复穿透
-    out.set('Cache-Control', `public, max-age=0, s-maxage=${Number(statusTtl) || 0}`);
-    setEdgeCacheControl(Number(statusTtl) || 0, policy?.staleWhileRevalidate);
-  } else if (noCacheStatus.has(status)) {
+    // 状态码缓存 TTL 优先级最高：允许把 404 等错误码短时间缓存，挡住对源站的重复穿透。
+    const ttl = Number(statusTtl) || 0;
+    if (ttl <= 0) {
+      // ttl=0 的语义是「明确不要缓存这个状态码」，必须下发 no-store。
+      // 旧实现写的是 s-maxage=0，那只表示「立即过期但仍可被存储/条件复用」，
+      // 会让 CDN 保留副本并可能返回 stale 内容——与用户填 0 的意图不符。
+      out.set('Cache-Control', 'no-store');
+      out.set('CDN-Cache-Control', 'no-store');
+      if (isCf) out.set('Cloudflare-CDN-Cache-Control', 'no-store');
+    } else {
+      out.set('Cache-Control', `public, max-age=0, s-maxage=${ttl}`);
+      setEdgeCacheControl(ttl, policy?.staleWhileRevalidate);
+    }
+  } else if (matchStatusPattern(status, noCacheStatus)) {
     // 错误响应绝不允许被浏览器或中间层缓存
     out.set('Cache-Control', 'no-store');
     out.set('CDN-Cache-Control', 'no-store');
@@ -327,22 +357,99 @@ function resolveSecret(rawValue, env) {
 }
 
 /**
+ * 在「状态码 → TTL」映射里查出某状态码对应的 TTL。
+ *
+ * 键支持与 noCacheStatus 相同的写法：精确码（`404`）与段通配（`4xx` / `52x`）。
+ * 匹配优先级：精确码 > 十位段（52x） > 百位段（5xx）——即通配位越少越具体、优先级越高，
+ * 这样用户可以写「5xx 缓存 5 秒，但 503 不缓存」这类自然规则。
+ *
+ * @param {Record<string, any>|undefined|null} map 状态码→TTL 映射
+ * @param {number} status HTTP 状态码
+ * @returns {number|undefined} 命中的 TTL；未命中返回 undefined
+ */
+function lookupStatusTtl(map, status) {
+  if (!map || typeof map !== 'object') return undefined;
+  const s = String(status);
+  // 1) 精确码
+  if (map[s] !== undefined) return map[s];
+  // 2) 段通配：按「通配位数量」升序选最具体的一条
+  let best;
+  let bestWildcards = 99;
+  for (const key of Object.keys(map)) {
+    const k = key.trim().toLowerCase();
+    if (k.length !== 3 || !k.includes('x')) continue;
+    let ok = true;
+    let wildcards = 0;
+    for (let i = 0; i < 3; i++) {
+      const kc = k.charCodeAt(i);
+      if (kc === 120 /* 'x' */) wildcards++;
+      else if (kc !== s.charCodeAt(i)) { ok = false; break; }
+    }
+    if (ok && wildcards < bestWildcards) {
+      bestWildcards = wildcards;
+      best = map[key];
+    }
+  }
+  return best;
+}
+
+/**
+ * 把「修改请求头」阶段的 strip 配置规范化为可高效判定的形态。
+ *
+ * 统一语法为 `{type, value}`，type ∈ prefix | exact | regex：
+ *   - prefix：头名以 value 开头即剥离（如 `cf-` 剥离全部 cf-* 头）
+ *   - exact ：头名精确等于 value 即剥离
+ *   - regex ：头名匹配该正则即剥离（高级用法）
+ * 兼容纯字符串元素（视为 exact）与旧的 {prefixes, exact} 对象形态。
+ * 非法正则在此静默跳过（schema 层已给出报错），避免热路径抛异常打断回源。
+ *
+ * @param {any} strip 阶段配置里的 strip 值
+ * @returns {{prefixes: string[], exact: Set<string>, regexes: RegExp[]}}
+ */
+function normalizeStripRules(strip) {
+  const prefixes = [];
+  const exact = new Set();
+  const regexes = [];
+
+  /** 兜底：配置缺失时用内置默认，保证敏感头始终被剥离（安全默认） */
+  const src = Array.isArray(strip) && strip.length
+    ? strip
+    : DEFAULT_GLOBAL_RULES.reqHeaders.strip;
+
+  for (const item of src || []) {
+    if (!item) continue;
+    // 纯字符串 → exact
+    if (typeof item === 'string') { exact.add(item.toLowerCase()); continue; }
+    const type = String(item.type || 'exact').toLowerCase();
+    const value = String(item.value || '').toLowerCase();
+    if (!value) continue;
+    if (type === 'prefix') prefixes.push(value);
+    else if (type === 'regex') {
+      try { regexes.push(new RegExp(value)); } catch { /* 非法正则忽略，见上方说明 */ }
+    } else exact.add(value);
+  }
+  return { prefixes, exact, regexes };
+}
+
+/**
  * 剥离所有敏感 / 平台注入的请求头。
- * 前缀 / 精确名单来自全站兜底 settings.reqHeaders（可在管理面板调整）。
+ * 剥离规则来自「修改请求头」阶段的全站默认（stages.reqHeaders.strip，可在管理面调整）。
  *
  * @param {Headers} headers 待清理的请求头
- * @param {string[]} [stripPrefixes] 命中即剥离的头名前缀（小写）
- * @param {Set<string>} [stripExact] 精确命中的头名集合（小写）
+ * @param {{prefixes: string[], exact: Set<string>, regexes: RegExp[]}} [rules] 规范化后的剥离规则
  * @returns {void}
  */
-function stripForbidden(headers, stripPrefixes, stripExact) {
-  const prefixes = stripPrefixes || DEFAULT_GLOBAL_SETTINGS.reqHeaders.stripPrefixes;
-  const exact = stripExact || new Set(DEFAULT_GLOBAL_SETTINGS.reqHeaders.stripExact);
+function stripForbidden(headers, rules) {
+  const { prefixes, exact, regexes } = rules || normalizeStripRules(null);
   // 先收集再删除，避免在迭代过程中修改集合
   const toDelete = [];
   for (const key of headers.keys()) {
     const lower = key.toLowerCase();
-    if (exact.has(lower) || (prefixes.some && prefixes.some((p) => lower.startsWith(p)))) {
+    if (
+      exact.has(lower)
+      || prefixes.some((p) => lower.startsWith(p))
+      || regexes.some((re) => re.test(lower))
+    ) {
       toDelete.push(key);
     }
   }

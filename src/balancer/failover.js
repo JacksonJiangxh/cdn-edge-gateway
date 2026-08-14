@@ -17,12 +17,12 @@ import { buildOriginUrl, resolveHostHeader, applyRewrite, joinPath, mergeRewrite
 import { buildOriginHeaders } from '../proxy/headers.js';
 import { fetchOrigin } from '../proxy/engines/fetchEngine.js';
 import { fetchOrigin as r2FetchOrigin } from '../proxy/engines/r2Engine.js';
-import { getGlobalSettings } from '../config/store.js';
-import { DEFAULT_GLOBAL_SETTINGS } from '../config/defaults.js';
+import { DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
 
 // 重试时为了避免把整请求体物化进内存，超过该上限的 body 直接关闭重试（流式透传）。
-// 默认值来自全站兜底 settings.origin.maxRetryBodyBytes（可被用户调整，无需改代码）。
-const MAX_RETRY_BODY = 5 * 1024 * 1024;
+// 这是模块级兜底常量；实际生效值取自「源站」阶段的全站默认
+// stages.origin.failover.maxRetryBodyBytes（用户可在管理面调整）。
+const FALLBACK_MAX_RETRY_BODY = 5 * 1024 * 1024;
 
 /**
  * 带故障转移的回源请求。
@@ -34,8 +34,14 @@ const MAX_RETRY_BODY = 5 * 1024 * 1024;
  * @returns {Promise<Response>} 源站响应；全部失败时返回 502
  */
 export async function requestWithFailover(ctx, pool, rule, hostHeader) {
-  // 全站兜底默认回源策略（池级 failover 未配置时的回落值），可被用户调整，无需改代码
-  const fb = (ctx.__globalSettings && ctx.__globalSettings.origin) || DEFAULT_GLOBAL_SETTINGS.origin;
+  // 回源重试策略的全站默认（池级 failover 未配置时的回落值）。
+  //
+  // 单轨化：这批参数（retryOn / maxRetries / timeoutMs / maxRetryBodyBytes）原先在
+  // settings.origin 与 stages.origin.failover 各存一份完全相同的默认值（双份真相源），
+  // 现统一为「源站」阶段的全站默认 stages.origin.failover——它同时也是
+  // 「新建源站池」的默认参数，用户可在「全站通用规则 · 源站」里改。
+  const gOrigin = (ctx.__globalStages && ctx.__globalStages.origin) || DEFAULT_GLOBAL_RULES.origin;
+  const fb = (gOrigin && gOrigin.failover) || DEFAULT_GLOBAL_RULES.origin.failover;
   const failover = pool?.failover || {};
   const enabled = failover.enabled !== false;
   const retryOn = new Set(
@@ -46,9 +52,10 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
   const maxRetries = enabled ? (Number.isFinite(failover.maxRetries) ? failover.maxRetries : (fb.maxRetries ?? 2)) : 0;
   // 超时优先级：规则级 > 源站级 > 池级 > 全站兜底默认（10000ms）
   const poolTimeout = Number(failover.timeoutMs) > 0 ? Number(failover.timeoutMs) : (fb.timeoutMs || 10000);
-  // 重试时物化请求体的上限：池级 > 全站兜底默认（5MB）
-  const maxRetryBody = Number(failover.maxRetryBodyBytes) > 0 ? Number(failover.maxRetryBodyBytes) : (fb.maxRetryBodyBytes || MAX_RETRY_BODY);
-  const MAX_RETRY_BODY = maxRetryBody;
+  // 重试时物化请求体的上限：池级 > 全站默认 > 模块兜底常量（5MB）
+  const MAX_RETRY_BODY = Number(failover.maxRetryBodyBytes) > 0
+    ? Number(failover.maxRetryBodyBytes)
+    : (fb.maxRetryBodyBytes || FALLBACK_MAX_RETRY_BODY);
 
   // 预先把「已熔断」的源站并入排除列表。
   // 熔断查询是异步 KV 操作，而 selectOrigin 是同步的，所以在这里一次性算好。

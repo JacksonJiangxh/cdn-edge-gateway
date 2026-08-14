@@ -11,7 +11,7 @@
  */
 
 import { getSite } from '../config/store.js';
-import { TARGETS_NEED_KEY, DEFAULT_GLOBAL_SETTINGS } from '../config/defaults.js';
+import { TARGETS_NEED_KEY, DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
 import { pickClientIp } from '../config/vars.js';
 
 /**
@@ -85,14 +85,15 @@ export function buildMatchSubject(ctx) {
   const ext = dot > 0 && dot !== seg.length - 1 ? seg.slice(dot + 1).toLowerCase() : '';
   const headers = ctx.request.headers;
 
-  // 请求接收层默认参数：协议回落值取自全站兜底 settings.request.defaultProtocol。
+  // 协议回落值取自「匹配站点」阶段的全站默认（stages.match.defaultProtocol），
+  // 用户可在「全站通用规则 · 匹配站点」里调整（单轨化前它藏在 settings.request 里）。
   // 真实客户端 IP 由引擎内部 pickClientIp（CLIENT_IP_HEADERS 优先级，见 vars.js）提取，
   // 支持 RFC7239 forwarded / 带端口 cloudfront-viewer-address 解析；
-  // 提取结果以 ${client_ip} 暴露给规则引擎，不再作为可配 settings。
-  const reqSettings =
-    (ctx.__globalSettings && ctx.__globalSettings.request) || DEFAULT_GLOBAL_SETTINGS.request;
+  // 提取结果以 ${client_ip} 暴露给规则引擎，属引擎内部量、不作为可配项。
+  const gMatch =
+    (ctx.__globalStages && ctx.__globalStages.match) || DEFAULT_GLOBAL_RULES.match;
   const clientIp = pickClientIp(headers);
-  const protocol = (url.protocol || `${reqSettings.defaultProtocol}:`).replace(':', '');
+  const protocol = (url.protocol || `${gMatch.defaultProtocol}:`).replace(':', '');
   const clientCountry = (headers.get('cf-ipcountry') || '').toUpperCase();
   const userAgent = headers.get('user-agent') || '';
   // 客户端 ASN：Cloudflare 为 cf-asn，部分平台为 asn 头；无则空串（跨平台行为一致）。
