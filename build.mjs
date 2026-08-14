@@ -464,8 +464,17 @@ async function buildWorker() {
  * @returns {string|null} 错误信息，null 表示通过
  */
 function checkHtmlTagBalance(html) {
+  let stripped = html;
   // 先剔除 SVG 整段（含可能的属性与自闭合子元素），不参与 HTML 标签平衡校验
-  const stripped = html.replace(/<svg[\s\S]*?<\/svg>/gi, '');
+  stripped = stripped.replace(/<svg[\s\S]*?<\/svg>/gi, '');
+  // 再剔除 <script>…</script> 整段：内联兜底产物会把前端 bundle 注入 <script> 内，
+  // 而 bundle 源码中大量 JS 正则/字符串（如 /</g、</g、</div）会被粗粒度标签正则
+  // 误判为 HTML 闭合标签。JS 内容的正确性由独立的 checkJsParse 负责，此处仅校验
+  // HTML 结构，故整段剔除，与 syntaxChecks 对括号校验的预处理保持一致。
+  stripped = stripped.replace(/<script[\s\S]*?<\/script>/gi, '');
+  // 最后剔除 <style>…</style> 整段：CSS 选择器/内容（如 @media、> 子代选择符）同样
+  // 可能干扰粗粒度标签扫描，且样式正确性不由 HTML 结构校验保证。
+  stripped = stripped.replace(/<style[\s\S]*?<\/style>/gi, '');
 
   const voidTags = new Set([
     'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
