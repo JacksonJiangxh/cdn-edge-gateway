@@ -32,7 +32,7 @@
 
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as esbuild from 'esbuild';
 import { generateEntries } from './gen-entries.mjs';
 
@@ -186,6 +186,21 @@ async function checkEntryParseable(problems, quiet = false) {
       await esbuild.transform(src, { loader: 'js', target: 'es2022' });
     } catch (e) {
       problems.push(`${rel} 语法解析失败：${e.message}`);
+    }
+    // ---- 加固：导出符号存在性校验 ----
+    // 仅 esbuild transform「可解析」不足以证明产物可用——历史曾出现「文件在但
+    // 导出被 tree-shaking 误删/打包损坏」导致 web/app.js import 到空模块却静默
+    // 通过 check 的回归。这里动态加载产物，断言其导出了 web/app.js 依赖的必需
+    // 符号（与 src/config/stages.js 对齐）。
+    const REQUIRED_EXPORTS = ['STAGE_OPS', 'GLOBAL_ONLY_STAGE_OPS', 'isGlobalOnlyStage', 'STAGE_ORDER', 'GLOBAL_ONLY_STAGE_ORDER'];
+    try {
+      const mod = await import(pathToFileURL(abs).href);
+      const missing = REQUIRED_EXPORTS.filter((name) => mod[name] === undefined);
+      if (missing.length) {
+        problems.push(`${rel} 缺少必需导出符号：${missing.join(', ')}（产物可能被误 tree-shake 或打包损坏）`);
+      }
+    } catch (e) {
+      problems.push(`${rel} 加载校验失败：${e.message}`);
     }
   }
 }

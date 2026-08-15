@@ -253,6 +253,44 @@ async function runHttpFlow(mod, platform, mockKV, mockAssets, useAssets) {
   const sitesAnon = await fetchAt('/__panel/api/sites');
   assert(sitesAnon.status === 401, `${label} 未登录访问 /sites 返回 401`, `got ${sitesAnon.status}`);
 
+  // ---- 异常路径组：CSRF / 非法 Origin 防护（严格 status + JSON 校验）----
+  // 注意：本组位于 newHost 定义之前，使用独立字符串避免 TDZ 引用。
+  const csrfHost = 'csrf-e2e-host.test';
+  log(`${label} ▸ 4b/6 CSRF 防护：跨站 Origin 写请求应被拒且登录态不受影响`);
+  const csrfWrite = await fetchAt('/__panel/api/sites/' + csrfHost, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', Cookie: cookie, Origin: 'https://evil.example.net' },
+    body: JSON.stringify({ host: csrfHost }),
+  });
+  const csrfWriteBody = await csrfWrite.json().catch(() => ({}));
+  // checkSecurity 抛 AuthenticationError → 网关映射为 401（UNAUTHORIZED），而非 403
+  assert(csrfWrite.status === 401, `${label} 跨站 Origin 写请求返回 401`, `got ${csrfWrite.status} body=${JSON.stringify(csrfWriteBody)}`);
+  assert(csrfWriteBody.ok === false, `${label} 跨站写请求 body.ok=false`);
+  assert(csrfWriteBody.error?.code === 'UNAUTHORIZED', `${label} 跨站写请求 error.code=UNAUTHORIZED`);
+  // 登录态在 CSRF 拒绝后仍然有效（Cookie 未被销毁）
+  const meAfterCsrf = await fetchAt('/__panel/api/auth/me', { headers: { Cookie: cookie } });
+  const meAfterCsrfBody = await meAfterCsrf.json();
+  assert(meAfterCsrf.status === 200 && meAfterCsrfBody.data?.authed === true, `${label} CSRF 拒绝后登录态仍有效`);
+
+  log(`${label} ▸ 4c/6 非法 Origin 头写请求应被拒`);
+  const badOriginWrite = await fetchAt('/__panel/api/sites/' + csrfHost, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', Cookie: cookie, Origin: 'not a url' },
+    body: JSON.stringify({ host: csrfHost }),
+  });
+  const badOriginBody = await badOriginWrite.json().catch(() => ({}));
+  assert(badOriginWrite.status === 401, `${label} 非法 Origin 写请求返回 401`, `got ${badOriginWrite.status} body=${JSON.stringify(badOriginBody)}`);
+  assert(badOriginBody.ok === false, `${label} 非法 Origin 写请求 body.ok=false`);
+  assert(badOriginBody.error?.code === 'UNAUTHORIZED', `${label} 非法 Origin 写请求 error.code=UNAUTHORIZED`);
+
+  // 同源 Origin（与站点同域）写请求不应被 CSRF 拦截
+  const sameOriginWrite = await fetchAt('/__panel/api/sites/' + csrfHost, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', Cookie: cookie, Origin: 'https://e2e.test' },
+    body: JSON.stringify({ host: csrfHost }),
+  });
+  assert(sameOriginWrite.status !== 403, `${label} 同源 Origin 写请求不被 CSRF 拦截`, `got ${sameOriginWrite.status}`);
+
   // 错误密码应 401（鉴权闭环）
   const badLogin = await fetchAt('/__panel/api/auth/login', {
     method: 'POST',

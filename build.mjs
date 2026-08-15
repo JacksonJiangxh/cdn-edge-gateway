@@ -36,7 +36,7 @@ import { runChecks } from './scripts/check.mjs';
 import { runE2E } from './scripts/e2e-test.mjs';
 import { runFrontendDomTest } from './scripts/test-frontend-dom.mjs';
 import { runFrontendBrowserTest } from './scripts/e2e-browser.mjs';
-import { runBackendUnitTests } from './scripts/test-unit-backend.mjs';
+import { runBackendUnitTests } from './scripts/test-unit/index.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const WEB = join(ROOT, 'web');
