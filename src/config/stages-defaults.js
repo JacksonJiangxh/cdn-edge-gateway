@@ -69,7 +69,9 @@ export const DEFAULT_CACHE_POLICY = Object.freeze({
   ignoreQuery: false, // 保留查询串参与缓存键，否则 ?id=1 与 ?id=2 会命中同一份缓存
   queryWhitelist: Object.freeze([]),
   key: DEFAULT_CACHE_KEY,
-  statusTtl: Object.freeze({}),
+  // 错误码缓存 TTL：命中状态码 → 缓存秒数；0 = no-store（不写缓存 + 下发 no-store 头）。
+  // 默认 4xx / 5xx / 52x 不缓存（原 noCacheStatus 黑名单语义并入此处，TTL=0 即 no-store）。
+  statusTtl: Object.freeze({ '4xx': 0, '5xx': 0, '52x': 0 }),
   preRefresh: false,
   preRefreshPercent: 80,
   offlineCache: false,
@@ -315,15 +317,12 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
     ignoreQuery: true,
     queryWhitelist: Object.freeze([]),
     key: deepUnfreeze(DEFAULT_CACHE_KEY),
-    statusTtl: Object.freeze({}),
+    // 错误码缓存 TTL：命中状态码 → 缓存秒数；0 = no-store（不写缓存 + 下发 no-store 头）。
+    // 默认 4xx / 5xx / 52x 不缓存（原 noCacheStatus 黑名单语义并入此处：TTL=0 即 no-store）。
+    statusTtl: Object.freeze({ '4xx': 0, '5xx': 0, '52x': 0 }),
     preRefresh: true,
     preRefreshPercent: 80,
     offlineCache: true,
-    // 单轨化：原 settings.cache.noCacheStatus（隐藏双轨），现并入缓存阶段，与 statusTtl 同级。
-    // 语义：命中这些状态码的响应「不写缓存」。支持段通配（4xx / 5xx / 52x，52x 为 ESA 扩展段，
-    // 见 docs/状态码）与精确码枚举；`!` 前缀表示例外（如 ['4xx', '!418'] = 除 418 外的所有 4xx）。
-    // 判定逻辑见 platform/cache.js 的 matchStatusPattern。
-    noCacheStatus: Object.freeze(['4xx', '5xx', '52x']),
     // 单轨化：原 settings.disguise.*（隐藏双轨），现并入缓存阶段。
     // 伪装页有独立生成路径（不进 7 阶段序列），但其「缓存多久」本质是缓存配置。
     disguise: Object.freeze({

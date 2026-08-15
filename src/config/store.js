@@ -1130,10 +1130,18 @@ function foldLegacySettingsIntoStages(stages, legacySettings) {
     // proxyUserAgent 已删除：反代统一复用 stages.reqHeaders.set['User-Agent']，不再单独配置。
   }
 
-  // settings.cache.noCacheStatus → stages.cache.noCacheStatus
+  // settings.cache.noCacheStatus → stages.cache.statusTtl（TTL=0 即 no-store）
   // settings.disguise.*         → stages.cache.disguise
-  if (s.cache && typeof s.cache === 'object') {
-    fill(stage('cache'), 'noCacheStatus', s.cache.noCacheStatus);
+  if (s.cache && typeof s.cache === 'object' && Array.isArray(s.cache.noCacheStatus)) {
+    const ttls = {};
+    for (const p of s.cache.noCacheStatus) {
+      const raw = String(p).toLowerCase();
+      // 保留 `!` 例外键（!418 = 418 不受段通配 no-store 约束，走常规缓存），
+      // 非例外项等价于 TTL=0（no-store）。
+      const key = raw.startsWith('!') ? raw : raw;
+      if (key && /^!?(?:[1-5]\d{2}|[1-5]xx|[1-5]\dx)$/.test(key)) ttls[key] = 0;
+    }
+    if (Object.keys(ttls).length) fill(stage('cache'), 'statusTtl', ttls);
   }
   if (s.disguise && typeof s.disguise === 'object') {
     const c = stage('cache');
@@ -1250,6 +1258,18 @@ export async function getGlobalRules(ctx) {
     const hadLegacySettings = !!(data.settings && typeof data.settings === 'object');
     if (added || hadLegacySettings) {
       await persist(merged, hadLegacySettings ? 'settings 单轨化迁移' : '缺失阶段补全');
+    }
+    // 兼容旧数据残留的 noCacheStatus（已并入 statusTtl：TTL=0 = no-store）。
+    // 运行时已被合并后不再读取 noCacheStatus，故在此把其元素并入 statusTtl，确保行为不因合并而静默失效。
+    // 仅做兼容转换，不裁剪其他字段（如 security.uaBlacklist 等由各自阶段自行处理）。
+    const cacheStage = merged.cache;
+    if (cacheStage && Array.isArray(cacheStage.noCacheStatus) && cacheStage.noCacheStatus.length) {
+      const ttls = {};
+      for (const item of cacheStage.noCacheStatus) {
+        const p = String(item).toLowerCase();
+        if (/^!?(?:[1-5]\d{2}|[1-5]xx|[1-5]\dx)$/.test(p)) ttls[p] = 0;
+      }
+      cacheStage.statusTtl = Object.assign({}, ttls, cacheStage.statusTtl || {});
     }
     return { stages: deepClone(merged) };
   }

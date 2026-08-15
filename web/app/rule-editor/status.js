@@ -1,7 +1,7 @@
 // statusQuickPick / statusTtlEditor / statusPatternListEditor / stripRuleEditor / stringListEditor（含顶层常量）
 import { $, el } from '../../dom.js';
 import { ERROR_CODE_GROUPS } from './conditions.js';
-import { field, humanDuration, select } from '../util.js';
+import { field, humanDuration, select, singleSelectPanel } from '../util.js';
 export   const STATUS_PATTERN_RE = /^!?(?:[1-5]\d{2}|[1-5]xx|[1-5]\dx)$/i;
 export   const STATUS_PATTERN_HINT = '支持三种写法：精确码 404；整段通配 4xx / 5xx；十位段 52x（CDN 扩展错误码）。加 ! 前缀表示例外，例如先写 4xx 再写 !418，就是「除 418 以外的所有 4xx」。';
   /** 常用状态码模式速填组（含段通配，鼓励用户用通配而非逐个枚举） */
@@ -59,6 +59,15 @@ export   function statusTtlEditor(initial) {
         value: code || '',
         placeholder: '404 / 4xx / 52x',
       });
+      // 状态码单选分组下拉（参照「文件后缀」的触发框 + 分组面板风格，但为单选：
+      // 每行一个映射，点击候选即把该码填入本行输入框，不拼接、不清空其他行）。
+      const picker = singleSelectPanel({
+        groups: STATUS_PATTERN_GROUPS,
+        placeholder: '选状态码',
+        getValue: () => codeInput.value,
+        setValue: (v) => { codeInput.value = v; codeInput.dispatchEvent(new Event('input')); },
+      });
+      codeInput.addEventListener('input', () => { validate(); picker.syncFromInput(); });
       const ttlInput = el('input', {
         class: 'input st-ttl',
         type: 'number',
@@ -77,10 +86,10 @@ export   function statusTtlEditor(initial) {
       };
       ttlInput.addEventListener('input', syncTtlHint);
       syncTtlHint();
-      codeInput.addEventListener('input', validate);
 
       const row = el('div', { class: 'kv-row' }, [
         codeInput,
+        picker.trigger,
         el('div', { class: 'kv-val' }, [ttlInput, ttlHint]),
         el('button', {
           class: 'btn btn-sm btn-danger',
@@ -98,7 +107,6 @@ export   function statusTtlEditor(initial) {
       el('div', { class: 'kv-label' }, '状态码 → 缓存时长（一行一条）：'),
       listWrap,
       el('button', { class: 'btn btn-sm', text: '+ 添加一条', onclick: () => addRow('', '') }),
-      statusQuickPick((v) => { addRow(v, ''); validate(); }),
       el('div', { class: 'field-hint muted', text: STATUS_PATTERN_HINT }),
       errBox,
     ]);

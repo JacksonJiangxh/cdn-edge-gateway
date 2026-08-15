@@ -253,6 +253,101 @@ export   function multiSelectPanel({ presets, groups, getValue, setValue, tokenO
     };
   }
 
+  // singleSelectPanel：与 multiSelectPanel 同款「触发框 + 分组面板」交互，
+  // 但为「单选」——点击候选即把该值写入输入框（覆盖填入，不拼接逗号），随后收起面板。
+  // 用于「一行一个」的取值场景（如错误码缓存：每行一个状态码模式，而非逗号分隔列表）。
+  export function singleSelectPanel({ groups, getValue, setValue, render, placeholder, allowFreetext = true }) {
+    const renderSafe = render || ((r) => String(r));
+    const triggerText = () => trigger.querySelector('.ms-trigger-text');
+
+    const trigger = el('button', {
+      type: 'button',
+      class: 'ms-trigger',
+      onclick: (e) => { e.preventDefault(); e.stopPropagation(); toggle(); },
+    }, [
+      el('span', { class: 'ms-trigger-text', text: placeholder || '请选择…' }),
+      el('span', { class: 'ms-caret', text: '▾' }),
+    ]);
+
+    const panel = el('div', { class: 'ms-panel', hidden: true });
+    const optEls = new Map();
+    for (const g of groups) {
+      const groupEl = el('div', { class: 'ms-group' }, [el('div', { class: 'ms-group-label', text: g.label })]);
+      const optWrap = el('div', { class: 'ms-opts' });
+      for (const raw of g.values) {
+        const opt = el('button', {
+          type: 'button', class: 'ms-opt', text: renderSafe(raw),
+          onclick: (e) => { e.stopPropagation(); pick(raw); },
+        });
+        optEls.set(raw, opt);
+        optWrap.appendChild(opt);
+      }
+      groupEl.appendChild(optWrap);
+      panel.appendChild(groupEl);
+    }
+
+    function syncTrigger() {
+      const v = (getValue() || '').trim();
+      const t = triggerText();
+      if (v) { t.textContent = v; trigger.classList.add('has-value'); }
+      else { t.textContent = placeholder || '请选择…'; trigger.classList.remove('has-value'); }
+    }
+    function syncOpts() {
+      const v = (getValue() || '').trim().toLowerCase();
+      for (const [raw, node] of optEls) {
+        node.classList.toggle('is-selected', String(raw).toLowerCase() === v);
+      }
+    }
+    function pick(raw) {
+      setValue(String(raw));
+      syncTrigger();
+      syncOpts();
+      hide();
+    }
+    function position() {
+      const r = trigger.getBoundingClientRect();
+      panel.style.position = 'fixed';
+      panel.style.top = (r.bottom + 6) + 'px';
+      panel.style.left = r.left + 'px';
+      panel.style.minWidth = Math.max(r.width, 280) + 'px';
+    }
+    let open = false;
+    function show() {
+      position();
+      panel.hidden = false;
+      open = true;
+      trigger.classList.add('is-open');
+      document.addEventListener('click', onDocClick, true);
+      window.addEventListener('resize', onDocClick);
+      window.addEventListener('scroll', onDocClick, true);
+      syncOpts();
+      syncTrigger();
+    }
+    function hide() {
+      panel.hidden = true;
+      open = false;
+      trigger.classList.remove('is-open');
+      document.removeEventListener('click', onDocClick, true);
+      window.removeEventListener('resize', onDocClick);
+      window.removeEventListener('scroll', onDocClick, true);
+    }
+    function toggle() { open ? hide() : show(); }
+    function onDocClick(e) {
+      if (panel.hidden) return;
+      if (panel.contains(e.target) || trigger.contains(e.target)) return;
+      hide();
+    }
+    function syncFromInput() { syncOpts(); syncTrigger(); }
+
+    document.body.appendChild(panel);
+    syncTrigger();
+
+    return {
+      trigger, panel, syncFromInput,
+      destroy() { hide(); panel.remove(); },
+    };
+  }
+
   // 动态变量提示条：在支持 ${var} 的字段旁统一展示「可用变量」说明。
   // 仅作人话提示，不参与表单读取（read() 仍只取用户输入框的值）。
   // 变量名与后端 src/config/vars.js 的 SCALAR_VARS / PREFIXED_VARS 白名单一致；

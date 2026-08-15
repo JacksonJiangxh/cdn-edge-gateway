@@ -13,7 +13,6 @@
 
 import { getGlobalRules } from '../config/store.js';
 import { DEFAULT_GLOBAL_RULES, DEBUG_HEADER_NAMES } from '../config/defaults.js';
-import { matchStatusPattern } from '../contracts.js';
 import { expandVars, pickClientIp } from '../config/vars.js';
 
 /**
@@ -144,12 +143,8 @@ export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) 
  * @returns {Headers} 返回给客户端的响应头
  */
 export async function buildClientHeaders(ctx, originResp, policy, ops) {
-  // 不缓存状态码来自「缓存」阶段的全站默认（stages.cache.noCacheStatus，与 statusTtl 同级）。
-  // 支持 4xx/5xx/52x 段通配与 !418 例外，用户可在「全站通用规则 · 缓存」里改。
-  const gCache = await getGlobalStage(ctx, 'cache');
-  const noCacheStatus = Array.isArray(gCache.noCacheStatus)
-    ? gCache.noCacheStatus
-    : DEFAULT_GLOBAL_RULES.cache.noCacheStatus;
+  // 错误码缓存由 statusTtl 统一表达（命中状态码 → 缓存秒数；0 = no-store）。
+  // 原 noCacheStatus 黑名单已并入 statusTtl（TTL=0 即 no-store），此处不再单独读取。
   // 三个缓存头 TTL 回落值：优先用 policy（已含全站兜底默认 edgeTtl/browserTtl）。
   const DEFAULT_EDGE_TTL = Number(policy?.edgeTtl) || 15552000;
   const DEFAULT_BROWSER_TTL = Number(policy?.browserTtl) || 1800;
@@ -216,11 +211,6 @@ export async function buildClientHeaders(ctx, originResp, policy, ops) {
       out.set('Cache-Control', `public, max-age=0, s-maxage=${ttl}`);
       setEdgeCacheControl(ttl, policy?.staleWhileRevalidate);
     }
-  } else if (matchStatusPattern(status, noCacheStatus)) {
-    // 错误响应绝不允许被浏览器或中间层缓存
-    out.set('Cache-Control', 'no-store');
-    out.set('CDN-Cache-Control', 'no-store');
-    if (isCf) out.set('Cloudflare-CDN-Cache-Control', 'no-store');
   } else if (policy?.enabled && policy.mode !== 'origin') {
     // mode === 'origin' 表示遵循源站缓存策略，此时完全不改写缓存头
     // TTL 取配置值；若为 0 则回落到分层铁律默认值（边缘半年 / 浏览器 30 分钟）
@@ -374,26 +364,35 @@ function resolveSecret(rawValue, env) {
 function lookupStatusTtl(map, status) {
   if (!map || typeof map !== 'object') return undefined;
   const s = String(status);
-  // 1) 精确码
+  // 1) 精确码优先（用户显式值，含 ! 例外键之外的任何精确码）
   if (map[s] !== undefined) return map[s];
-  // 2) 段通配：按「通配位数量」升序选最具体的一条
+  // 2) 段通配：按「通配位数量」升序选最具体的一条；`!` 前缀键为「例外」，
+  //    表示命中该码时不受任何段通配 no-store 约束（走常规缓存，返回 undefined）。
   let best;
   let bestWildcards = 99;
+  let excluded = false;
   for (const key of Object.keys(map)) {
-    const k = key.trim().toLowerCase();
-    if (k.length !== 3 || !k.includes('x')) continue;
+    const k = String(key).trim().toLowerCase();
+    const negate = k.charCodeAt(0) === 33; /* '!' */
+    const base = negate ? k.slice(1) : k;
+    if (base.length !== 3) continue;
     let ok = true;
     let wildcards = 0;
     for (let i = 0; i < 3; i++) {
-      const kc = k.charCodeAt(i);
-      if (kc === 120 /* 'x' */) wildcards++;
-      else if (kc !== s.charCodeAt(i)) { ok = false; break; }
+      const bc = base.charCodeAt(i);
+      if (bc === 120 /* 'x' */) wildcards++;
+      else if (bc < 48 || bc > 57) { ok = false; break; } // 非数字非 'x'
+      else if (bc !== s.charCodeAt(i)) { ok = false; break; }
     }
-    if (ok && wildcards < bestWildcards) {
+    if (!ok) continue;
+    if (negate) excluded = true;
+    else if (wildcards < bestWildcards) {
       bestWildcards = wildcards;
       best = map[key];
     }
   }
+  // 3) 被 `!` 例外命中 → 排除段通配的 no-store，走常规缓存（用默认 TTL）
+  if (excluded) return undefined;
   return best;
 }
 

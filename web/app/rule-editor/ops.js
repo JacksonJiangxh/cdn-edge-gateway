@@ -2,7 +2,7 @@
 
 import { $, clear, el } from '../../dom.js';
 import { field, humanDuration, select, varHintBar } from '../util.js';
-import { statusPatternListEditor, statusTtlEditor } from './status.js';
+import { statusTtlEditor } from './status.js';
 import { section } from './card.js';
 import { normalizeMatchForEditor } from './conditions.js';
 export   function headerEditor(initial) {
@@ -80,12 +80,10 @@ export   function cacheEditor(c, opts) {
     const ckHeaders = el('input', { class: 'input', value: (key.headers || []).join(', '), placeholder: '如 accept-language' });
     const ckCookies = el('input', { class: 'input', value: (key.cookies || []).join(', '), placeholder: '如 tier' });
 
-    // 高级：状态码缓存时长（行式录入，支持 4xx/5xx/52x 通配）
+    // 错误码缓存（合并原「状态码缓存时长」与「不缓存的状态码」两卡片）：
+    // 一行一个「状态码模式 → 秒数」，0 = 不缓存（no-store）。段通配 + 精确码可共存，
+    // 精确码优先（如 4xx:0 且 404:10 → 404 缓存 10 秒、其余 4xx 不缓存）。
     const statusTtlEd = statusTtlEditor(c.statusTtl || {});
-    // 全站专属：不缓存的状态码名单 + 伪装页缓存时长
-    const noCacheEd = globalScope
-      ? statusPatternListEditor(Array.isArray(c.noCacheStatus) ? c.noCacheStatus : ['4xx', '5xx', '52x'])
-      : null;
     const dgInit = (c.disguise && typeof c.disguise === 'object') ? c.disguise : {};
     const dgCdn = globalScope
       ? el('input', { class: 'input', type: 'number', min: '0', value: dgInit.cdnMaxAge != null ? dgInit.cdnMaxAge : 86400 })
@@ -138,9 +136,9 @@ export   function cacheEditor(c, opts) {
         field('额外按请求头来区分（逗号分隔）', ckHeaders, '例如 accept-language，常用于多语言站点。一般不用填。'),
         field('额外按 Cookie 来区分（逗号分隔）', ckCookies, '例如 tier（会员等级）。一般不用填。'),
       ]),
-      section('高级缓存', '状态码缓存 / 预刷新 / 离线兜底——一般用不到，保持默认即可', [
-        el('div', { class: 'kv-label' }, '给错误页也加缓存：'),
-        el('div', { class: 'field-hint muted', text: '例如填 404 → 10 秒，表示 404 页面也缓存 10 秒，挡住对源站的重复穿透。填 0 秒表示该状态码完全不缓存。' }),
+      section('错误码缓存', '按状态码控制缓存：给错误页加缓存 / 或明确某个码不缓存——合并了原来的「错误码缓存设置」与「不缓存的状态码」', [
+        el('div', { class: 'kv-label' }, '状态码 → 缓存时长（一行一条）：'),
+        el('div', { class: 'field-hint muted', text: '例如 404 → 10，表示 404 页面也缓存 10 秒，挡住对源站的重复穿透；填 0 表示该状态码完全不缓存（no-store）。支持整段通配：4xx / 5xx / 52x，填 0 即该段所有错误码都不缓存。精确码优先于段通配——写 4xx → 0 再写 404 → 10，则 404 缓存 10 秒、其余 4xx 不缓存。' }),
         statusTtlEd.root,
         el('div', { class: 'grid2' }, [
           el('label', { class: 'check' }, [preRefresh, el('span', { text: '缓存即将过期时提前回源刷新' })]),
@@ -149,13 +147,6 @@ export   function cacheEditor(c, opts) {
         prePField,
       ]),
       // ---- 以下为全站默认专属（不随单条规则差异化）----
-      globalScope ? section('不缓存的状态码（全站）', '哪些状态码的响应一律不写缓存——与上面的「给错误页加缓存」相反', [
-        el('div', {
-          class: 'field-hint muted',
-          text: '默认拦住所有 4xx / 5xx / 52x，避免把错误页当成正常内容缓存下来。若上面「给错误页也加缓存」里为某个码填了时长，那个码以上面的设置为准。',
-        }),
-        noCacheEd.root,
-      ]) : null,
       globalScope ? section('伪装页缓存时长（全站）', '站点未匹配时返回的伪装页缓存多久', [
         field('CDN 缓存时长（秒）', dgCdn, '伪装页在 CDN 层缓存多久。伪装页内容固定，建议保持较长时间以减少函数调用。'),
         field('节点内存缓存时长（毫秒）', dgIso, '反代型伪装页在边缘节点内存里缓存多久，避免每次都去拉取伪装目标站。'),
@@ -195,7 +186,6 @@ export   function cacheEditor(c, opts) {
         offlineCache: offline.checked,
       };
       if (globalScope) {
-        out.noCacheStatus = noCacheEd.read();
         out.disguise = {
           cdnMaxAge: Number(dgCdn.value) || 0,
           isolateTtlMs: Number(dgIso.value) || 0,

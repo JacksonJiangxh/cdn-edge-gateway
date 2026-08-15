@@ -19,6 +19,10 @@ import {
 } from '../src/proxy/headers.js';
 
 import {
+  isCacheable,
+} from '../src/platform/cache.js';
+
+import {
   buildMatchSubject,
   evalCondition,
   isRuleMatched,
@@ -1108,6 +1112,45 @@ test('mode=origin：完全不改写缓存头（源站 no-store 透传，不下�
   assert.equal(out.get('cdn-cache-control'), null, 'origin 模式不应下发 CDN-Cache-Control');
   assert.equal(out.get('cloudflare-cdn-cache-control'), null, 'origin 模式不应下发 Cloudflare-CDN-Cache-Control');
 });
+
+// ============================================================================
+console.log('\n[platform/cache] 合并后：statusTtl 统一表达「错误码缓存」与「不缓存」');
+
+const cacheableReq = new Request('https://example.com/p');
+
+test('statusTtl=0 在写缓存前拦截（no-store 不落盘）', () => {
+  const policy = { enabled: true, statusTtl: { '5xx': 0 } };
+  assert.equal(isCacheable(cacheableReq, new Response('e', { status: 503 }), policy), false, '5xx 命中 statusTtl=0 不应写缓存');
+  assert.equal(isCacheable(cacheableReq, new Response('e', { status: 200 }), policy), true, '非命中码正常可缓存');
+});
+
+test('精确码优先于段通配：4xx:0 + 404:10 → 404 可缓存、其余 4xx 不缓存', () => {
+  const policy = { enabled: true, statusTtl: { '4xx': 0, '404': 10 } };
+  assert.equal(isCacheable(cacheableReq, new Response('e', { status: 404 }), policy), true, '404 被精确码 10 覆盖，可缓存');
+  assert.equal(isCacheable(cacheableReq, new Response('e', { status: 403 }), policy), false, '403 命中 4xx:0 不缓存');
+});
+
+test('! 例外键排除段通配 no-store：4xx:0 + !418 → 418 可缓存、其余 4xx 不缓存', () => {
+  const policy = { enabled: true, statusTtl: { '4xx': 0, '!418': 0 } };
+  assert.equal(isCacheable(cacheableReq, new Response('e', { status: 418 }), policy), true, '418 被 ! 例外排除 no-store，走常规缓存');
+  assert.equal(isCacheable(cacheableReq, new Response('e', { status: 403 }), policy), false, '403 仍命中 4xx:0 不缓存');
+});
+
+test('buildClientHeaders：statusTtl 精确码=0 下发 no-store，>0 下发 s-maxage', async () => {
+  const ctx = makeCacheCtx('cf');
+  const noStore = await buildClientHeaders(ctx, makeOriginResp(404), { enabled: true, edgeTtl: 15552000, browserTtl: 1800, statusTtl: { '404': 0 } }, 0);
+  assert.equal(noStore.get('cache-control'), 'no-store', '404 命中 statusTtl=0 应下发 no-store');
+  const cached = await buildClientHeaders(ctx, makeOriginResp(404), { enabled: true, edgeTtl: 15552000, browserTtl: 1800, statusTtl: { '404': 77 } }, 0);
+  assert.ok(/s-maxage=77/.test(cached.get('cache-control')), '404 命中 statusTtl=77 应下发 s-maxage=77');
+});
+
+test('默认 statusTtl={4xx:0,5xx:0,52x:0} 下错误码不缓存、200 可缓存', () => {
+  const policy = { enabled: true, statusTtl: { '4xx': 0, '5xx': 0, '52x': 0 } };
+  assert.equal(isCacheable(cacheableReq, new Response('e', { status: 404 }), policy), false, '默认 4xx 不缓存');
+  assert.equal(isCacheable(cacheableReq, new Response('e', { status: 503 }), policy), false, '默认 5xx 不缓存');
+  assert.equal(isCacheable(cacheableReq, new Response('e', { status: 200 }), policy), true, '200 不在默认黑名单，可缓存');
+});
+
 
 // ============================================================================
 console.log('\n[config/global-rules] 全站兜底规则（阶段→默认动作映射）');

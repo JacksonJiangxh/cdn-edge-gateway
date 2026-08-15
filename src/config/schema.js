@@ -446,9 +446,13 @@ function normStatusTtl(input) {
   let n = 0;
   for (const [k, v] of Object.entries(input)) {
     if (n >= 20) break;
-    const code = int(k, 0, 100, 599);
-    if (code < 100) continue;
-    out[String(code)] = int(v, 0, 0, LIMITS.TTL_MAX);
+    const raw = String(k).toLowerCase();
+    if (!raw) continue;
+    // 键支持精确码（404）、段通配（4xx / 5xx / 52x），以及 `!` 前缀的「例外」键
+    // （如 `!418` = 418 不受任何段通配 no-store 约束，走常规缓存）。精确码优先于段通配，
+    // `!` 例外键优先级最高（排除段通配的 no-store，但不覆盖用户显式精确码）。
+    if (!STATUS_PATTERN_RE.test(raw)) continue;
+    out[raw] = int(v, 0, 0, LIMITS.TTL_MAX);
     n++;
   }
   return out;
@@ -885,24 +889,25 @@ function normGlobalOnlySubFields(stage, raw, base) {
   }
 
   if (stage === 'cache') {
-    // 不缓存状态码：支持 4xx/5xx/52x 段通配与 !418 例外（见 contracts.matchStatusPattern）。
-    // 允许清空（= 不做状态码黑名单），故 Array 判断而非「空则回落」。
-    if (Array.isArray(src.noCacheStatus)) {
-      const list = [];
-      for (const item of src.noCacheStatus) {
-        if (list.length >= 60) break;
-        const p = str(item, '', 8).toLowerCase();
-        if (!p) continue;
-        if (!STATUS_PATTERN_RE.test(p)) {
-          errors.push(`noCacheStatus 中存在非法状态码模式: ${p}（应为 404 / 4xx / 52x / !418 这类写法）`);
-          continue;
-        }
-        if (!list.includes(p)) list.push(p);
-      }
-      out.noCacheStatus = list;
-    } else {
-      out.noCacheStatus = deepClone(def.noCacheStatus || []);
+    // 错误码缓存 TTL：命中状态码 → 缓存秒数；0 = no-store（不写缓存 + 下发 no-store 头）。
+    // 键支持精确码（404）与段通配（4xx / 5xx / 52x），精确码优先于段通配。
+    // 允许清空（= 全部按边缘缓存默认 TTL），故 Array/Object 判断而非「空则回落默认」。
+    const statusTtl = {};
+    // 向后兼容：旧数据里的 noCacheStatus（黑名单数组）合并进 statusTtl，
+    // 每个模式（去 `!` 前缀）等价于 TTL=0（no-store）。statusTtl 的显式值优先于此处。
+    const legacy = Array.isArray(src.noCacheStatus)
+      ? src.noCacheStatus
+      : (Array.isArray(def.noCacheStatus) ? def.noCacheStatus : []);
+    for (const item of legacy) {
+      const p = str(item, '', 8).toLowerCase();
+      if (!p || !STATUS_PATTERN_RE.test(p)) continue;
+      // 保留 `!` 例外键（如 `!418` = 418 不受段通配 no-store 约束，走常规缓存）；
+      // 非例外项等价于 TTL=0（no-store）。statusTtl 显式值优先于此处。
+      const key = p.startsWith('!') ? p : (p in statusTtl ? null : p);
+      if (key && !(key in statusTtl)) statusTtl[key] = 0;
     }
+    Object.assign(statusTtl, normStatusTtl(src.statusTtl || {}));
+    out.statusTtl = statusTtl;
 
     // 伪装页缓存时长（伪装页有独立生成路径，但「缓存多久」本质是缓存配置）
     const dgSrc = isObj(src.disguise) ? src.disguise : {};

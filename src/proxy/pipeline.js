@@ -585,11 +585,10 @@ function matchPathCaptureGroups(ctx, rule) {
  */
 function safeIsCacheable(ctx, cacheKey, resp, policy) {
   try {
-    // 不缓存状态码来自缓存阶段的全站默认（stages.cache.noCacheStatus），
-    // 支持 4xx/5xx/52x 段通配与 !418 例外，用户可在「全站通用规则 · 缓存」里改。
-    const gc = ctx.__globalStages && ctx.__globalStages.cache;
-    const noCacheStatus = gc && gc.noCacheStatus;
-    return isCacheable(cacheKey, resp, policy, noCacheStatus) === true;
+    // 错误码缓存（statusTtl）与不缓存状态码统一在 isCacheable 内处理：
+    // statusTtl 命中且 TTL=0 即 no-store（不写缓存），与原 noCacheStatus 黑名单等价。
+    // 旧数据残留的 noCacheStatus 已由 schema 兼容转换为 statusTtl=0，故此处无需单独取用。
+    return isCacheable(cacheKey, resp, policy) === true;
   } catch {
     return false;
   }

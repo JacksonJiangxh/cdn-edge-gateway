@@ -25,6 +25,55 @@ import { matchStatusPattern } from '../contracts.js';
 import { detectCaps } from './caps.js';
 
 /**
+ * 按状态码查找 statusTtl 命中值：键支持精确码（404）与段通配（4xx/5xx/52x），
+ * 精确码优先；多个通配键命中时取最具体（通配位最少）的一条。未命中返回 undefined。
+ * 与 proxy/headers.js 的 lookupStatusTtl 语义保持一致。
+ *
+ * @param {Record<string, number>|undefined} map 错误码缓存 TTL 映射
+ * @param {number} status HTTP 状态码
+ * @returns {number|undefined} 命中的 TTL；未命中返回 undefined
+ */
+
+// statusTtl 中 `!KEY` 例外键命中时的返回值（区别于 `undefined`=完全无相关键，
+// 后者应回落内置枚举兜底）。表示「该码不受段通配 no-store 约束，走常规缓存」。
+const STATUS_TTL_EXCLUDED = Symbol('status-ttl-excluded');
+
+function lookupStatusTtl(map, status) {
+  if (!map || typeof map !== 'object') return undefined;
+  const s = String(status);
+  // 1) 精确码优先（用户显式值）
+  if (map[s] !== undefined) return map[s];
+  // 2) 段通配：取最具体的一条；`!` 前缀键为「例外」，命中时排除段通配 no-store
+  let best;
+  let bestWildcards = 99;
+  let excluded = false;
+  for (const key of Object.keys(map)) {
+    const k = String(key).trim().toLowerCase();
+    const negate = k.charCodeAt(0) === 33; /* '!' */
+    const base = negate ? k.slice(1) : k;
+    if (base.length !== 3) continue;
+    let ok = true;
+    let wildcards = 0;
+    for (let i = 0; i < 3; i++) {
+      const bc = base.charCodeAt(i);
+      if (bc === 120 /* 'x' */) wildcards++;
+      else if (bc < 48 || bc > 57) { ok = false; break; } // 非数字非 'x'
+      else if (bc !== s.charCodeAt(i)) { ok = false; break; }
+    }
+    if (!ok) continue;
+    if (negate) excluded = true;
+    else if (wildcards < bestWildcards) {
+      bestWildcards = wildcards;
+      best = map[key];
+    }
+  }
+  // 3) 被 `!` 例外命中 → 排除段通配 no-store，走常规缓存。返回专用 sentinel 以区别于
+  //    `undefined`（statusTtl 完全无相关键，应回落内置枚举兜底）。
+  if (excluded) return STATUS_TTL_EXCLUDED;
+  return best;
+}
+
+/**
  * isolate 级缓存句柄。undefined 表示尚未探测，null 表示探测过且不可用。
  * @type {Cache|null|undefined}
  */
@@ -286,9 +335,10 @@ export function resetCacheStats() {
  * @param {Request} request 客户端请求
  * @param {Response} response 源站响应
  * @param {import('../contracts.js').CachePolicy} policy 缓存策略
- * @param {ReadonlyArray<string|number>|Set<number>} [noCacheStatus] 不缓存状态码模式列表，
+ * @param {ReadonlyArray<string|number>|Set<number>} [noCacheStatus] 不缓存状态码模式列表（兼容旧数据），
  *   支持 `4xx`/`5xx`/`52x` 段通配与 `!418` 例外（来自缓存阶段的 stages.cache.noCacheStatus，用户可改）。
- *   缺省时回落到引擎内置枚举 NO_CACHE_STATUS_LIST。
+ *   缺省时回落到引擎内置枚举 NO_CACHE_STATUS_LIST。新逻辑统一由 statusTtl 表达（TTL=0 即 no-store），
+ *   此处 noCacheStatus 仅作向后兼容保留。
  * @returns {boolean} 是否可缓存
  */
 export function isCacheable(request, response, policy, noCacheStatus) {
@@ -307,13 +357,24 @@ export function isCacheable(request, response, policy, noCacheStatus) {
     /* headers 不可用时忽略此项 */
   }
 
-  // 4. 不缓存状态码（来自缓存阶段 stages.cache.noCacheStatus，用户可在「全站通用规则」里改）。
-  // 支持 4xx/5xx/52x 段通配与 !418 例外；空列表表示「不做状态码黑名单过滤」，
-  // 因此这里用 `!= null && length` 判断而非 `||`，避免用户「清空列表」被静默回落成内置枚举。
+  const status = response.status;
+
+  // 4. 错误码缓存 TTL（statusTtl，唯一真相源）：先查用户显式配置。
+  //    - 命中且 TTL=0 → no-store（既不写边缘缓存，也下发 no-store 头）；
+  //    - 命中且 TTL>0 → 用户明确要缓存，直接放行（覆盖内置兜底枚举）；
+  //    - 未命中 → 回落到下方「不缓存状态码」兜底（含引擎铁律 NO_CACHE_STATUS_LIST）。
+  //    键支持精确码（404）与段通配（4xx/5xx/52x），`!` 前缀为范围例外（命中即排除段通配 no-store）；
+  //    精确码优先于段通配。该判定在「写缓存」阶段即拦截，等价于原 noCacheStatus 黑名单。
+  const ttl = lookupStatusTtl(policy?.statusTtl, status);
+  if (ttl === STATUS_TTL_EXCLUDED) return true; // `!` 例外：排除段通配 no-store，走常规缓存
+  if (ttl !== undefined) return ttl > 0;
+
+  // 5. 不缓存状态码兜底（兼容旧数据 noCacheStatus + 引擎铁律 NO_CACHE_STATUS_LIST）：
+  // 用户未用 statusTtl 显式配置该码时生效。空列表表示「不做状态码黑名单过滤」，因此用
+  // `!= null && length` 判断而非 `||`，避免用户「清空列表」被静默回落成内置枚举。
   const patterns = (Array.isArray(noCacheStatus) && noCacheStatus.length) || noCacheStatus instanceof Set
     ? noCacheStatus
     : (noCacheStatus === undefined || noCacheStatus === null ? NO_CACHE_STATUS_LIST : null);
-  const status = response.status;
   if (patterns && matchStatusPattern(status, patterns)) return false;
   // 6. 206 不在黑名单里但同样不可缓存
   if (status === 206) return false;

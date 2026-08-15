@@ -89,8 +89,10 @@ export const DEFAULT_DISGUISE = DEFAULT_GLOBAL.disguise;
 
 /**
  * 不应缓存的状态码枚举全集（源自 contracts.js 的 NO_CACHE_STATUS）。
- * 仅作为「把段通配展开成精确码」时的参考集合与向后兼容回落值；
- * 实际判定走 stages.cache.noCacheStatus + matchStatusPattern。
+ * 作为「引擎铁律」兜底：当用户未用 statusTtl 显式配置某状态码时（statusTtl 完全未命中），
+ * isCacheable 回落到该枚举决定写缓存阶段是否拦截。已用 statusTtl 显式配置（含 TTL=0
+ * 的 no-store 与 `!KEY` 例外）的码优先于此枚举。原 noCacheStatus 黑名单已并入 statusTtl
+ * （TTL=0 = no-store），其向后兼容转换见 schema.normGlobalOnlySubFields。
  * @type {readonly number[]}
  */
 export const NO_CACHE_STATUS_LIST = Object.freeze([...NO_CACHE_STATUS]);
