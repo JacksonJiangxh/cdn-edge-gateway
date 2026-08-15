@@ -98,7 +98,8 @@ export   function conditionRow(cond, onRemove) {
     valInput.addEventListener('input', () => extMs.syncFromInput());
 
     const keyWrap = el('div', { class: 'cond-cell' }, [keyInput]);
-    const valWrap = el('div', { class: 'cond-cell' }, [valInput, extDl, extTriggerWrap, valHint]);
+    // valInput 已内嵌在 extMs.combobox 中，此处只需放 combobox + datalist + hint。
+    const valWrap = el('div', { class: 'cond-cell' }, [extMs.combobox, extDl, valHint]);
 
     // 运算符对应的填写示例，帮小白看懂“值”该写什么
     const OP_EXAMPLES = {
