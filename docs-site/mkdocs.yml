@@ -1,0 +1,79 @@
+site_name: cdn-edge-gateway 文档
+site_description: 边缘 CDN 反向代理网关 —— 部署、配置、开发与架构教程
+site_url: https://your-org.github.io/cdn-edge-gateway/
+repo_url: https://github.com/your-org/cdn-edge-gateway
+repo_name: cdn-edge-gateway
+edit_uri: blob/main/docs-site/docs/
+
+theme:
+  name: material
+  language: zh
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: 切换到深色
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: 切换到浅色
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tabs
+    - navigation.tracking
+    - content.code.copy
+    - content.code.annotate
+    - search.suggest
+    - search.highlight
+    - toc.follow
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - toc:
+      permalink: true
+      toc_depth: 3
+
+extra:
+  generator: false
+  social: []
+
+nav:
+  - 开始: index.md
+  - 用户篇:
+      - 项目概述: user/01-overview.md
+      - 环境准备: user/02-prerequisites.md
+      - 部署指南: user/03-deploy.md
+      - 配置详解: user/04-configuration.md
+      - 管理面教程: user/05-user-guide.md
+      - 缓存策略: user/06-cache-strategy.md
+      - EO 回源 Host: user/07-eo-origin-host.md
+      - 常见问题: user/08-faq.md
+  - 开发者篇:
+      - 本地开发: dev/09-local-development.md
+      - API 参考: dev/10-api-reference.md
+      - 系统架构: dev/11-architecture.md
+      - 请求流程: dev/12-request-flow.md
+      - Redis KV 兜底: dev/13-redis-kv.md
+      - 部署 ESA: dev/14-deploy-esa.md
+      - ESA MCP: dev/15-mcp-esa.md
+  - 附录:
+      - 状态码说明: appendix/status-codes.md
+      - 隐藏配置字段: appendix/hidden-fields.md
+      - 502 错误说明: appendix/502.md

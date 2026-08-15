@@ -21,6 +21,9 @@ web/_app.entry.js
 web/_stage.entry.js
 dist/
 
+# 文档站构建产物（MkDocs 生成，不纳入版本管理）
+docs-site/site/
+
 # node
 node_modules/
 npm-debug.log*

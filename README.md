@@ -2,7 +2,7 @@
 
 > 一个跑在**边缘节点**上的 CDN 反向代理网关：你访问加速域名，它在边缘决定「回哪个源站、路径怎么改、响应头怎么改、要不要缓存」，把对象存储 / Git 静态资源 / 自建源站一键套上 CDN 加速。
 >
-> 支持多域名、多源站池、负载均衡、链式回退与被动熔断，可部署到 **Cloudflare Workers / Cloudflare Pages / EdgeOne Pages**。
+> 支持多域名、多源站池、负载均衡、链式回退与被动熔断，可部署到 **Cloudflare Workers / Cloudflare Pages / EdgeOne Pages / 阿里云 ESA**。
 
 ---
 
@@ -12,7 +12,7 @@
 |---|---|
 | 源站只有单 IP，一挂全挂 | 一个「源站池」里放多个源站，按顺序/权重自动切换（链式回退 + 被动熔断） |
 | 想给不同路径走不同源站 | 「规则引擎」按请求特征（路径/扩展名/方法/Header/Cookie/Query）分流 |
-| 不想让人盗链 / 刷流量 | 「安全防护」内置防盗链、UA 过滤、IP 黑白名单、签名 URL⚠️（实验特性，内置签发工具待开发）、限流 |
+| 不想让人盗链 / 刷流量 | 「安全防护」内置防盗链、UA 过滤、IP 黑白名单、限流 |
 | 小水管源站扛不住 | 边缘缓存（Cloudflare 用 `caches.default`；EdgeOne 靠 `CDN-Cache-Control` 响应头委托边缘缓存） |
 | 想看清一整套规则是怎么跑的 | 「流量序列」把请求从进来到返回画成流程图，可点击跳转、可拖拽调优先级 |
 | 部署不想碰命令行 | 可视化管理面，登录后在网页上点着配，配置落 KV |
@@ -27,7 +27,7 @@
 浏览器 ──► 边缘节点(cdn-edge-gateway)
               │
               ├─ 1. 按域名(Host)匹配到「站点」
-              ├─ 2. 安全防护(防盗链/IP/UA/签名/限流) 命中即拦截
+              ├─ 2. 安全防护(防盗链/IP/UA/限流) 命中即拦截
               ├─ 3. 规则引擎 按优先级匹配(命中走对应源站池/动作)
               ├─ 4. 选源站(chain/roundrobin/weighted/iphash…)
               ├─ 5. 回源(路径重写/自定义Host/超时/跟随3xx)
@@ -40,30 +40,36 @@
 
 ## 文档导航
 
-> **建议按编号顺序阅读**：先把它跑起来（介绍 → 准备 → 部署），再学会用（配置 → 管理面 → 缓存），需要进阶再看高级与原理篇。每篇结尾都有「下一步」指向下一篇，不需要自己找路。
+> 完整教程已重构为 **MkDocs 文档站**，区分「用户篇 / 开发者篇」单站分栏，免费托管到 GitHub Pages。
+> **在线文档**：`https://<你的组织>.github.io/cdn-edge-gateway/`（由仓库 `.github/workflows/docs.yml` 自动构建部署）。
 
-**一、使用者主线（部署 / 运维 / 使用者视角）**
+**用户篇（部署 / 运维 / 使用）**
 | # | 文档 | 读完你会 |
 |---|---|---|
-| 01 | [项目概述](./docs/01-overview.md) | 明白它是什么、三种部署形态怎么选 |
-| 02 | [环境准备](./docs/02-prerequisites.md) | 装好 Node、依赖，构建通过 |
-| 03 | [部署指南](./docs/03-deploy.md) | CF 三种方式（命令行静态挂载首选 / 粘贴 / Pages）+ EdgeOne + 流水线 |
-| 04 | [配置详解](./docs/04-configuration.md) | 看懂每个字段怎么填（**最常用**） |
-| 05 | [管理面使用教程](./docs/05-user-guide.md) | 在网页里建池、建站点、配规则 |
-| 06 | [缓存策略](./docs/06-cache-strategy.md) | 想提高命中率、省函数额度 |
-| 07 | [EO 回源 Host 配置](./docs/07-eo-origin-host.md) | EdgeOne 平台侧「源站组 + 回源 Host 重写」操作 |
-| 08 | [常见问题 FAQ](./docs/08-faq.md) | 排坑合集 |
+| 01 | [项目概述](./docs-site/docs/user/01-overview.md) | 明白它是什么、四种部署形态怎么选 |
+| 02 | [环境准备](./docs-site/docs/user/02-prerequisites.md) | 装好 Node、依赖，构建通过 |
+| 03 | [部署指南](./docs-site/docs/user/03-deploy.md) | CF / Pages / EdgeOne / ESA 部署分步 |
+| 04 | [配置详解](./docs-site/docs/user/04-configuration.md) | 看懂每个字段怎么填（**最常用**） |
+| 05 | [管理面使用教程](./docs-site/docs/user/05-user-guide.md) | 在网页里建池、建站点、配规则 |
+| 06 | [缓存策略](./docs-site/docs/user/06-cache-strategy.md) | 想提高命中率、省额度 |
+| 07 | [EO 回源 Host 配置](./docs-site/docs/user/07-eo-origin-host.md) | EdgeOne 平台侧「源站组 + 回源 Host」操作 |
+| 08 | [常见问题 FAQ](./docs-site/docs/user/08-faq.md) | 排坑合集 |
 
-**二、开发者与开发支持（代码层 / 调试视角）**
+**开发者篇（代码层 / 调试 / 扩展）**
 | # | 文档 | 读完你会 |
 |---|---|---|
-| 09 | [本地开发与验证](./docs/09-local-development.md) | 本机跑代码、进管理面、验证回源、调试 |
-| 10 | [API 参考](./docs/10-api-reference.md) | 用 curl / 脚本批量管理配置 |
-| 11 | [系统架构](./docs/11-architecture.md) | 代码分层、模块职责、平台能力降级 |
-| 12 | [请求处理流程](./docs/12-request-flow.md) | 一个请求从进到出的完整链路 |
-| 13 | [Redis/Webdis KV 兜底](./docs/13-redis-kv.md) | 无原生 KV 的平台（EO Pages/ESA）用自部署 Redis 持久化 |
-| 14 | [部署到阿里云 ESA](./docs/14-deploy-esa.md) | 把网关部署到 ESA Functions/Pages（控制台 / esa-cli / 流水线） |
-| 15 | [ESA MCP Server](./docs/15-mcp-esa.md) | 在 AI IDE 里用自然语言直接管理 ESA Pages / 边缘函数 / 站点 |
+| 09 | [本地开发与验证](./docs-site/docs/dev/09-local-development.md) | 本机跑代码、进管理面、调试 |
+| 10 | [API 参考](./docs-site/docs/dev/10-api-reference.md) | 用 curl / 脚本批量管理配置 |
+| 11 | [系统架构](./docs-site/docs/dev/11-architecture.md) | 代码分层、模块职责、平台能力降级、内存预算 |
+| 12 | [请求处理流程](./docs-site/docs/dev/12-request-flow.md) | 一个请求从进到出的完整链路 |
+| 13 | [Redis/Webdis KV 兜底](./docs-site/docs/dev/13-redis-kv.md) | 无原生 KV 平台（ESA）用 Webdis 持久化 |
+| 14 | [部署到阿里云 ESA](./docs-site/docs/dev/14-deploy-esa.md) | ESA 控制台 / CLI / 流水线部署 |
+| 15 | [ESA MCP Server](./docs-site/docs/dev/15-mcp-esa.md) | 在 AI IDE 里用自然语言管理 ESA |
+
+**附录**：[状态码说明](./docs-site/docs/appendix/status-codes.md) · [隐藏配置字段](./docs-site/docs/appendix/hidden-fields.md) · [502 错误说明](./docs-site/docs/appendix/502.md)
+
+> 文档站工程在 `docs-site/`（`mkdocs.yml` + `requirements.txt`），源码 Markdown 在 `docs-site/docs/`。
+> 构建命令：`pip install -r docs-site/requirements.txt && mkdocs build -f docs-site/mkdocs.yml`。
 
 ---
 
@@ -73,13 +79,13 @@
 src/
 ├── entry.js              # 运行入口（组装 ctx：请求/平台能力/env/KV）
 ├── core/                 # 请求主流程：匹配站点 → 安全 → 规则 → 选源 → 回源 → 改写
-├── proxy/                # 回源执行(engines/)、头改写、路径重写、缓存键、图片优化
+├── proxy/                # 回源执行(engines/)、头改写、路径重写、缓存键
 │   ├── engines/          # fetchEngine / socketEngine（socket 不支持时自动降级 fetch）
 │   ├── cachekey.js       # 缓存键构造（回源 URL + host 维度 + 代次 + 自定义维度）
 │   └── rewrite.js        # 路径重写 + 回源 Host 解析
 ├── balancer/             # 源站池调度策略(strategy) + 链式回退(failover) + 被动熔断(circuit)
 ├── config/               # 配置读写(KV: store) + schema 校验（唯一数据真相源）
-├── security/             # 防盗链 / IP / UA / 签名 / 限流(guard/sign/ratelimit)
+├── security/             # 防盗链 / IP / UA / 限流(guard/ratelimit)
 ├── stats/                # 访问统计（collector 内存聚合 → KV / D1 双驱动）
 ├── api/                  # 管理面后端（/__panel/api/*）+ 静态页优先服务(adminPage)
 │   ├── handlers/         # sites / pools / rules / stats / auth / config / cache / system
