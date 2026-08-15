@@ -1386,6 +1386,14 @@ function normRepoOrigin(input, idx, label, errors, engine) {
     errors,
   };
 }
+
+/**
+ * 规范化单个源站（fetch / socket 引擎通用；r2 / cnb / github 分流到专门函数）。
+ * @param {any} input
+ * @param {number} idx
+ * @returns {{value: any, errors: string[]}}
+ */
+function normOrigin(input, idx) {
   const errors = [];
   const label = `源站[${idx}]`;
   if (!isObj(input)) return { value: null, errors: [`${label} 不是合法对象`] };

@@ -100,8 +100,8 @@ import {
   normalizeStage,
 } from '../src/config/stages.js';
 
-// 单轨化后全站阶段 = 规则阶段 + 全站独有阶段（match/security/error）
-const ALL_GLOBAL_STAGE_KEYS = [...STAGE_ORDER, ...GLOBAL_ONLY_STAGE_ORDER];
+// 单轨化后全站阶段 = 规则阶段 + 全站独有阶段（match/security/error）+ 内容类型纠正阶段
+const ALL_GLOBAL_STAGE_KEYS = [...STAGE_ORDER, ...GLOBAL_ONLY_STAGE_ORDER, 'fixContentType'];
 
 import { DEFAULT_RETRY_ON, CONFIG_VERSION } from '../src/contracts.js';
 import { STAGE_OP_FIELDS } from '../src/config/schema.js';
