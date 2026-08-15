@@ -205,7 +205,8 @@ export   async function openSiteDrawer(host, anchor) {
         clear(tplSel);
         for (const t of tplState.list) {
           const o = el('option', { value: t.id }, t.name);
-          if (t.id === 'website') o.selected = true; // 最常见场景作默认
+          // 最常见场景作默认
+          if (t.id === 'website') o.selected = true;
           tplSel.appendChild(o);
         }
         syncTpl();

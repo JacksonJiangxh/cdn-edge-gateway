@@ -128,7 +128,8 @@ export async function get(ctx, id) {
  * @param {string|null} urlId URL 中的 id（更新场景）；为空表示新建，由系统自动生成 id
  */
 async function savePool(ctx, body, urlId) {
-  if (urlId) body.id = urlId; // 更新场景以 URL 中的机器 id 为准（用户不可改）
+  // 更新场景以 URL 中的机器 id 为准（用户不可改）
+  if (urlId) body.id = urlId;
   const res = validatePool(body, ctx.caps);
   if (!res.ok) {
     return fail(ERROR_CODES.BAD_REQUEST, '配置校验失败: ' + res.errors.join('; '), 400);

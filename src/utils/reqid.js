@@ -20,8 +20,10 @@ export const REQUEST_ID_HEADER = 'X-Request-Id';
 /** 可复用的上游追踪头，按优先级排列 */
 const INBOUND_HEADERS = Object.freeze([
   'x-request-id',
-  'cf-ray', // Cloudflare
-  'eo-log-uuid', // EdgeOne
+  // Cloudflare
+  'cf-ray',
+  // EdgeOne
+  'eo-log-uuid',
   'x-amzn-trace-id',
 ]);
 

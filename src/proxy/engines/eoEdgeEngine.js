@@ -49,14 +49,16 @@ export async function eoEdgeFetch(ctx, clientRequest, policy) {
   const method = String(clientRequest.method || 'GET').toUpperCase();
   if (method !== 'GET' && method !== 'HEAD') {
     try {
-      init.body = clientRequest.clone().body; // 不直接消费原 body
+      // 不直接消费原 body
+      init.body = clientRequest.clone().body;
     } catch {
       /* 不可克隆时忽略 body，交给 EO 处理 */
     }
   }
 
   if (ctx && ctx.debug) {
-    ctx.debug.eoEdgeFetch = url.host; // 便于观测：实际走了同站 fetch 委托
+    // 便于观测：实际走了同站 fetch 委托
+    ctx.debug.eoEdgeFetch = url.host;
   }
 
   // 触发 EO 节点缓存/回源：url.host == 客户端 HOST，host 头一致 → 满足三条件

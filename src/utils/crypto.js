@@ -51,7 +51,8 @@ function utf8(str) {
 export function bufToBase64(buf) {
   const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
   let bin = '';
-  const CHUNK = 0x8000; // 32KB 一块，兼顾性能与栈安全
+  // 32KB 一块，兼顾性能与栈安全
+  const CHUNK = 0x8000;
   for (let i = 0; i < bytes.length; i += CHUNK) {
     bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
   }

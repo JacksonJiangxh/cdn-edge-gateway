@@ -191,7 +191,8 @@ export function registerDomain(name, cfg) {
  * @returns {boolean} 是否允许写入（false 表示被拒，调用方应放弃写入以免 OOM）
  */
 export function allocBytes(name, entry) {
-  if (!_inited) return true; // 未初始化：降级放行，由域自身条目上限兜底
+  // 未初始化：降级放行，由域自身条目上限兜底
+  if (!_inited) return true;
   try {
     const d = _domains.get(name);
     if (!d) return true;
@@ -205,7 +206,8 @@ export function allocBytes(name, entry) {
     maybeReclaim(false);
     return true;
   } catch {
-    return true; // 内存层异常绝不影响主流程
+    // 内存层异常绝不影响主流程
+    return true;
   }
 }
 
@@ -310,7 +312,8 @@ function maybeReclaim(force) {
     // 常规写入路径 / 主动检查：域超自身配额即回收（保守域仅 force 时回收）
     for (const d of _domains.values()) {
       if (d.usedBytes < d.quotaBytes) continue;
-      if (!d.allowAggressiveEvict && !force) continue; // 保守域常规不回收
+      // 保守域常规不回收
+      if (!d.allowAggressiveEvict && !force) continue;
       try {
         d.evict(true);
       } catch {

@@ -239,7 +239,8 @@ export
         overrideHint,
         el('button', { class: 'btn btn-sm btn-danger', text: '移除源站', onclick: () => row.remove() }),
       ]);
-      syncEngine(); // 回显时根据已有 engine 显隐 R2 字段
+      // 回显时根据已有 engine 显隐 R2 字段
+      syncEngine();
       originList.appendChild(row);
     };
     (pool.origins || []).forEach(addOrigin);
@@ -283,7 +284,8 @@ export
     ]);
     const kindLabel = isSingle ? '单一源站' : '源站池';
     openDrawer(id ? `编辑${kindLabel}: ` + (pool.name || id) : `新建${kindLabel}`, '', body, async () => {
-      const pid = pool.id || ''; // 系统主键，编辑时才有；新建为空 → 后端自动生成
+      // 系统主键，编辑时才有；新建为空 → 后端自动生成
+      const pid = pool.id || '';
       const origins = [];
       Array.from(originList.children).forEach((row, i) => {
         const engine = $('.o-engine', row).value;
@@ -304,7 +306,8 @@ export
           const repoBranch = $('.o-repo-branch', row).value.trim() || 'main';
           const repoPrivate = !!$('.o-repo-private', row).checked;
           const tokenField = engine === 'cnb' ? 'cnbTokenEnc' : 'githubTokenEnc';
-          const tokenPlain = $('.o-repo-token', row).value; // 明文输入；留空=不改（保留密文）
+          // 明文输入；留空=不改（保留密文）
+          const tokenPlain = $('.o-repo-token', row).value;
           // 编辑时留空：保留 legacy 已有的（加密）token；新建必填校验交给后端
           const tokenVal = tokenPlain ? tokenPlain : (legacy[tokenField] || '');
           const preset = buildRepoPresetRules(engine, { repoUser, repoName, repoBranch, repoPrivate });

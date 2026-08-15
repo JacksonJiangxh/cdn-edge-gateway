@@ -116,8 +116,10 @@ export   async function renderTrafficSequence() {
         if (hasSite && matched.length) {
           flow.appendChild(el('div', { class: 'seq-rule-list' }, matched.map((r) => {
             const condCount = (r.match && r.match.conditions || []).reduce((n, g) => n + g.length, 0);
-            const idx = rules.indexOf(r);          // 全局下标：用于拖拽定位（保存时按全站 priority 重排）
-            const stageIdx = matched.indexOf(r);   // 阶段内相对序号：展示用（每个阶段只消费自己阶段的规则集）
+            // 全局下标：用于拖拽定位（保存时按全站 priority 重排）
+            const idx = rules.indexOf(r);
+            // 阶段内相对序号：展示用（每个阶段只消费自己阶段的规则集）
+            const stageIdx = matched.indexOf(r);
             const node = seqRuleInPack(r, ruleSubs(r), condCount, site.host, draggable, ruleStage(r), stageIdx + 1);
             if (draggable && idx >= 0) ruleNodes.push({ node, index: idx });
             return node;

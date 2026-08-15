@@ -133,7 +133,8 @@ export function applyRewrite(pathname, rewrite, ctx) {
           // 字符串替换里 $&/$$ 的转义地狱，且不影响 ${var}（已先展开为字面）。
           replaced = out.replace(re, (...args) => {
             const full = args[0];
-            const groups = args.slice(1, -2); // 去掉末尾 offset/string
+            // 去掉末尾 offset/string
+            const groups = args.slice(1, -2);
             // 通配符别名约定（对齐小白直觉）：
             //   $0 = 第一个 * 匹配的段      $1 = 完整输入路径
             //   $2..$9 = 其余第 n-1 个 * 匹配的段（标准捕获组顺延）

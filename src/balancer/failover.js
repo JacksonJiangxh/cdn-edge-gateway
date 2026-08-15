@@ -93,7 +93,8 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
 
   for (let attempt = 0; attempt < totalAttempts; attempt++) {
     const selected = selectOrigin(pool, ctx, excludeIds);
-    if (!selected) break; // 没有可用源站了
+    // 没有可用源站了
+    if (!selected) break;
 
     // ---- 合并「规则级回源连接参数」到源站物理属性 ----
     // ⑨ Origin Rules：engine / scheme / port 由规则 action 覆盖源站物理属性。

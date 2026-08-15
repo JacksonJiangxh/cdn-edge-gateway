@@ -57,7 +57,8 @@ export function actionToGlobalStage(stage, action) {
   }
   for (const k of Object.keys(a)) {
     if (RULE_OWNED_KEYS.has(k)) continue;
-    if (!(k in out)) out[k] = a[k]; // 兜底收集未枚举到的动作字段
+    // 兜底收集未枚举到的动作字段
+    if (!(k in out)) out[k] = a[k];
   }
   return out;
 }

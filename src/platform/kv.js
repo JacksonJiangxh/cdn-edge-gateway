@@ -258,7 +258,8 @@ function wrap(raw) {
      */
     async put(key, value, opts) {
       if (typeof key !== 'string' || key === '') return;
-      const physKey = encodeKey(key); // 键非法时抛错——写操作必须让调用方感知
+      // 键非法时抛错——写操作必须让调用方感知
+      const physKey = encodeKey(key);
       const body = typeof value === 'string' ? value : JSON.stringify(value);
       /** @type {{expirationTtl?:number}|undefined} */
       let putOpts;
@@ -480,7 +481,8 @@ function createEdgeKVAdapter(env) {
             // 统一先取 text 再自行 JSON.parse，避免依赖底层 type 支持程度。
             return await store.get(physKey, { type: 'text' });
           } catch {
-            return null; // 读失败降级默认值
+            // 读失败降级默认值
+            return null;
           }
         });
       } catch {

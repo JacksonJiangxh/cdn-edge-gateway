@@ -138,7 +138,8 @@ async function runPipeline(ctx) {
     try {
       disguise = (await getGlobal(ctx))?.disguise;
     } catch {
-      disguise = undefined; // 读配置失败则用默认静态伪装
+      // 读配置失败则用默认静态伪装
+      disguise = undefined;
     }
     const res = await renderDisguise(ctx, disguise);
     recordSafely(ctx, { status: res.status, cacheHit: 'BYPASS' });
@@ -170,7 +171,8 @@ async function runPipeline(ctx) {
   if (!primaryOriginActual) {
     return errorResponse(502, 'No Origin', `No enabled origin in site "${site.host}"`, ctx);
   }
-  ctx.origin = primaryOriginActual; // 注入规则引擎匹配维度
+  // 注入规则引擎匹配维度
+  ctx.origin = primaryOriginActual;
 
   // ---- 4. 匹配规则（此时 ctx.origin 已就绪，规则可匹配 origin / originAddr）----
 

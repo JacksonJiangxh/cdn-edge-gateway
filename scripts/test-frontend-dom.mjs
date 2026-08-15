@@ -309,7 +309,8 @@ export async function runFrontendDomTest() {
     if (window.document.readyState === 'complete') return r();
     window.addEventListener('DOMContentLoaded', r);
     window.addEventListener('load', r);
-    setTimeout(r, 800); // 兜底，避免极端情况下永不 resolve
+    // 兜底，避免极端情况下永不 resolve
+    setTimeout(r, 800);
   });
   await sleep(200);
 
@@ -414,7 +415,8 @@ export async function runFrontendDomTest() {
       if (!titleSpan) return null;
 
       const errBase = errors.length;
-      titleSpan.closest('.seq-stage').click(); // openRulesDrawer(host, opts) 异步
+      // openRulesDrawer(host, opts) 异步
+      titleSpan.closest('.seq-stage').click();
       await sleep(300);
 
       const drawer = doc.getElementById('drawer');
@@ -685,7 +687,8 @@ export async function runFrontendDomTest() {
   return { ok: _failures === 0, checks: _checks, failures: _failures };
 }
 
-let JSDOM; // 动态 import 后赋值
+// 动态 import 后赋值
+let JSDOM;
 
 /**
  * 纯逻辑单测：前端 rule-editor/shared.js 的「全扁平双向转换契约」。

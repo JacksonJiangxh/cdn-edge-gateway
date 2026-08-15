@@ -72,7 +72,8 @@ testA('circuit: recordFailure 单次写入使计数+1', async (a) => {
   ctx.env = { CDN_KV: kv };
   const key = encodeKey(`hc:${'p-rf'}:${'o-rf'}`);
   await recordFailure(ctx, 'p-rf', 'o-rf');
-  await new Promise((r) => setTimeout(r, 10)); // 等后台 waitUntil 落盘
+  // 等后台 waitUntil 落盘
+  await new Promise((r) => setTimeout(r, 10));
   a.equal(await kv.get(key), '1', '首次失败计数=1');
 });
 

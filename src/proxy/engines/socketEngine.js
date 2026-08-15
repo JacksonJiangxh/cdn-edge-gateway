@@ -44,7 +44,8 @@ export async function rawTcpFetch(originUrl, headers, timeoutMs, opts, ctx) {
   const timeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : 10000;
 
   const port = Number(url.port) || (url.protocol === 'https:' ? 443 : 80);
-  const hostname = url.hostname; // 裸 IP
+  // 裸 IP
+  const hostname = url.hostname;
 
   // TLS：SNI 必须设成 Host 头里的域名（而非 URL 里的裸 IP），否则证书校验失败。
   const secure = url.protocol === 'https:';
@@ -339,7 +340,8 @@ function createChunkedStream(reader, initial, socket, timer) {
   function drain(controller) {
     while (true) {
       const lineEnd = indexOfCRLF(buf);
-      if (lineEnd < 0) return false; // 长度行还没收全
+      // 长度行还没收全
+      if (lineEnd < 0) return false;
 
       const sizeLine = new TextDecoder().decode(buf.slice(0, lineEnd));
       // 分块扩展用 ";" 分隔，取前半段即可

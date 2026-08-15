@@ -98,10 +98,14 @@ export function onGlobalChange(fn) {
  * @returns {Promise<number>}
  */
 let _verState = {
-  value: 0, // 最近一次从 KV 读到的版本号
-  level: 0, // 当前轮询档位下标（0=2s, 1=60s, 2=180s）
-  rapidLeft: 0, // 激进档（2s）剩余保持轮数
-  expireAt: 0, // 本地退避缓存过期时间（ms 时间戳）
+  // 最近一次从 KV 读到的版本号
+  value: 0,
+  // 当前轮询档位下标（0=2s, 1=60s, 2=180s）
+  level: 0,
+  // 激进档（2s）剩余保持轮数
+  rapidLeft: 0,
+  // 本地退避缓存过期时间（ms 时间戳）
+  expireAt: 0,
 };
 async function readVersion(ctx) {
   const now = Date.now();
@@ -519,9 +523,11 @@ export async function getGlobal(ctx) {
   // 仍走原有 memGet 命中逻辑，保证可用性。
   const cached = memGet(ctx, K_GLOBAL);
   if (!ctx?.mgmt && cached) {
-    const ver = await readVersion(ctx); // 失败返回 -1
+    // 失败返回 -1
+    const ver = await readVersion(ctx);
     if (ver < 0 || ver === _cachedGlobalVersion) {
-      return cached; // 版本一致（或版本号读取失败保守放行）→ 直接用 L1
+      // 版本一致（或版本号读取失败保守放行）→ 直接用 L1
+      return cached;
     }
     // 版本号不一致：丢弃 L1，下方重拉 KV
     memDel(K_GLOBAL);
@@ -775,7 +781,8 @@ export async function putSite(ctx, site) {
   await writeJson(ctx, kSite(host), site);
 
   invalidateMemCache();
-  await bumpVersion(ctx); // 广播版本号，使其它 isolate 在 2s 内重新拉取（ProxySQL 式生效）
+  // 广播版本号，使其它 isolate 在 2s 内重新拉取（ProxySQL 式生效）
+  await bumpVersion(ctx);
 }
 
 /**
@@ -838,7 +845,8 @@ export async function listSites(ctx, options) {
     const batch = hosts.slice(i, i + BATCH);
     const results = await Promise.all(batch.map((h) => readJson(ctx, kSite(h))));
     for (const s of results) {
-      if (!s) continue; // 悬空索引，静默跳过
+      // 悬空索引，静默跳过
+      if (!s) continue;
       out.push(s);
     }
   }
@@ -1406,6 +1414,7 @@ export async function setSyncToken(ctx, code, ttlSec = SYNC_TOKEN_TTL_SEC) {
 export async function delSyncToken(ctx) {
   if (isBakedMode(ctx)) throwBakedReadOnly(ctx);
   const kv = getKV(ctx.env);
-  if (!kv) return; // 无 KV 时本就无从开放，视为已关闭
+  // 无 KV 时本就无从开放，视为已关闭
+  if (!kv) return;
   await kv.delete(K_SYNC_TOKEN);
 }

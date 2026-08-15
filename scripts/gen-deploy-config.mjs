@@ -125,7 +125,8 @@ toml = toml.replace(/\n# === AUTO-APPENDED-BINDINGS[\s\S]*$/u, "");
 // 这里统一从复制的基线中剥离这三行（含其顶层与 [vars] 内两种写法），
 // 再在文件末尾以【规范顶层格式】重写，确保它们永远位于顶层、永不混入 [vars]。
 toml = toml
-  .replace(/^\s*assets\s*=[\s\S]*?\}\s*$/m, "")       // 顶层 assets = { ... }
+  // 顶层 assets = { ... }
+  .replace(/^\s*assets\s*=[\s\S]*?\}\s*$/m, "")
   .replace(/^\s*preview_urls\s*=\s*(true|false)\s*$/m, "")
   .replace(/^\s*observability\s*=[\s\S]*?\}\s*$/m, "")
   // 兜底：若它们曾被写进 [vars] 段（行内形式），也一并剥离

@@ -62,7 +62,8 @@ test('evalCondition: query equal', () => {
 });
 
 test('evalCondition: 缺失 key 的目标视为不命中（不抛错）', () => {
-  const c = { target: 'header', op: 'equal', values: ['1'] }; // 无 key
+  // 无 key
+  const c = { target: 'header', op: 'equal', values: ['1'] };
   assert.strictEqual(evalCondition(c, buildMatchSubject(mkCtx('/a'))), false);
 });
 

@@ -85,7 +85,8 @@ console.log(`▸ 目标 Routine/Pages: ${routineName}  env=${ENV}`);
 // ---- 2) 确保 esa-cli 可用（优先本地 .bin，其次全局，最后 npx 临时下载）----
 function resolveEsaCli() {
   const localBin = join(ROOT, 'node_modules', '.bin', 'esa-cli');
-  if (existsSync(localBin)) return localBin; // 作为 devDependency 安装时直接命中
+  // 作为 devDependency 安装时直接命中
+  if (existsSync(localBin)) return localBin;
   const probe = spawnSync('esa-cli', ['--version'], { cwd: ROOT, encoding: 'utf8' });
   if (probe.status === 0) return 'esa-cli';
   return 'npx esa-cli';

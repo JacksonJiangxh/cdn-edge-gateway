@@ -57,7 +57,8 @@ function lookupStatusTtl(map, status) {
     for (let i = 0; i < 3; i++) {
       const bc = base.charCodeAt(i);
       if (bc === 120 /* 'x' */) wildcards++;
-      else if (bc < 48 || bc > 57) { ok = false; break; } // 非数字非 'x'
+      // 非数字非 'x'
+      else if (bc < 48 || bc > 57) { ok = false; break; }
       else if (bc !== s.charCodeAt(i)) { ok = false; break; }
     }
     if (!ok) continue;
@@ -366,7 +367,8 @@ export function isCacheable(request, response, policy, noCacheStatus) {
   //    键支持精确码（404）与段通配（4xx/5xx/52x），`!` 前缀为范围例外（命中即排除段通配 no-store）；
   //    精确码优先于段通配。该判定在「写缓存」阶段即拦截，等价于原 noCacheStatus 黑名单。
   const ttl = lookupStatusTtl(policy?.statusTtl, status);
-  if (ttl === STATUS_TTL_EXCLUDED) return true; // `!` 例外：排除段通配 no-store，走常规缓存
+  // `!` 例外：排除段通配 no-store，走常规缓存
+  if (ttl === STATUS_TTL_EXCLUDED) return true;
   if (ttl !== undefined) return ttl > 0;
 
   // 5. 不缓存状态码兜底（兼容旧数据 noCacheStatus + 引擎铁律 NO_CACHE_STATUS_LIST）：

@@ -416,7 +416,8 @@ function lookupStatusTtl(map, status) {
     for (let i = 0; i < 3; i++) {
       const bc = base.charCodeAt(i);
       if (bc === 120 /* 'x' */) wildcards++;
-      else if (bc < 48 || bc > 57) { ok = false; break; } // 非数字非 'x'
+      // 非数字非 'x'
+      else if (bc < 48 || bc > 57) { ok = false; break; }
       else if (bc !== s.charCodeAt(i)) { ok = false; break; }
     }
     if (!ok) continue;

@@ -30,30 +30,54 @@ import { buildMatchSubject } from '../proxy/matcher.js';
 
 /** 所有支持的「独立变量名」白名单（不含带 key 的 http_/cookie_/query_ 前缀）。 */
 export const SCALAR_VARS = Object.freeze([
-  'host',            // 客户端访问域名（小写）
-  'client_ip',       // 真实客户端 IP（取自引擎内部 CLIENT_IP_HEADERS 优先级）
-  'client_country',  // 客户端国家（大写，CF-IPCountry）
-  'client_continent',// 客户端大区（大写，由 ISO 国家码推导）
-  'client_asn',      // 客户端 ASN（取自 cf-asn / asn 头）
-  'client_device',   // 设备类型（mobile/desktop，由 UA 推导）
-  'method',          // HTTP 方法（大写）
-  'scheme',          // 协议（http/https）
-  'protocol',        // 协议（同 scheme，兼容别名）
-  'uri',             // 完整请求路径含查询串
-  'path',            // 请求路径（不含查询串）
-  'query',           // 完整查询串（不含前导 ?）
-  'filename',        // 路径末段文件名
-  'extension',       // 文件扩展名（不含点）
-  'directory',       // 文件所在目录（含末尾 /）
-  'user_agent',      // 客户端 User-Agent
-  'referer',         // 客户端 Referer
-  'origin',          // 本次回源源站 id（首要分流维度）
-  'origin_addr',     // 本次回源源站 addr
-  'edge_country',    // 边缘节点所在国家（取自 cf-...-country，无则回退 client_country）
-  'edge_colo',       // 边缘节点编号（取自 cf-ray 第一段，无则空）
-  'request_id',      // 本次请求唯一 id（取自 cf-request-id / 自动生成）
-  'product_name',    // 本网关产品名（只读常量，呼应 PRODUCT_NAME）
-  'remote_addr',     // 直连对端 IP（cf-connecting-ip 优先，否则 socket remote）
+  // 客户端访问域名（小写）
+  'host',
+  // 真实客户端 IP（取自引擎内部 CLIENT_IP_HEADERS 优先级）
+  'client_ip',
+  // 客户端国家（大写，CF-IPCountry）
+  'client_country',
+  // 客户端大区（大写，由 ISO 国家码推导）
+  'client_continent',
+  // 客户端 ASN（取自 cf-asn / asn 头）
+  'client_asn',
+  // 设备类型（mobile/desktop，由 UA 推导）
+  'client_device',
+  // HTTP 方法（大写）
+  'method',
+  // 协议（http/https）
+  'scheme',
+  // 协议（同 scheme，兼容别名）
+  'protocol',
+  // 完整请求路径含查询串
+  'uri',
+  // 请求路径（不含查询串）
+  'path',
+  // 完整查询串（不含前导 ?）
+  'query',
+  // 路径末段文件名
+  'filename',
+  // 文件扩展名（不含点）
+  'extension',
+  // 文件所在目录（含末尾 /）
+  'directory',
+  // 客户端 User-Agent
+  'user_agent',
+  // 客户端 Referer
+  'referer',
+  // 本次回源源站 id（首要分流维度）
+  'origin',
+  // 本次回源源站 addr
+  'origin_addr',
+  // 边缘节点所在国家（取自 cf-...-country，无则回退 client_country）
+  'edge_country',
+  // 边缘节点编号（取自 cf-ray 第一段，无则空）
+  'edge_colo',
+  // 本次请求唯一 id（取自 cf-request-id / 自动生成）
+  'request_id',
+  // 本网关产品名（只读常量，呼应 PRODUCT_NAME）
+  'product_name',
+  // 直连对端 IP（cf-connecting-ip 优先，否则 socket remote）
+  'remote_addr',
 ]);
 
 /** 带 key 的变量前缀白名单（http_/cookie_/query_）。 */
@@ -77,25 +101,42 @@ export const PREFIXED_VARS = Object.freeze(['http_', 'cookie_', 'query_']);
  */
 export const CLIENT_IP_HEADERS = Object.freeze([
   // —— 平台专有真实 IP 头（对应平台不可伪造，优先级最高）——
-  'cf-connecting-ip',     // Cloudflare
-  'true-client-ip',       // Akamai / Cloudflare Enterprise
-  'fastly-client-ip',     // Fastly
-  'fastly-ssl-client-ip', // Fastly (SSL 终止处)
-  'eo-connecting-ip',     // 腾讯云 EdgeOne
-  'ali-cdn-real-ip',      // 阿里云 CDN / DCDN
-  'akamai-client-ip',     // Akamai
-  'cloudfront-viewer-address', // AWS CloudFront（含端口，pickClientIp 剥离）
+  // Cloudflare
+  'cf-connecting-ip',
+  // Akamai / Cloudflare Enterprise
+  'true-client-ip',
+  // Fastly
+  'fastly-client-ip',
+  // Fastly (SSL 终止处)
+  'fastly-ssl-client-ip',
+  // 腾讯云 EdgeOne
+  'eo-connecting-ip',
+  // 阿里云 CDN / DCDN
+  'ali-cdn-real-ip',
+  // Akamai
+  'akamai-client-ip',
+  // AWS CloudFront（含端口，pickClientIp 剥离）
+  'cloudfront-viewer-address',
   // —— 反代 / 网关注入头 ——
-  'x-real-ip',            // Nginx / Caddy / Traefik / Kong
-  'x-client-ip',          // HAProxy / Kong
-  'client-ip',            // 通用 / 老旧反代
-  'remote-addr',          // 请求头形态（区别于 socket remote_addr）
-  'x-original-forwarded-for', // Nginx 原始 XFF（再代理一层时保留）
-  'x-envoy-external-address', // Envoy 外部客户端地址
-  'x-ucloud-remote-ip',   // UCloud 反代
+  // Nginx / Caddy / Traefik / Kong
+  'x-real-ip',
+  // HAProxy / Kong
+  'x-client-ip',
+  // 通用 / 老旧反代
+  'client-ip',
+  // 请求头形态（区别于 socket remote_addr）
+  'remote-addr',
+  // Nginx 原始 XFF（再代理一层时保留）
+  'x-original-forwarded-for',
+  // Envoy 外部客户端地址
+  'x-envoy-external-address',
+  // UCloud 反代
+  'x-ucloud-remote-ip',
   // —— 通用转发链（最后，客户端可任意追加，最易被伪造）——
-  'x-forwarded-for',      // 事实标准，逗号分隔链
-  'forwarded',            // RFC7239 结构化头（for=...;...），由 pickClientIp 解析
+  // 事实标准，逗号分隔链
+  'x-forwarded-for',
+  // RFC7239 结构化头（for=...;...），由 pickClientIp 解析
+  'forwarded',
 ]);
 
 /**

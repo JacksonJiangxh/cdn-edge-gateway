@@ -81,7 +81,8 @@ export async function handleRequest(ctx) {
 
   // ---- 管理面与管理 API ----
   if (hostOk && (pathname === adminPrefix || pathname.startsWith(adminPrefix + '/'))) {
-    const rest = pathname.slice(adminPrefix.length); // '' | '/' | '/api/xxx'
+    // '' | '/' | '/api/xxx'
+    const rest = pathname.slice(adminPrefix.length);
 
     // 管理 API
     if (rest === '/api' || rest.startsWith('/api/')) {

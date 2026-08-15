@@ -179,7 +179,8 @@ export function createRedisKV(env) {
       try {
         json = await webdisFetch(readUrl(base, 'GET', [phys]), { method: 'GET' }, token, timeoutMs);
       } catch {
-        return null; // 读失败降级到默认值
+        // 读失败降级到默认值
+        return null;
       }
       const { value } = unwrap(json, 'GET');
       // GET 缺失键 → Webdis 返回 {"GET":null}

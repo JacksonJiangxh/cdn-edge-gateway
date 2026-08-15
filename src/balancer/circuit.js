@@ -84,7 +84,8 @@ function hcKey(poolId, originId) {
  */
 export async function isTripped(ctx, poolId, originId) {
   const kv = safeGetKV(ctx);
-  if (!kv) return false; // 降级：无 KV 则从不熔断
+  // 降级：无 KV 则从不熔断
+  if (!kv) return false;
 
   try {
     // 先查 L1 内存缓存，命中则省去一次 KV 读

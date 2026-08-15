@@ -44,7 +44,8 @@ import { decryptSecret } from '../utils/cipher.js';
  */
 export function repoUpstreamHost(engine, isPrivate) {
   if (engine === 'cnb') return isPrivate ? 'api.cnb.cool' : 'cnb.cool';
-  if (engine === 'github') return 'raw.githubusercontent.com'; // 公私 host 相同，仅鉴权差异
+  // 公私 host 相同，仅鉴权差异
+  if (engine === 'github') return 'raw.githubusercontent.com';
   throw new Error('未知仓库引擎: ' + engine);
 }
 
@@ -71,19 +72,27 @@ export const REPO_ENGINE_LABEL = Object.freeze({ cnb: 'CNB', github: 'GitHub' })
  */
 export const REPO_RESP_HEADER_REMOVE = Object.freeze({
   cnb: Object.freeze([
-    'access-control-allow-credentials', // CNB 写死 false，上游 CORS 配套，无意义透传
-    'access-control-expose-headers', // 上游 CORS 配套
-    'referrer-policy', // CNB 写死 no-referrer，覆盖网关统一默认值
-    'traceparent', // CNB 内部链路追踪（GitHub 无此头）
-    'x-trace-id', // CNB 内部链路 id
+    // CNB 写死 false，上游 CORS 配套，无意义透传
+    'access-control-allow-credentials',
+    // 上游 CORS 配套
+    'access-control-expose-headers',
+    // CNB 写死 no-referrer，覆盖网关统一默认值
+    'referrer-policy',
+    // CNB 内部链路追踪（GitHub 无此头）
+    'traceparent',
+    // CNB 内部链路 id
+    'x-trace-id',
     'x-ratelimit-limit',
     'x-ratelimit-remaining',
     'x-ratelimit-reset',
-    'x-repo-commit', // 上游仓库内部信息，泄露源站结构
+    // 上游仓库内部信息，泄露源站结构
+    'x-repo-commit',
   ]),
   github: Object.freeze([
-    'strict-transport-security', // 上游源站 HSTS（max-age=31536000），对用户域名无意义
-    'x-xss-protection', // 已废弃安全头，与 CSP 冲突时反而有害
+    // 上游源站 HSTS（max-age=31536000），对用户域名无意义
+    'strict-transport-security',
+    // 已废弃安全头，与 CSP 冲突时反而有害
+    'x-xss-protection',
     'x-github-request-id',
     'x-github-edge-region',
     'x-fastly-request-id',
@@ -92,7 +101,8 @@ export const REPO_RESP_HEADER_REMOVE = Object.freeze({
     'x-cache',
     'x-cache-hits',
     'source-age',
-    'via', // 1.1 varnish
+    // 1.1 varnish
+    'via',
   ]),
 });
 
@@ -222,7 +232,8 @@ export function buildRepoRewriteRule(engine, repoUser, repoName, host, branch = 
  * @returns {Promise<Response>}
  */
 export async function fetchRepoOrigin(ctx, origin, originUrl, headers, timeoutMs, opts) {
-  const engine = origin.engine; // 'cnb' | 'github'
+  // 'cnb' | 'github'
+  const engine = origin.engine;
   const tokenField = engine === 'cnb' ? 'cnbTokenEnc' : 'githubTokenEnc';
   const stored = origin[tokenField];
   const isPrivate = !!origin.repoPrivate;

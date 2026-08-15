@@ -61,12 +61,15 @@ export const DEFAULT_CACHE_KEY = Object.freeze({
  * @type {Readonly<import('../contracts.js').CachePolicy>}
  */
 export const DEFAULT_CACHE_POLICY = Object.freeze({
-  enabled: false, // 未显式开启就不缓存，避免误缓存动态内容 / 登录态响应
-  mode: 'ttl', // ttl=自定义时间 / origin=遵循源站 / noCache=不缓存
+  // 未显式开启就不缓存，避免误缓存动态内容 / 登录态响应
+  enabled: false,
+  // ttl=自定义时间 / origin=遵循源站 / noCache=不缓存
+  mode: 'ttl',
   edgeTtl: 0,
   staleWhileRevalidate: 0,
   browserTtl: 0,
-  ignoreQuery: false, // 保留查询串参与缓存键，否则 ?id=1 与 ?id=2 会命中同一份缓存
+  // 保留查询串参与缓存键，否则 ?id=1 与 ?id=2 会命中同一份缓存
+  ignoreQuery: false,
   queryWhitelist: Object.freeze([]),
   key: DEFAULT_CACHE_KEY,
   // 错误码缓存 TTL：命中状态码 → 缓存秒数；0 = no-store（不写缓存 + 下发 no-store 头）。
@@ -114,7 +117,8 @@ export const DEFAULT_REWRITE = Object.freeze({
  * @type {Readonly<import('../contracts.js').RuleMatch>}
  */
 export const DEFAULT_RULE_MATCH = Object.freeze({
-  conditions: Object.freeze([]), // 二维：外层 OR，内层 AND，匹配条件以此为准
+  // 二维：外层 OR，内层 AND，匹配条件以此为准
+  conditions: Object.freeze([]),
 });
 
 /** 默认单个匹配条件。 */
@@ -357,12 +361,16 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
       // —— 全站通用兜底：仅剥离【实测 CNB 与 GitHub 共有、且对所有源站都该剥】的头 ——
       // 其余「仓库接口特有的头」已下沉到 cnb / github 引擎关联的「内置预设规则模板」
       // (respHeaders 阶段)，按引擎分别处理，不污染全站默认。
-      'cross-origin-resource-policy', // CNB same-origin / GitHub cross-origin（实测两者都有）
+      // CNB same-origin / GitHub cross-origin（实测两者都有）
+      'cross-origin-resource-policy',
       'cross-origin-embedder-policy',
-      'content-security-policy', // 全有（360 渲染杀器之一）
+      // 全有（360 渲染杀器之一）
+      'content-security-policy',
       'content-security-policy-report-only',
-      'x-frame-options', // 全有
-      'set-cookie', // 通用安全
+      // 全有
+      'x-frame-options',
+      // 通用安全
+      'set-cookie',
       // 上游常回 X-Content-Type-Options: nosniff（全部 5 个 URL 都有！这是 360 不渲染主因）。
       // 作为 CDN/网关，下发给浏览器的 Content-Type 由本项目 fixContentType 控制并信任，
       // 无需上游 nosniff 约束；部分内核较严的浏览器（如 360）在 nosniff 下会因任何 MIME

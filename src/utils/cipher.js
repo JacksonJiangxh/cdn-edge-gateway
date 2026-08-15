@@ -25,10 +25,14 @@
 import { sha256Bytes } from './crypto.js';
 
 const ALGO = 'AES-GCM';
-const IV_LEN = 12; // 96-bit IV，GCM 推荐
-const KEY_BYTES = 32; // AES-256
-const PREFIX_PLAIN = 'plain:'; // 降级明文标记
-const PREFIX_ENC = 'enc:'; // 密文标记
+// 96-bit IV，GCM 推荐
+const IV_LEN = 12;
+// AES-256
+const KEY_BYTES = 32;
+// 降级明文标记
+const PREFIX_PLAIN = 'plain:';
+// 密文标记
+const PREFIX_ENC = 'enc:';
 
 let _warnOnce = false;
 

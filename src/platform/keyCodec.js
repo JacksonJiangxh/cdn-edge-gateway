@@ -173,10 +173,12 @@ export function decodeKey(encoded) {
     if (ch !== '_') return null;
 
     const next = encoded[i + 1];
-    if (next === undefined) return null; // 尾部悬空的 `_`
+    // 尾部悬空的 `_`
+    if (next === undefined) return null;
 
     if (next === '_') {
-      bytes.push(0x5f); // 字面下划线
+      // 字面下划线
+      bytes.push(0x5f);
       i += 1;
       continue;
     }

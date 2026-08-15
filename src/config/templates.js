@@ -139,8 +139,10 @@ export const SITE_TEMPLATES = Object.freeze([
     name: '网站加速',
     desc: '通用网站 / 前后端分离站点。静态资源长缓存，HTML 与 API 不缓存，避免用户看到旧页面。',
     params: {
-      edgeTtl: 2592000,      // 30 天：带指纹的静态资源可以放心长存
-      browserTtl: 86400,     // 1 天：浏览器缓存清不掉，保守些
+      // 30 天：带指纹的静态资源可以放心长存
+      edgeTtl: 2592000,
+      // 1 天：浏览器缓存清不掉，保守些
+      browserTtl: 86400,
       staleWhileRevalidate: 60,
       errorTtl: 10,
     },
@@ -214,7 +216,8 @@ export const SITE_TEMPLATES = Object.freeze([
     name: '音视频流媒体',
     desc: '点播 / HLS / DASH。分片长缓存，索引清单短缓存，保证能及时切换码率与更新节目。',
     params: {
-      edgeTtl: 86400,        // 分片内容不可变，1 天
+      // 分片内容不可变，1 天
+      edgeTtl: 86400,
       browserTtl: 3600,
       staleWhileRevalidate: 30,
       errorTtl: 5,
@@ -274,7 +277,8 @@ export const SITE_TEMPLATES = Object.freeze([
     name: '大文件下载',
     desc: '安装包 / 镜像 / 静态归档。内容基本不可变，用最长缓存把回源压到最低。',
     params: {
-      edgeTtl: 15552000,     // 180 天
+      // 180 天
+      edgeTtl: 15552000,
       browserTtl: 86400,
       staleWhileRevalidate: 300,
       errorTtl: 10,
@@ -323,8 +327,10 @@ export const SITE_TEMPLATES = Object.freeze([
     name: 'WordPress 建站',
     desc: 'WP 站点。静态资源长缓存省带宽，后台、首页与动态脚本不缓存，避免登录态串号与发版看不到更新。',
     params: {
-      edgeTtl: 5184000,      // 60 天：WP 静态资源多带 ?ver= 查询，较长也安全
-      browserTtl: 604800,    // 7 天
+      // 60 天：WP 静态资源多带 ?ver= 查询，较长也安全
+      edgeTtl: 5184000,
+      // 7 天
+      browserTtl: 604800,
       staleWhileRevalidate: 300,
       errorTtl: 10,
     },

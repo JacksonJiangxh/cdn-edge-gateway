@@ -465,7 +465,8 @@ function makeEl() {
     click: () => {},
     blur: () => {},
     scrollIntoView: () => {},
-    set innerHTMLValue(v) { this.innerHTML = v; }, // noop 语义，避免误设
+    // noop 语义，避免误设
+    set innerHTMLValue(v) { this.innerHTML = v; },
   };
   return el;
 }

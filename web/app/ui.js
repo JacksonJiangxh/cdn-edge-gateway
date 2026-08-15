@@ -32,7 +32,8 @@ export   function openDrawer(title, hint, bodyNode, onSave) {
         await onSave();
         closeDrawer();
         toast('已保存', 'ok');
-        await route(location.hash); // 刷新当前视图
+        // 刷新当前视图
+        await route(location.hash);
       } catch (e) {
         toast(e.message || '保存失败', 'err');
       } finally {

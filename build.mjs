@@ -141,7 +141,8 @@ async function buildStageGen() {
     format: 'esm',
     target: 'es2022',
     platform: 'browser',
-    minify: false, // 前端 bundle 阶段已压缩，此处保持可读便于排查
+    // 前端 bundle 阶段已压缩，此处保持可读便于排查
+    minify: false,
     write: true,
     legalComments: 'none',
   });
@@ -608,7 +609,8 @@ function checkBracketBalance(s) {
   const pairs = { ')': '(', ']': '[', '}': '{' };
   const open = new Set(['(', '[', '{']);
   const stack = [];
-  let inStr = null; // 简易字符串状态：' 或 "
+  // 简易字符串状态：' 或 "
+  let inStr = null;
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
     if (inStr) {

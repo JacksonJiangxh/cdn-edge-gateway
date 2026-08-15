@@ -201,7 +201,8 @@ export async function saveBasics(ctx, host) {
     if (k in body) merged[k] = body[k];
   }
   merged.host = h;
-  merged.host = h; // 主键不可改
+  // 主键不可改
+  merged.host = h;
   merged.cacheGen = existing.cacheGen || 0;
   merged.updatedAt = Date.now();
 

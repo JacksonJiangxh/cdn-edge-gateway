@@ -143,7 +143,8 @@ export   function multiSelectPanel({ presets, groups, tokenOf, render, placehold
 
     // 弹出面板（初始隐藏，挂在 body 上）。
     const panel = el('div', { class: 'ms-panel', hidden: true });
-    const optEls = new Map(); // raw -> 候选按钮节点
+    // raw -> 候选按钮节点
+    const optEls = new Map();
 
     function isSelSafe(raw) {
       const cur = getV().split(',').map((s) => s.trim()).filter(Boolean);

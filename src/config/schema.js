@@ -56,7 +56,8 @@ import { validateVarNames, hasVars } from './vars.js';
 export const STAGE_OP_FIELDS = {
   rewrite: 'rewrite',
   redirect: 'redirect',
-  forceHttps: ['forceHttps', 'forceHttpsStatus'],  // terminate 阶段：强制 HTTPS + 状态码
+  // terminate 阶段：强制 HTTPS + 状态码
+  forceHttps: ['forceHttps', 'forceHttpsStatus'],
   directResponse: 'directResponse',
   reqHeaders: 'reqHeaders',
   respHeaders: 'respHeaders',
@@ -111,7 +112,8 @@ function buildActionByStage(a, normed, stage) {
   const owned = ownedFieldsForStage(ns);
   const out = {};
   for (const [k, v] of Object.entries(normed)) {
-    if (STAGE_OWNED_FIELDS.has(k) && !owned.has(k)) continue; // 本阶段不含该 op → 不落库
+    // 本阶段不含该 op → 不落库
+    if (STAGE_OWNED_FIELDS.has(k) && !owned.has(k)) continue;
     out[k] = v;
   }
   return out;
@@ -130,11 +132,14 @@ const LIMITS = Object.freeze({
   HOST_MAX: 253,
   RULES_MAX: 50,
   ORIGINS_MAX: 20,
-  LIST_MAX: 200, // 黑白名单条目上限
-  REGEX_MAX: 200, // 正则字符串长度上限
+  // 黑白名单条目上限
+  LIST_MAX: 200,
+  // 正则字符串长度上限
+  REGEX_MAX: 200,
   STR_MAX: 2048,
   HEADERS_MAX: 30,
-  TTL_MAX: 31536000, // 1 年
+  // 1 年
+  TTL_MAX: 31536000,
 });
 
 // ----------------------------------------------------------------------------
@@ -673,7 +678,8 @@ export function normRewrite(input) {
       errors.push(`重写模式 ${type} 需要填写 value`);
     } else {
       if (!v.startsWith('/')) v = '/' + v;
-      v = v.replace(/\/+$/, ''); // 去尾斜杠，拼接时统一处理
+      // 去尾斜杠，拼接时统一处理
+      v = v.replace(/\/+$/, '');
       out.value = v;
     }
   } else if (type === 'regex') {

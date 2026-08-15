@@ -57,7 +57,8 @@ export async function tryServePanelStatic(ctx, req, adminPath) {
   // 管理面静态资源：/{adminPath}/assets/* → 重写为固定物理 /assets/*
   if (pathname.startsWith(prefix + '/assets/')) {
     const file = pathname.slice((prefix + '/assets/').length);
-    if (file !== 'app.css' && file !== 'app.js') return null; // 只允许这两个白名单文件
+    // 只允许这两个白名单文件
+    if (file !== 'app.css' && file !== 'app.js') return null;
     const isCss = file.endsWith('.css');
     // 优先走 Cloudflare Workers Static Assets 绑定（env.ASSETS）：ASSETS 按 URL 路径取文件，
     // 对外是 /{adminPath}/assets/*，物理是 /assets/*，故重写为固定物理路径去取。
