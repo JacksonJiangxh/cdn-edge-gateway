@@ -51,19 +51,27 @@ testA('selectOrigin: 跳过被排除（熔断）源站', (a) => {
   a.equal(picked.id, 'b', '排除 a 后选 b');
 });
 
-testA('selectOrigin: 全部排除返回 null', (a) => {
-  const pool = mkPool('chain', [{ id: 'a', healthy: true }]);
-  a.equal(selectOrigin(pool, mkCtxFor(), new Set(['a', 'x'])), null, '全排除→null');
+testA('selectOrigin: 无可用源站（空池）返回 null', (a) => {
+  const pool = mkPool('chain', []);
+  a.equal(selectOrigin(pool, mkCtxFor(), new Set()), null, '空池→null');
 });
 
-testA('circuit: 计数达阈值则熔断（isTripped 读取语义）', async (a) => {
+testA('selectOrigin: 全部排除→fail-open 智能放行（返回最佳兜底源站）', (a) => {
+  const pool = mkPool('chain', [{ id: 'a', healthy: true }, { id: 'b', healthy: true }]);
+  const picked = selectOrigin(pool, mkCtxFor(), new Set(['a', 'b']));
+  // 全员不可用时不再盲目返回 null，而是挑「最值得一试」的源站（fail-open 兜底取数）
+  a.notEqual(picked, null, '全员排除仍返回兜底源站（不拒绝服务）');
+  a.ok(['a', 'b'].includes(picked.id), '兜底源站在 enabled 集合内');
+});
+
+testA('circuit: 累计失败达阈值则熔断（内存计数即时生效）', async (a) => {
   const ctx = mkCtxFor();
-  const kv = createMockKV();
-  ctx.env = { CDN_KV: kv };
-  // 直接写入熔断计数（key 经 encodeKey 编码）
-  const key = encodeKey(`hc:${'p-trip'}:${'o-trip'}`);
-  await kv.put(key, '3', { expirationTtl: 60 });
-  a.equal(await isTripped(ctx, 'p-trip', 'o-trip'), true, '计数>=3 熔断');
+  ctx.env = { CDN_KV: createMockKV() };
+  // 连续 3 次失败：recordFailure 内存计数立即 +1，第 3 次即达阈值（无需等 KV 落盘）
+  await recordFailure(ctx, 'p-trip', 'o-trip');
+  await recordFailure(ctx, 'p-trip', 'o-trip');
+  await recordFailure(ctx, 'p-trip', 'o-trip');
+  a.equal(await isTripped(ctx, 'p-trip', 'o-trip'), true, '计数>=3 熔断（L1 即时）');
 });
 
 testA('circuit: recordFailure 单次写入使计数+1', async (a) => {
@@ -72,21 +80,22 @@ testA('circuit: recordFailure 单次写入使计数+1', async (a) => {
   ctx.env = { CDN_KV: kv };
   const key = encodeKey(`hc:${'p-rf'}:${'o-rf'}`);
   await recordFailure(ctx, 'p-rf', 'o-rf');
-  // 等后台 waitUntil 落盘
+  // 等后台 waitUntil 落盘（写合并：窗口内多次失败合并为一次 KV 读改写）
   await new Promise((r) => setTimeout(r, 10));
   a.equal(await kv.get(key), '1', '首次失败计数=1');
 });
 
 testA('circuit: recordSuccess 清空计数（恢复）', async (a) => {
   const ctx = mkCtxFor();
-  const kv = createMockKV();
-  ctx.env = { CDN_KV: kv };
-  const key = encodeKey(`hc:${'p-rec'}:${'o-rec'}`);
-  await kv.put(key, '3', { expirationTtl: 60 });
+  ctx.env = { CDN_KV: createMockKV() };
+  // 先累计到熔断（内存即时）
+  await recordFailure(ctx, 'p-rec', 'o-rec');
+  await recordFailure(ctx, 'p-rec', 'o-rec');
+  await recordFailure(ctx, 'p-rec', 'o-rec');
   a.equal(await isTripped(ctx, 'p-rec', 'o-rec'), true, '先置为熔断');
   await recordSuccess(ctx, 'p-rec', 'o-rec');
   await new Promise((r) => setTimeout(r, 10));
-  a.equal(await isTripped(ctx, 'p-rec', 'o-rec'), false, '成功后恢复');
+  a.equal(await isTripped(ctx, 'p-rec', 'o-rec'), false, '成功后恢复（内存清 + KV delete）');
 });
 
 testA('circuit: 未失败不熔断', async (a) => {

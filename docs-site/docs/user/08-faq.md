@@ -60,10 +60,10 @@ A：源站响应 > 30s。调大 `defaultUpstreamTimeoutMs`，或优化源站。
 A：开了被动熔断（`enableCircuitBreaker`）。熔断是保护机制，源站稳定后会半开探测恢复。
 
 **Q：管理面打不开？**
-A：路径默认 `__panel`；确认 `adminPath`；检查 `caps` 里平台能力是否正常（`/__health`）。
+A：路径默认 `__panel`；确认 `adminPath`；登录后查看管理面「平台能力」面板确认 `caps` 是否正常。
 
 **Q：怎么确认平台能力探测对不对？**
-A：`curl https://你的网关域名/__health` 看 `caps` 字段（是否有 KV、能否 TCP 回源等）。
+A：在管理面「平台能力」面板查看 `caps` 字段（是否有 KV、能否 TCP 回源等），无需公开健康检查接口。
 
 ---
 

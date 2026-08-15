@@ -40,7 +40,9 @@ function isBareIp(url) {
  * @param {URL|string} originUrl 回源 URL
  * @param {Headers} headers 已构造好的回源请求头
  * @param {number} [timeoutMs] 超时毫秒数，默认 10000
- * @param {{followRedirect?:boolean, bodyBuf?:ArrayBuffer|null}} [opts] 附加选项
+ * @param {{followRedirect?:boolean, bodyBuf?:ArrayBuffer|null, controller?:AbortController}} [opts] 附加选项
+ *   - controller：外部传入的 AbortController（竞速请求用，由上层统一 abort 取消慢路）。
+ *     若提供，引擎内部超时定时器仍独立工作，二者任一 abort 即取消；默认路径不传，零影响。
  * @returns {Promise<Response>} 源站响应
  * @throws {Error} 网络错误或超时时抛出，由上层 failover 处理换源
  */
@@ -51,6 +53,28 @@ export async function fetchOrigin(ctx, origin, originUrl, headers, timeoutMs, op
   // 上层 failover 捕获异常后换下一个源站
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
+
+  // 外部 cancel（竞速请求的慢路取消）：把「内部超时信号」与「外部取消信号」合并。
+  // 优先用 AbortSignal.any（CF/EO/ESA 现代运行时均支持）；不支持时降级为事件桥接，
+  // 任一信号 abort 即让内部 controller 取消，确保 fetch 一定能被取消、连接被释放。
+  // 注意：controller.abort() 只会 abort 内部原始 signal，因此合并信号时让定时器直接
+  // abort 合并信号本身，保证「内部超时」与「外部取消」任一触发都能取消 fetch。
+  let effectiveSignal = controller.signal;
+  if (opts?.controller && opts.controller !== controller) {
+    const ext = opts.controller.signal;
+    if (typeof AbortSignal.any === 'function') {
+      const combined = AbortSignal.any([controller.signal, ext]);
+      effectiveSignal = combined;
+      clearTimeout(timer);
+      const t = setTimeout(() => combined.abort(), timeout);
+      // 合并信号已 abort 后清理定时器，避免 Worker 实例被无谓保活
+      combined.addEventListener('abort', () => clearTimeout(t), { once: true });
+    } else {
+      const onExternalAbort = () => controller.abort();
+      if (ext.aborted) controller.abort();
+      else ext.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
 
   // CF + HTTPS + 裸 IP：fetch 的 SNI 会取 URL 里的 IP 导致证书校验失败，
   // 自动改走 cloudflare:sockets 自建 TCP（自行发送正确的 SNI/Host）。
@@ -72,7 +96,7 @@ export async function fetchOrigin(ctx, origin, originUrl, headers, timeoutMs, op
   const init = {
     method,
     headers,
-    signal: controller.signal,
+    signal: effectiveSignal,
     // 默认：源站的 3xx 交给客户端自己处理，CDN 不代为跟随，
     // 否则 Location 指向的地址可能绕开我们的加速链路。
     // 规则显式开启 followRedirect 时（EO：回源跟随重定向），由边缘代为跟随，

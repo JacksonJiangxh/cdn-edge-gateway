@@ -188,13 +188,14 @@ async function runHttpFlow(mod, platform, mockKV, mockAssets, useAssets) {
   // 内存 KV 在轮次间保持，但每轮用独立 env 引用以触发 caps 重算（对 _worker.js 内 bundle 有效）
   const fetchAt = (path, init) => handler(new Request('https://e2e.test' + path, init), env);
 
-  log(`${label} ▸ 1/6 健康检查 /__health`);
+  log(`${label} ▸ 1/6 健康检查接口已移除（/__health 回落数据面，不泄露探活）`);
   const health = await fetchAt('/__health');
-  const healthBody = await health.json();
-  assert(health.status === 200, `${label} /__health 返回 200`, `got ${health.status}`);
-  assert(healthBody.ok === true, `${label} /__health.ok=true`);
-  assert(healthBody.platform === platform, `${label} /__health.platform=${platform}`, `got ${healthBody.platform}`);
-  assert(healthBody.caps && healthBody.caps.hasKV === true, `${label} caps.hasKV=true（KV 已注入）`);
+  // 路由已删除：/__health 不应再返回 200 存活 JSON，而是作为普通数据面请求处理
+  // （要么伪装页、要么 404/代理响应），且响应体绝不含旧 health 契约字段。
+  const healthText = await health.text();
+  assert(healthText.indexOf('"ok":true') === -1 && healthText.indexOf('"ok": true') === -1,
+    `${label} /__health 不再返回旧存活契约`, `got ${healthText.slice(0, 80)}`);
+  assert(healthText.indexOf('"caps"') === -1, `${label} /__health 不泄露平台 caps`);
 
   log(`${label} ▸ 2/6 打开管理面 ${useAssets ? '（静态形态，引用外部资源）' : '（内联形态）'}`);
   const panel = await fetchAt('/__panel');

@@ -133,17 +133,18 @@ export
     const originList = el('div', { id: 'origin-list' });
     // 调度策略下拉需在 addOrigin 之前创建：源站行里的「权重」字段要按策略显隐
     const strategySel = select('', [], pool.strategy || 'chain', [
-      { value: 'chain', label: '链式回退（遇错换下一源站，最稳）' },
-      { value: 'roundrobin', label: '轮询（轮流用每个源站）' },
-      { value: 'random', label: '随机' },
-      { value: 'weighted', label: '加权（按权重分配，权重越大越多）' },
-      { value: 'iphash', label: 'IP 哈希（同 IP 总落到同一源站，利于会话）' },
+      { value: 'chain', label: '链式回退 ·均衡（坏源站排除后剩余源站全部参与，order 派生权重）' },
+      { value: 'roundrobin', label: '平滑加权轮询（配 weight 生效，未配则轮流）' },
+      { value: 'random', label: '随机（配 weight 按权重随机，未配等概率）' },
+      { value: 'weighted', label: '平滑加权（严格按权重比例平滑分配）' },
+      { value: 'iphash', label: 'IP 一致性哈希（增删源站最小迁移；命中坏源站环内回退）' },
     ]);
     strategySel.className = 'input';
-    // 收集各源站的「权重」字段，调度策略变化时统一显隐（仅加权策略需要权重）
+    // 收集各源站的「权重」字段，调度策略变化时统一显隐。
+    // 加权类策略（chain 用 order 派生权重、roundrobin/weighted 用 weight）都需要权重列。
     const weightFields = [];
     const syncWeight = () => {
-      const on = strategySel.value === 'weighted';
+      const on = ['weighted', 'roundrobin', 'chain'].includes(strategySel.value);
       weightFields.forEach((f) => { f.style.display = on ? '' : 'none'; });
     };
     strategySel.addEventListener('change', syncWeight);
@@ -211,7 +212,7 @@ export
       // 该字段只有 socket 引擎能真正生效，故仅 socket 时显示。
       const hostNote = el('div', { class: 'hint', text: 'fetch 引擎下该 Host 由回源地址决定、无法自定义；如需自定义 Host 请把引擎改为 socket。' });
       // 权重仅在「加权」调度策略下生效，其余策略隐藏（syncWeight 在策略下拉建好后统一调用）
-      const weightField = field('权重（加权策略生效）', el('input', { class: 'input o-weight', type: 'number', value: o.weight || 1 }), '默认 1 即可。');
+      const weightField = field('权重（加权/轮询/链式策略生效）', el('input', { class: 'input o-weight', type: 'number', value: o.weight || 1 }), '默认 1 即可。weighted 严格按权重平滑分配；roundrobin 配了权重即生效；chain 用 order 派生权重、显式填了则优先按此权重。');
       weightFields.push(weightField);
       const syncEngine = () => {
         const eng = engineSel.value;
@@ -248,6 +249,18 @@ export
     syncWeight();
 
     const strategyField = field('调度策略', strategySel, '多个源站之间怎么分配请求。新手直接用「链式回退」最省心。');
+
+    // ---- 回源重试 / 故障转移参数（跟随全站默认，留空即不覆盖）----
+    // 默认全部留空：新建/编辑源站池时不写死一份默认值（避免又造一个真相源）。
+    const fb = pool.failover || {};
+    const penaltyIn = el('input', { class: 'input o-penalty', type: 'number', min: '0', max: '600', value: fb.penaltySeconds ?? '', placeholder: '默认 15（0=关闭）' });
+    const totalTimeoutIn = el('input', { class: 'input o-total-timeout', type: 'number', min: '0', max: '120000', value: fb.totalTimeoutMs ?? '', placeholder: '默认 0=按平台上限自动推导' });
+    const speculativeIn = el('input', { class: 'input o-speculative', type: 'number', min: '0', max: '60000', value: fb.speculativeMs ?? '', placeholder: '默认 500（0=关闭）' });
+    const failoverCard = section('回源重试 / 故障转移', '失败即冷却 · 总时间预算 · 竞速（留空=跟随全站默认）', [
+      field('失败即冷却（秒）', penaltyIn, '一次回源失败立即把该源站放入冷却名单 ~15s（仅本边缘内存生效，不跨边缘即时同步）。配合「60s 内累计 3 次熔断」并存互补，避免反复打同一个刚失败的源站。0=关闭。'),
+      field('总时间预算（毫秒）', totalTimeoutIn, '整请求回源最长时间硬顶；超过后不再尝试新源站，触发「全员失败兜底」。默认 0=按平台执行上限自动推导（EO/ESA 120s、CF 30s 减安全余量），避免 (换源次数+1)×超时 无预算叠加撞平台墙钟。'),
+      field('竞速阈值（毫秒）', speculativeIn, '首个源站超过该时间未返回首字节，立即并行打第二个候选源站，谁先成功用谁（仅 GET/HEAD 及已物化 body 的请求启用，双写安全）。默认 500；0=关闭竞速。'),
+    ]);
     // 单一源站只有 1 个 origin，无调度可言；也不允许在这里加第 2 个源站。
     const addOriginBtn = el('button', { class: 'btn btn-sm', text: '+ 添加源站', onclick: () => { addOrigin(); syncWeight(); } });
     if (isSingle) {
@@ -274,6 +287,7 @@ export
         : '源站池只能在「源站」页手动新建，可被多个站点/规则共享引用。'),
       field('名称（可选，用于区分）', el('input', { class: 'input', id: 'p-name', value: pool.name || '', placeholder: '如：主站源站 / 北京备份' }), '给自己看的备注，方便在站点和规则里选对源站。'),
       strategyField,
+      failoverCard,
       refsInfo,
       el('div', { class: 'hint' }, '源站只负责「地址 + 负载均衡」。回源 Host、路径重写、请求头、响应头、缓存等均由「站点 → 规则引擎」按条件绑定，不在此处设置。源站按列表顺序决定链式回退（越靠前越优先）。「源站 ID」是给机器引用用的内部主键，由系统自动生成、不可改；如需给人区分，请填上面的「名称」。'),
       el('div', { id: 'origin-head', class: 'subhead' }, [
@@ -355,6 +369,22 @@ export
       });
       if (!origins.length) throw new Error(isSingle ? '请填写源站地址' : '至少需要一个源站');
       if (isSingle && origins.length > 1) throw new Error('单一源站只能有 1 个地址；需要多个请新建「源站池」');
+
+      // 组装池级 failover：仅当用户填了任意一项时下发，否则留空让后端回落全站默认
+      // （不产生双份真相源）。与既有 pool.failover 合并，保留旧 key。
+      const fo = { ...(pool.failover || {}) };
+      let foDirty = false;
+      const numOrUndef = (v) => {
+        const n = Number(v);
+        return v === '' || v == null || Number.isNaN(n) ? undefined : n;
+      };
+      const pen = numOrUndef(penaltyIn.value);
+      const tot = numOrUndef(totalTimeoutIn.value);
+      const spec = numOrUndef(speculativeIn.value);
+      if (pen !== undefined) { fo.penaltySeconds = pen; foDirty = true; }
+      if (tot !== undefined) { fo.totalTimeoutMs = tot; foDirty = true; }
+      if (spec !== undefined) { fo.speculativeMs = spec; foDirty = true; }
+
       const payload = {
         name: $('p-name').value.trim(),
         kind,
@@ -362,7 +392,7 @@ export
         origins,
         // 池级未单独配置时不下发 failover，由后端回落到「源站」阶段的全站默认，
         // 保证「改一处全站生效」，不产生双份真相源。
-        ...(pool.failover ? { failover: pool.failover } : {}),
+        ...(foDirty ? { failover: fo } : (pool.failover ? { failover: pool.failover } : {})),
         ...(pool.createdBy ? { createdBy: pool.createdBy } : {}),
       };
       // 编辑（有 id）走 PUT；新建（无 id）走 POST，机器 id 由后端生成

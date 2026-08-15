@@ -1180,7 +1180,7 @@ function foldLegacySettingsIntoStages(stages, legacySettings) {
   if (s.origin && typeof s.origin === 'object') {
     const o = stage('origin');
     const fo = (o.failover && typeof o.failover === 'object') ? o.failover : (o.failover = {});
-    for (const k of ['retryOn', 'maxRetries', 'timeoutMs', 'maxRetryBodyBytes']) {
+    for (const k of ['retryOn', 'maxRetries', 'timeoutMs', 'maxRetryBodyBytes', 'penaltySeconds', 'totalTimeoutMs', 'speculativeMs']) {
       fill(fo, k, s.origin[k]);
     }
   }

@@ -30,6 +30,11 @@
  * @property {boolean} hasD1              是否绑定了 D1
  * @property {boolean} hasKV              是否绑定了 KV
  * @property {boolean} hasR2              是否绑定了 R2（仅 CF；用于 engine='r2' 回源到 R2 桶）
+ * @property {number}  maxExecutionMs     平台单次请求总执行上限（墙钟）：cf=30000（Workers 默认）、eo=120000、esa=120000（函数单次执行响应时间上限）；EXECUTION_LIMIT_MS 可覆盖
+ * @property {number}  [firstByteMs]      网关等待函数返回首个数据的时间上限：esa=10000（超时网关主动断连返回 504），cf/eo 无此约束；FIRST_BYTE_LIMIT_MS 可覆盖
+ *
+ * maxExecutionMs 用于推导「回源总时间预算」硬顶（failover.budget）：最差总耗时收敛到
+ * min(配置, maxExecutionMs - safetyReserve)，避免 (maxRetries+1)×timeoutMs 无预算叠加撞平台上限。
  */
 
 // ============================================================================
@@ -368,9 +373,18 @@
 /**
  * @typedef {Object} Failover
  * @property {boolean}  enabled
- * @property {number[]} retryOn           触发换源的状态码，默认 [500,502,503,504,522,524]
- * @property {number}   maxRetries        最多换源次数，默认 2
- * @property {number}   timeoutMs         单次回源超时，默认 10000
+ * @property {number[]} retryOn            触发换源的状态码，默认 [500,502,503,504,522,524]
+ * @property {number}   maxRetries         最多换源次数，默认 2
+ * @property {number}   timeoutMs          单次回源超时，默认 10000
+ * @property {number}   [penaltySeconds]   失败即冷却窗口秒数，默认 15；0=关闭（纯内存，零 KV 读写）
+ * @property {number}   [totalTimeoutMs]   整请求总时间预算，默认 0=按平台执行上限自动推导
+ * @property {number}   [speculativeMs]    竞速阈值，默认 500；0=关闭竞速（仅 GET/HEAD 及已物化 body 请求启用）
+ * @property {number}   [maxRetryBodyBytes] 重试时物化请求体的上限字节，默认 5242880
+ *
+ * 失败即冷却（penaltySeconds）：一次失败立即把源站放入本 isolate 内存冷却名单 ~15s，
+ * 与「60s 内累计 3 次才熔断」并存互补。纯内存、不写 KV——短窗口启发式，KV 最终
+ * 一致传播（1-5s）会吃掉大部分收益，且新 isolate 多打一次坏源站由 failover + 竞速兜速度、
+ * fail-open 兜可用性，代价可接受。
  */
 
 // ============================================================================
@@ -425,8 +439,14 @@
  *
  * balancer/circuit.js
  *   export async function isTripped(ctx, poolId, originId): Promise<boolean>
- *   export async function recordFailure(ctx, poolId, originId): Promise<void>
- *   export async function recordSuccess(ctx, poolId, originId): Promise<void>
+ *   export function recordFailure(ctx, poolId, originId): void
+ *   export function recordSuccess(ctx, poolId, originId): void
+ *   export function noteSuccess(poolId, originId): void
+ *   export function penalize(poolId, originId, seconds): void
+ *   export function isPenalized(ctx, poolId, originId): boolean
+ *   export function penaltyRemaining(poolId, originId): number
+ *   export function lastOkTs(poolId, originId): number
+ *   export function softRecoverCoeff(poolId, originId): number
  *
  * security/auth.js
  *   export async function hashPassword(pwd, salt?): Promise<{hash,salt}>

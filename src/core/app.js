@@ -7,8 +7,7 @@
  * 路由优先级：
  *   1. /{adminPath}/api/*   → 管理 API（需鉴权）
  *   2. /{adminPath}         → 管理面 HTML
- *   3. /__health            → 健康检查（无需鉴权，仅返回存活标识）
- *   4. 其余全部              → CDN 数据面代理
+ *   3. 其余全部              → CDN 数据面代理
  *
  * 安全设计：adminPath 是可配置的随机路径（默认 __panel，强烈建议用户修改）。
  * 未命中管理面时，行为与普通数据面完全一致，不泄露管理面存在的任何痕迹。
@@ -21,7 +20,6 @@ import { renderAdminPage, tryServePanelStatic } from '../api/adminPage.js';
 import { handleProxy } from '../proxy/pipeline.js';
 import { renderDisguise } from '../proxy/disguise.js';
 import { flush } from '../stats/collector.js';
-import { getBudgetSnapshot } from '../platform/memBudget.js';
 
 /**
  * 请求主入口
@@ -31,28 +29,6 @@ import { getBudgetSnapshot } from '../platform/memBudget.js';
 export async function handleRequest(ctx) {
   const { url } = ctx;
   const pathname = url.pathname;
-
-  // ---- 健康检查：不读 KV，用于探活与部署验证 ----
-  if (pathname === '/__health') {
-    // memBudget 快照：暴露各域配额使用与估算内存占用（统一内存预算可观测性）。
-    // 未初始化时返回 null，不影响探活。
-    let memBudget = null;
-    try {
-      memBudget = getBudgetSnapshot();
-    } catch {
-      memBudget = null;
-    }
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        platform: ctx.caps.platform,
-        caps: ctx.caps,
-        memBudget,
-        time: new Date().toISOString(),
-      }),
-      { headers: { 'content-type': 'application/json; charset=utf-8' } }
-    );
-  }
 
   // ---- 冷启动主动播种：部署后 isolate 首请求时确保全站规则已在 KV 落盘内置默认 ----
   // fire-and-forget：不 await，避免拖慢首响；失败由 getGlobalRules 惰性兜底保障。

@@ -108,10 +108,7 @@ npm run deploy:esa:cli    # 或直接走 cli 部署脚本 scripts/deploy-esa-cli
 
 ## §5 发布后验证
 
-```bash
-curl https://你的网关域名/__health
-# → {"ok":true,"platform":"esa","caps":{"hasKV":false,"cacheSingleInstance":true,...}}
-```
+打开管理面 `https://你的网关域名/{adminPath}` 确认可登录即代表部署成功。平台能力（如 `kvBackend`、`cacheSubreqLimit`）可在管理面「平台能力」面板查看，无需独立公开健康检查接口。
 
 确认 `platform:"esa"`、`hasKV:false`（说明走 Webdis/烘焙）。
 

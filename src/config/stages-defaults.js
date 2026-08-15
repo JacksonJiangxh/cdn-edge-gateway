@@ -262,6 +262,14 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
       maxRetries: 2,
       timeoutMs: 10000,
       maxRetryBodyBytes: 5242880,
+      // 失败即冷却：一次回源失败立即把源站放入本 isolate 内存冷却名单 ~15s，
+      // 与「60s 内累计 3 次才熔断」并存互补。纯内存、零 KV 读写（见 circuit.js）。
+      penaltySeconds: 15,
+      // 整请求总时间预算：0=按平台执行上限自动推导（failover.js computeBudget）。
+      totalTimeoutMs: 0,
+      // 竞速阈值：首请求超过 500ms 无首字节即并行打第二候选源站，谁先成功用谁；
+      // 仅 GET/HEAD 及已物化 body 的请求启用（双写安全）。0=关闭。
+      speculativeMs: 500,
     }),
   }),
   // 单轨化新增阶段：安全校验（全站维度）。

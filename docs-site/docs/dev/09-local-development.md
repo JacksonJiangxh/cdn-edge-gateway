@@ -41,7 +41,6 @@ npm run dev
 启动后访问：
 
 - 管理面：`http://localhost:8799/__panel`
-- 健康检查：`http://localhost:8799/__health`
 
 默认管理员密码：**`local-dev-pass`**（首次登录后请在管理面改掉）。
 
@@ -52,10 +51,7 @@ npm run dev
 
 ## 步骤 3：看平台能力探测
 
-```bash
-curl http://localhost:8799/__health
-# → {"ok":true,"platform":"eo","caps":{"hasCacheApi":true,"hasKV":true,...}}
-```
+打开管理面 `http://localhost:8799/__panel`，登录后在「平台能力」面板即可看到当前运行时的 `caps`（如 `hasCacheApi`、`hasKV`、`maxSubRequests` 等）。也可通过管理面 API 的调试响应头 `X-Platform` / `X-Caps` 查看。
 
 `caps` 就是你这段代码在当前平台能用的能力清单，排障时对照 [系统架构 · 平台降级](/dev/11-architecture.md)。
 

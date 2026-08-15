@@ -1533,6 +1533,12 @@ function normFailover(input) {
     // maxRetryBodyBytes：重试时物化请求体的上限。原先只存在于全站默认里、池级无法调整，
     // 现随 failover 一起落盘，使池级也能覆盖（缺省仍跟随全站默认）。
     maxRetryBodyBytes: int(input.maxRetryBodyBytes, d.maxRetryBodyBytes ?? 5242880, 0, 32 * 1024 * 1024),
+    // 失败即冷却窗口秒数：0=关闭；>0 时一次失败即把源站放入本 isolate 内存冷却名单。
+    penaltySeconds: int(input.penaltySeconds, d.penaltySeconds ?? 15, 0, 600),
+    // 整请求总时间预算毫秒：0=按平台执行上限自动推导。
+    totalTimeoutMs: int(input.totalTimeoutMs, d.totalTimeoutMs ?? 0, 0, 120000),
+    // 竞速阈值毫秒：0=关闭；>0 时首请求超时无首字节即并行打第二候选源站。
+    speculativeMs: int(input.speculativeMs, d.speculativeMs ?? 500, 0, 60000),
   };
 }
 

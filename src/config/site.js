@@ -81,6 +81,10 @@ export const DEFAULT_FAILOVER = Object.freeze({
   retryOn: DEFAULT_RETRY_ON,
   maxRetries: 2,
   timeoutMs: 10000,
+  maxRetryBodyBytes: 5242880,
+  penaltySeconds: 15,
+  totalTimeoutMs: 0,
+  speculativeMs: 500,
 });
 
 /**

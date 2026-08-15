@@ -115,6 +115,19 @@ function readEnvVar(env, key) {
 }
 
 /**
+ * 读取数值型环境变量（兼容 env 对象与 Node 的 process.env），解析失败返回 undefined。
+ * @param {Object} env 平台传入的环境对象
+ * @param {string} key 变量名
+ * @returns {number|undefined} 解析出的数值
+ */
+function readNumEnv(env, key) {
+  const raw = readEnvVar(env, key);
+  if (raw == null) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/**
  * 判断当前运行时是否支持 Cache API（三平台均原生支持）：
  *  - Cloudflare：caches.default 标准实例
  *  - EdgeOne：caches.default（基于 Web Cache API，接口与 CF 一致；缓存仅节点本地化、不跨节点复制）
@@ -314,6 +327,17 @@ export function detectCaps(env) {
       (looksLikeR2(e.CDN_R2) ||
         looksLikeR2(e.R2) ||
         Object.values(e).some((v) => looksLikeR2(v))),
+    // 平台单次请求总执行上限（墙钟）：用于推导回源总时间预算硬顶。
+    //   - ESA 函数单次执行响应时间上限 = 120s（阿里云官方《什么是函数和Pages》）；
+    //     网关等待函数返回首个数据的首字节约束 = 10s，超时网关主动断连返回 504（firstByteMs）。
+    //   - EdgeOne 单次请求执行上限 = 120s（docs/appendix/status-codes.md）。
+    //   - Cloudflare Workers 默认挂钟上限 = 30s（CPU 上限另计，回源不受 CPU 限制）。
+    // 均可被环境变量 EXECUTION_LIMIT_MS / FIRST_BYTE_LIMIT_MS 覆盖（测试/特殊部署）。
+    maxExecutionMs: readNumEnv(e, 'EXECUTION_LIMIT_MS') ?? (platform === 'cf' ? 30000 : 120000),
+    firstByteMs:
+      platform === 'esa'
+        ? (readNumEnv(e, 'FIRST_BYTE_LIMIT_MS') ?? 10000)
+        : (readNumEnv(e, 'FIRST_BYTE_LIMIT_MS') ?? undefined),
   });
 
   _cachedCaps = caps;

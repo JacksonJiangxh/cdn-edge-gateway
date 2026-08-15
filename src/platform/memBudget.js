@@ -373,7 +373,7 @@ export function touchBudget() {
 // ============================================================================
 
 /**
- * 返回当前内存预算占用快照，供 /__health、/debug 响应展示。
+ * 返回当前内存预算占用快照，供调试/可观测端点展示（如按需暴露的 /debug）。
  * @returns {{
  *   totalBytes: number,
  *   usedBytes: number,
