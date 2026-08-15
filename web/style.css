@@ -930,6 +930,22 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
 /* 来源站高级配置里嵌套的 subcard 缩进视觉 */
 .origin-row .subcard { margin: 10px 0; }
 
+/* 源站行（仿流量序列规则卡）：头部横向紧凑，可折叠 */
+.origin-card { margin: 10px 0; }
+.origin-row-head { flex-wrap: wrap; align-items: flex-end; }
+.origin-row-head .origin-grip { cursor: grab; color: var(--text-mute); font-size: 14px; line-height: 1; padding-bottom: 4px; }
+.origin-row-head .origin-grip:active { cursor: grabbing; }
+/* 头部三要素（引擎/地址/别名）横向铺开，折叠态也保持一行可读 */
+.origin-row-head .field { flex: 1 1 180px; min-width: 160px; margin: 0; }
+.origin-row-head .field > label { font-size: 12px; color: var(--text-mute); margin-bottom: 2px; }
+.origin-row-head .field .input,
+.origin-row-head .field select { height: 30px; font-size: 13px; }
+.origin-row-head .field .field-hint { display: none; }
+.origin-row-head .btn-danger { margin-left: auto; flex: none; align-self: center; }
+/* 折叠时头部只露引擎+地址+别名概要，body 隐藏由 .subcard.collapsed 处理 */
+.origin-card.collapsed .origin-row-head { background: var(--panel-2); }
+.origin-card .tw { margin-right: 2px; }
+
 /* 站点抽屉内的「直接填写源站」内联编辑区 */
 .inline-origin-box {
   margin: 6px 0 4px;

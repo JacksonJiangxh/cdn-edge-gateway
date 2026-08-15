@@ -160,6 +160,14 @@ export
       ]);
       engineSel.value = o.engine || 'fetch';
       engineSel.className = 'input o-engine';
+      // 不同引擎：地址格式 + 提示不同（先选引擎，再据此切换地址占位与可见字段）
+      const ENGINE_ADDR = {
+        fetch: { ph: '域名 / IP（可带端口），如 storage.example.net 或 1.2.3.4:8080', hint: '你的真实服务器地址（fetch 为标准 HTTP 回源）。' },
+        socket: { ph: '真实目标主机（域名/IP，可带端口），如 origin.internal:9000', hint: 'TCP 透传（已弃用）。' },
+        r2: { ph: 'R2 桶名，如 my-bucket（地址栏隐藏，改用下方 R2 字段）', hint: '回源到 R2 桶（仅 CF）；地址由下方 R2 绑定决定。' },
+        cnb: { ph: '仓库地址，如 https://cnb.cool/owner/repo', hint: 'CNB 仓库型引擎：地址栏隐藏，改用下方仓库字段。' },
+        github: { ph: '仓库地址，如 https://github.com/owner/repo', hint: 'GitHub 仓库型引擎：地址栏隐藏，改用下方仓库字段。' },
+      };
       // ---- R2 引擎专用字段 ----
       const r2BindingIn = el('input', { class: 'input o-r2-binding', value: o.r2Binding || '', placeholder: 'CDN_R2（必须与 wrangler.toml 的 binding 一致）' });
       const r2KeyPrefixIn = el('input', { class: 'input o-r2-prefix', value: o.r2KeyPrefix || '', placeholder: '如 img/（桶内目录隔离，留空=无）' });
@@ -204,13 +212,16 @@ export
       // 回源连接参数（协议/端口/引擎/Host）属于整池物理默认；⑨ Origin Rules
       // 可针对请求条件覆盖这些参数，故仅作「默认」保留、不再与⑨重复成独立编辑点。
       const overrideHint = el('div', { class: 'hint', text: '回源连接参数（协议 / 端口 / 引擎 / Host）作为本源站整池默认；如需按请求条件差异化，请在⑨「Origin Rules」里设置对应规则，规则级设置会覆盖此处默认值。' });
-      const addrField = field('源站地址（域名 / IP）', el('input', { class: 'input o-addr', value: o.addr || '', placeholder: 'storage.example.net' }), '你的真实服务器地址。');
+      const addrInput = el('input', { class: 'input o-addr', value: o.addr || '', placeholder: ENGINE_ADDR[o.engine || 'fetch'].ph });
+      const addrField = field('源站地址', addrInput, '格式随「引擎类型」变化，见上方提示。');
       const portField = field('端口', el('input', { class: 'input o-port', type: 'number', value: o.port || 443 }), 'https 默认 443，http 默认 80。可被⑨规则覆盖。');
       const schemeField = field('协议', select('', [''], o.scheme || 'https', [{ value: 'https', label: 'https' }, { value: 'http', label: 'http' }], 'o-scheme'), '可被⑨规则覆盖。');
       const hostField = field('回源 Host（该源站专用）', el('input', { class: 'input o-host', value: o.hostHeader?.custom || '', placeholder: '如 api1.internal（留空=用规则/站点级 Host）' }), '仅这台源站回源时使用的 Host 头（整池默认）。同组多源站各自 Host 不同时填这里；⑨规则再设 Host 会覆盖它。');
       // fetch 引擎无法手写 Host 头（平台强制 Host = 回源 URL hostname），
       // 该字段只有 socket 引擎能真正生效，故仅 socket 时显示。
       const hostNote = el('div', { class: 'hint', text: 'fetch 引擎下该 Host 由回源地址决定、无法自定义；如需自定义 Host 请把引擎改为 socket。' });
+      // 别名（仅展示用，方便在列表里区分）
+      const nameField = field('别名（选填）', el('input', { class: 'input o-name', value: o.name || '', placeholder: '如 主站 / 北京备份' }), '给自己看的备注，不写则回显为地址。');
       // 权重仅在「加权」调度策略下生效，其余策略隐藏（syncWeight 在策略下拉建好后统一调用）
       const weightField = field('权重（加权/轮询/链式策略生效）', el('input', { class: 'input o-weight', type: 'number', value: o.weight || 1 }), '默认 1 即可。weighted 严格按权重平滑分配；roundrobin 配了权重即生效；chain 用 order 派生权重、显式填了则优先按此权重。');
       weightFields.push(weightField);
@@ -218,6 +229,9 @@ export
         const eng = engineSel.value;
         const isR2 = eng === 'r2';
         const isRepo = eng === 'cnb' || eng === 'github';
+        // 地址格式随引擎切换
+        addrInput.placeholder = (ENGINE_ADDR[eng] || ENGINE_ADDR.fetch).ph;
+        addrField.querySelector('.field-hint').textContent = (ENGINE_ADDR[eng] || ENGINE_ADDR.fetch).hint;
         r2Fields.style.display = isR2 ? '' : 'none';
         repoFields.style.display = isRepo ? '' : 'none';
         addrField.style.display = (isR2 || isRepo) ? 'none' : '';
@@ -227,20 +241,30 @@ export
         hostNote.style.display = eng === 'fetch' ? '' : 'none';
       };
       engineSel.onchange = syncEngine;
-      const row = el('div', { class: 'origin-row' }, [
+      // —— 整行可折叠（仿流量序列规则卡）：头部先选引擎，再填地址，点头部折叠/展开 ——
+      const head = el('div', { class: 'section-toggle origin-row-head' }, [
+        el('span', { class: 'origin-grip', text: '⠿', title: '拖拽调整优先级（上=优先）' }),
+        field('引擎类型', engineSel, '先选引擎，下方地址格式与字段随之变化：① fetch=标准 HTTP 回源；② socket=已弃用；③ r2=回源到 R2 桶（仅 CF）；④ cnb/github=仓库型引擎（自动生成重写+请求头规则）。可被⑨规则覆盖。'),
         addrField,
+        nameField,
+      ]);
+      const body = el('div', { class: 'section-body' }, [
         portField,
         schemeField,
         hostField,
         hostNote,
-        field('引擎', engineSel, '回源方式（整池默认）：① fetch=标准回源，支持自定义 Host 头（CF/EO/ESA 均可用，Host 由「回源域名/地址」或规则级 hostHeader 决定）；② socket=已弃用；③ r2=回源到 R2 桶（仅 CF）；④ cnb/github=仓库型引擎（填仓库参数即可，自动生成 URL 重写 + 请求头规则）。可被⑨规则覆盖。'),
         r2Fields,
         repoFields,
         weightField,
         overrideHint,
-        el('button', { class: 'btn btn-sm btn-danger', text: '移除源站', onclick: () => row.remove() }),
       ]);
-      // 回显时根据已有 engine 显隐 R2 字段
+      const removeBtn = el('button', { class: 'btn btn-sm btn-danger', text: '移除源站', onclick: (e) => { e.stopPropagation(); row.remove(); } });
+      head.appendChild(removeBtn);
+      const row = el('div', { class: 'subcard origin-card' }, [ head, body ]);
+      // 默认折叠，让多源站列表更紧凑；点头部切换（输入控件上的点击不触发展开/折叠）
+      row.classList.add('collapsed');
+      head.onclick = (e) => { if (e.target.closest('input,select,button')) return; row.classList.toggle('collapsed'); };
+      // 回显时根据已有 engine 显隐 R2 字段 + 地址提示
       syncEngine();
       originList.appendChild(row);
     };
