@@ -338,9 +338,34 @@ export
       // 系统主键，编辑时才有；新建为空 → 后端自动生成
       const pid = pool.id || '';
       const origins = [];
+      // 落盘前规范化源站地址：自动剥离用户误粘贴的协议前缀（http://、https:// 等）、
+      // 凭据、查询串与片段。fetch / socket 已有独立端口字段，故地址里若带 :port
+      // 一并拆出并回写到端口字段，最终 addr 只存 host。仓库型保留 /owner/repo 路径。
+      // 返回 { addr, port }：port 为从地址解析出的端口（无则 null）。
+      const normalizeOriginAddr = (raw, engine) => {
+        let s = (raw || '').trim();
+        if (!s) return { addr: s, port: null };
+        // 去掉协议前缀（含 // 简写、ftp 等）
+        s = s.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '').replace(/^\/\//, '');
+        // 去掉 user:pass@ 凭据
+        s = s.replace(/^[^@?#\/:]+@/, '');
+        let port = null;
+        if (engine === 'cnb' || engine === 'github') {
+          // 仓库型：保留 /owner/repo 路径，仅去掉查询/片段
+          s = s.replace(/[?#].*$/, '');
+        } else {
+          // fetch / socket：地址只含 host[:port]，去掉路径/查询/片段，并拆出端口
+          s = s.replace(/[/?#].*$/, '');
+          const m = s.match(/:(\d+)$/);
+          if (m) { port = Number(m[1]); s = s.replace(/:\d+$/, ''); }
+        }
+        return { addr: s, port };
+      };
       Array.from(originList.children).forEach((row, i) => {
         const engine = $('.o-engine', row).value;
-        const addr = $('.o-addr', row).value.trim();
+        const { addr, port } = normalizeOriginAddr($('.o-addr', row).value, engine);
+        // 地址里解析出端口时，回写到独立端口字段（覆盖用户没单独填时的默认值）
+        if (port != null && $('.o-port', row)) $('.o-port', row).value = port;
         const isRepo = engine === 'cnb' || engine === 'github';
         // r2 / 仓库型 引擎无公网地址；其余引擎必须有 addr
         if (engine !== 'r2' && !isRepo && !addr) return;
