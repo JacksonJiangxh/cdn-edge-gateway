@@ -1,107 +1,133 @@
-/**
- * web/app/lib/repoPreset.js
- * 仓库型引擎（cnb / github）的「内置预设规则模板」前端副本。
- * 与后端 src/proxy/repoEngine.js 的 buildRepoPresetRules 保持一致：
- *   每个引擎每个阶段 2 套（公开 / 私密）：
- *     - URL 重写阶段（rewrite）：公开/私密通用 → 把 /{path} 映射到仓库 raw API（带分支）
- *     - 请求头修改阶段（reqHeaders）：私密注入 Authorization；公开为 null（匿名分支）
- *     - 响应头修改阶段（respHeaders）：剥离仓库接口特有头（下沉到站点规则，不污染全站默认）
- * 这三条规则与「站点场景模板」（网站加速 / api / 下载 等）的规则合并后，统一经流量序列
- * 接口写入站点规则。
- */
+// 仓库型源站（cnb / github）的「关联预设规则」生成器。
+//
+// 与后端 src/proxy/repoEngine.js / src/config/schema.js(normRule) 的契约严格对齐：
+//   匹配条件：conditions 二维数组（外 OR / 内 AND），元素 { target, op, values }；
+//             target 取 'origin'（源站 id，池场景多源站区分用）或 'host'（单源站站点用）；
+//             op 取 'equal'（与后端 MATCH_OPERATORS 一致）。
+//   动作对象：action 为「阶段子对象」扁平结构——
+//             rewrite:{ type:'regex', regexFrom, regexTo, preserveQuery }
+//             hostHeader:{ mode:'custom', custom }（指向仓库 raw API 上游 host）
+//             reqHeaders:{ set, remove } / respHeaders:{ set, remove }。
+//
+// 产物是「站点规则数组形态」的对象（rewrite / respHeaders / 可选 reqHeaders），
+// 由调用方（sites.js 的新建保存流程）并入「站点模板规则」后统一写进流量序列。
 
-/** 回源 host（对终端用户隐藏，由引擎 + 是否公开决定）。 */
-export function repoUpstreamHost(engine, isPrivate) {
-  if (engine === 'cnb') return isPrivate ? 'api.cnb.cool' : 'cnb.cool';
-  if (engine === 'github') return 'raw.githubusercontent.com';
-  throw new Error('未知仓库引擎: ' + engine);
-}
-
-export const REPO_ENGINE_LABEL = Object.freeze({ cnb: 'CNB', github: 'GitHub' });
-
-export const REPO_RESP_HEADER_REMOVE = Object.freeze({
-  cnb: Object.freeze([
-    'access-control-allow-credentials',
-    'access-control-expose-headers',
-    'referrer-policy',
-    'traceparent',
-    'x-trace-id',
-    'x-ratelimit-limit',
-    'x-ratelimit-remaining',
-    'x-ratelimit-reset',
-    'x-repo-commit',
-  ]),
-  github: Object.freeze([
-    'strict-transport-security',
-    'x-xss-protection',
-    'x-github-request-id',
-    'x-github-edge-region',
-    'x-fastly-request-id',
-    'x-served-by',
-    'x-timer',
-    'x-cache',
-    'x-cache-hits',
-    'source-age',
-    'via',
-  ]),
+/** 引擎展示名（UI 用）。 */
+export const REPO_ENGINE_LABEL = Object.freeze({
+  cnb: 'CNB（腾讯云代码仓库）',
+  github: 'GitHub',
 });
 
 /**
- * @param {'cnb'|'github'} engine
- * @param {object} opts
- * @param {string} opts.repoUser
- * @param {string} opts.repoName
- * @param {string} [opts.repoBranch='main']
- * @param {boolean} [opts.repoPrivate=false]
- * @param {string} [opts.host]
- * @returns {{rewrite: object, reqHeaders: object|null, respHeaders: object}}
+ * 仓库型回源的上游 host（与后端 repoEngine.repoUpstreamHost 同构）。
+ * @param {string} engine 'cnb' | 'github'
+ * @param {boolean} isPrivate 是否私有仓库
+ * @returns {string} 上游 host（小写、无协议、无路径）
  */
-export function buildRepoPresetRules(engine, opts) {
-  const repoUser = (opts.repoUser || '').trim();
-  const repoName = (opts.repoName || '').trim();
-  const branch = (opts.repoBranch || 'main').trim() || 'main';
+export function repoUpstreamHost(engine, isPrivate) {
+  if (engine === 'cnb') return isPrivate ? 'api.cnb.cool' : 'cnb.cool';
+  if (engine === 'github') return 'github.com';
+  return '';
+}
+
+/**
+ * 各引擎回源响应里「仓库特有、需在边缘剥离」的响应头清单。
+ * @param {string} engine
+ * @returns {string[]}
+ */
+function respRemoveHeaders(engine) {
+  if (engine === 'cnb') return ['x-cnb-request-id', 'x-cnb-region', 'x-gitlab-*`', 'gitlab-lb'];
+  if (engine === 'github') return ['x-github-request-id', 'x-github-cache', 'x-ratelimit-limit', 'x-ratelimit-remaining'];
+  return [];
+}
+
+/**
+ * 构建仓库型源站的「关联预设规则」。
+ *
+ * 调用方需提供匹配维度二选一：
+ *   - originId：池场景（多源站共存），用源站 id 精确命中，cnb / github 互不冲突；
+ *   - host：单源站站点场景，用站点加速域名命中（整站仅一个仓库源站，无冲突）。
+ *
+ * @param {string} engine 'cnb' | 'github'
+ * @param {Object} opts
+ * @param {string} [opts.repoUser]
+ * @param {string} [opts.repoName]
+ * @param {string} [opts.repoBranch]
+ * @param {boolean} [opts.repoPrivate]
+ * @param {string} [opts.originId] 池场景下源站的真实 id（匹配用）
+ * @param {string} [opts.host] 单源站站点场景下站点加速域名（匹配用）
+ * @returns {{ rewrite:Object, respHeaders:Object, reqHeaders?:Object }}
+ */
+export function buildRepoPresetRules(engine, opts = {}) {
+  const repoUser = opts.repoUser || '';
+  const repoName = opts.repoName || '';
+  const branch = opts.repoBranch || 'main';
   const isPrivate = !!opts.repoPrivate;
-  const host = opts.host ? String(opts.host).trim() : '';
+
+  // 匹配条件：池场景用 originId（源站 id）区分；单源站站点用 host 区分。
+  let matchConditions = [];
+  if (opts.originId) {
+    matchConditions = [{ target: 'origin', op: 'equal', values: [opts.originId] }];
+  } else if (opts.host) {
+    matchConditions = [{ target: 'host', op: 'equal', values: [opts.host] }];
+  }
+  const match = { conditions: [matchConditions] };
+
+  // 上游 host（回源 Host 指向仓库 raw API）。
   const upHost = repoUpstreamHost(engine, isPrivate);
 
-  const target =
+  // 重写路径：把站点路径 /{path} 映射到仓库 raw 文件 URL 的 path 部分。
+  // cnb 私有走 /-/git/raw/，公开走 /-/git/raw/ 之外；github 走 /raw/。
+  const regexTo =
     engine === 'cnb'
-      ? `https://${upHost}/${repoUser}/${repoName}/-/git/raw/${branch}$1`
-      : `https://${upHost}/${repoUser}/${repoName}/${branch}$1`;
-  const matchConditions = host ? [{ type: 'host', op: 'eq', value: host }] : [];
-  const rewriteRule = {
+      ? `/${repoUser}/${repoName}/-/git/raw/${branch}/$1`
+      : `/${repoUser}/${repoName}/raw/${branch}/$1`;
+
+  const rewrite = {
     id: `repo-${engine}-${repoName}-rewrite`,
     name: `${REPO_ENGINE_LABEL[engine]} 仓库 raw 映射（${branch}）`,
     enabled: true,
     stage: 'rewrite',
-    priority: 1,
-    match: matchConditions.length ? { type: 'all', conditions: matchConditions } : { type: 'all', conditions: [] },
-    actions: [{ type: 'rewrite', target, preserveQuery: true }],
+    priority: 10,
+    match,
+    action: {
+      rewrite: {
+        type: 'regex',
+        regexFrom: '^(/.*)$',
+        regexTo,
+        preserveQuery: true,
+      },
+      hostHeader: { mode: 'custom', custom: upHost },
+    },
   };
 
+  const respRule = {
+    id: `repo-${engine}-${repoName}-resp`,
+    name: `${REPO_ENGINE_LABEL[engine]} 仓库特有响应头剥离`,
+    enabled: true,
+    stage: 'respHeaders',
+    priority: 10,
+    match,
+    action: {
+      respHeaders: { set: {}, remove: respRemoveHeaders(engine) },
+    },
+  };
+
+  /** 私有仓库额外注入鉴权请求头（运行时由 repoEngine 用站点级 token 补实）。 */
   let reqHeadersRule = null;
-  if (isPrivate) {
+  if (engine === 'cnb' && isPrivate) {
     reqHeadersRule = {
       id: `repo-${engine}-${repoName}-auth`,
       name: `${REPO_ENGINE_LABEL[engine]} 私有仓库鉴权`,
       enabled: true,
       stage: 'reqHeaders',
-      priority: 1,
-      match: { type: 'all', conditions: matchConditions },
-      actions: [{ type: 'setHeaders', set: { Authorization: '__REPO_ENGINE_INJECT__' }, remove: [] }],
+      priority: 10,
+      match,
+      action: {
+        reqHeaders: { set: { Authorization: '__REPO_ENGINE_INJECT__' }, remove: [] },
+      },
     };
   }
 
-  const respRemoveList = REPO_RESP_HEADER_REMOVE[engine] || [];
-  const respHeadersRule = {
-    id: `repo-${engine}-${repoName}-resp`,
-    name: `${REPO_ENGINE_LABEL[engine]} 仓库特有响应头剥离`,
-    enabled: true,
-    stage: 'respHeaders',
-    priority: 1,
-    match: matchConditions.length ? { type: 'all', conditions: matchConditions } : { type: 'all', conditions: [] },
-    actions: [{ type: 'setHeaders', set: {}, remove: [...respRemoveList] }],
-  };
-
-  return { rewrite: rewriteRule, reqHeaders: reqHeadersRule, respHeaders: respHeadersRule };
+  return { rewrite, respHeaders: respRule, reqHeaders: reqHeadersRule };
 }

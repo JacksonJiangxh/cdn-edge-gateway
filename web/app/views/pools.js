@@ -7,7 +7,6 @@ import { actions, field, select, table } from '../util.js';
 import { closeDrawer, confirmDialog, openDrawer, toast } from '../ui.js';
 import { openSiteDrawer } from './sites.js';
 import { route } from '../router.js';
-import { buildRepoPresetRules, REPO_ENGINE_LABEL } from '../lib/repoPreset.js';
 export   function poolKind(p) {
     if (p && (p.kind === 'single' || p.kind === 'pool')) return p.kind;
     return ((p && p.origins) || []).length === 1 ? 'single' : 'pool';
@@ -390,15 +389,12 @@ export
           const tokenPlain = $('.o-repo-token', row).value;
           // 编辑时留空：保留 legacy 已有的（加密）token；新建必填校验交给后端
           const tokenVal = tokenPlain ? tokenPlain : (legacy[tokenField] || '');
-          const preset = buildRepoPresetRules(engine, { repoUser, repoName, repoBranch, repoPrivate });
+          // 源站只存仓库元数据 + 访问令牌；cnb/github 的 rewrite / 鉴权 / 响应头剥离
+          // 统一在「站点规则层」按源站 id 匹配生成（见 sites.js 新建保存流程），
+          // 不再写入源站级 rewrite/reqHeaders/respHeaders（旧用法已移除）。
           repoExtra = {
             repoUser, repoName, repoBranch, repoPrivate,
             [tokenField]: tokenVal,
-            // 引擎关联的预设规则：rewrite + reqHeaders（公开为 null）+ respHeaders（剥离仓库特有头）
-            // 一并写入源站级；站点里仍可叠加「网站加速 / api」等其它模板规则。
-            rewrite: preset.rewrite,
-            reqHeaders: preset.reqHeaders || { match: { type: 'all', conditions: [] }, actions: [{ type: 'setHeaders', set: {}, remove: [] }] },
-            respHeaders: preset.respHeaders,
           };
         }
 

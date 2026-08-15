@@ -221,10 +221,13 @@ export   async function openSiteDrawer(host, anchor) {
       if (!h) throw new Error('请填写 Host');
       const basics = { host: h, enabled: fEnabled.checked, ipv6Support: fIpv6.checked };
       // 新建站点时整合源站信息：选「已有源站」则传 poolId；选「域名/IP」则传 origins + defaultHostHeader
+      // 记录「选已有源站」模式下选中的池 id，供下方新建保存时识别 cnb/github 源站并铺预设规则。
+      let selectedPoolId = '';
       if (!editing && fOriginMode) {
         if (fOriginMode.value === 'pool') {
           if (!fPoolSel.value) throw new Error('请选择一个已有源站');
           basics.poolId = fPoolSel.value;
+          selectedPoolId = fPoolSel.value;
         } else {
           // 「填写域名/IP」：构建 origin 对象，后端 ensureSingleOrigin 自动查重/创建并回填 poolId
           const eng = fEngine.value;
@@ -294,6 +297,26 @@ export   async function openSiteDrawer(host, anchor) {
           });
           mergedRules.push(preset.rewrite, preset.respHeaders);
           if (preset.reqHeaders) mergedRules.push(preset.reqHeaders);
+        }
+        // 选「已有源站（池）」模式：读取池内所有 cnb/github 源站，按各自真实 id
+        // 构建 rewrite + 响应头剥离（+ 私有 cnb 鉴权）预设规则，与模板规则合并落盘。
+        // 用 originId 匹配精确命中对应源站，cnb / github 同池并存互不冲突。
+        if (selectedPoolId) {
+          const pool = (APP_DATA.pools || []).find((p) => p.id === selectedPoolId);
+          if (pool && Array.isArray(pool.origins)) {
+            for (const o of pool.origins) {
+              if (o.engine !== 'cnb' && o.engine !== 'github') continue;
+              const preset = buildRepoPresetRules(o.engine, {
+                repoUser: o.repoUser,
+                repoName: o.repoName,
+                repoBranch: o.repoBranch,
+                repoPrivate: o.repoPrivate,
+                originId: o.id,
+              });
+              mergedRules.push(preset.rewrite, preset.respHeaders);
+              if (preset.reqHeaders) mergedRules.push(preset.reqHeaders);
+            }
+          }
         }
         if (mergedRules.length) {
           await API.sites.saveRules(h, mergedRules);
