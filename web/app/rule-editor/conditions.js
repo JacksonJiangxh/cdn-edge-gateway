@@ -82,8 +82,10 @@ export   function conditionRow(cond, onRemove) {
       el('option', { value: e })));
     const icCb = el('input', { type: 'checkbox', checked: cond.ignoreCase !== false });
     const valHint = el('span', { class: 'field-hint muted' });
+    // 普通文本值输入框（默认渲染，供 host/path/query 等所有非后缀匹配条件使用）。
+    const valInput = el('input', { class: 'input', value: (cond.values && cond.values.length) ? cond.values.join(', ') : '' });
     // 后缀候选：EO/CF 风格组合框多选（与状态码组合框同款，内嵌输入框 + 分组面板）。
-    // 既可手填逗号分隔值，也可点箭头勾选；已选高亮、未选描边。不再额外并排独立选择框。
+    // 只服务于「文件后缀」匹配对象或「后缀为 / 后缀不为」操作符；其余条件绝不渲染此分类框（越界修复）。
     const extMs = multiSelectPanel({
       presets: EXTENSION_PRESETS,
       groups: EXTENSION_GROUPS,
@@ -91,15 +93,15 @@ export   function conditionRow(cond, onRemove) {
       render: (e) => '.' + e,
       placeholder: '多个值用逗号分隔（之间为“或”）；或点右侧箭头选择文件后缀',
     });
-    const valInput = extMs.input;
-    // 回填已有条件的值（编辑已有规则 / 初始化）到组合框输入框。
-    if (cond.values && cond.values.length) valInput.value = cond.values.join(', ');
-    const extTriggerWrap = el('div', { class: 'ms-trigger-wrap' }, [extMs.combobox]);
-    valInput.addEventListener('input', () => extMs.syncFromInput());
+    // 回填已有条件的值（编辑已有规则 / 初始化）到后缀组合框输入框。
+    if (cond.values && cond.values.length) extMs.input.value = cond.values.join(', ');
+    extMs.input.addEventListener('input', () => extMs.syncFromInput());
+    // 后缀分类框是否已挂载进 valWrap 的标记（避免重复 append / 重复挂载 panel）。
+    let extMounted = false;
 
     const keyWrap = el('div', { class: 'cond-cell' }, [keyInput]);
-    // valInput 已内嵌在 extMs.combobox 中，此处只需放 combobox + datalist + hint。
-    const valWrap = el('div', { class: 'cond-cell' }, [extMs.combobox, extDl, valHint]);
+    // 默认只放普通输入框 + 候选 datalist + 提示；后缀分类框在 sync() 中按需挂载/卸载。
+    const valWrap = el('div', { class: 'cond-cell' }, [valInput, extDl, valHint]);
 
     // 运算符对应的填写示例，帮小白看懂“值”该写什么
     const OP_EXAMPLES = {
@@ -130,14 +132,27 @@ export   function conditionRow(cond, onRemove) {
       keyInput.placeholder = needKey ? (KEY_HINTS[tSel.value] || '键名') : '键名';
       valWrap.style.display = OPS_NO_VALUE.includes(opSel.value) ? 'none' : '';
       const isExt = tSel.value === 'extension' || opSel.value === 'suffix' || opSel.value === 'notSuffix';
-      // 后缀模式：值输入框启用候选 datalist + 显示多选触发框；否则隐藏。
+      // 后缀模式：挂载多选分类框、隐藏普通输入框，并在挂载/卸载时双向同步已填值，避免切换丢值。
+      // 非后缀模式：卸载分类框、仅保留普通文本输入框——彻底杜绝越界渲染。
       if (isExt) {
+        if (!extMounted) {
+          valInput.value = extMs.input.value; // 切回后缀时，普通框已填的值同步进分类框
+          valInput.style.display = 'none';
+          valInput.removeAttribute('list');
+          valWrap.insertBefore(extMs.combobox, extDl);
+          extMounted = true;
+        }
         valInput.setAttribute('list', extDlId);
-        extTriggerWrap.style.display = '';
         extMs.syncFromInput();
       } else {
+        if (extMounted) {
+          extMs.input.value = valInput.value; // 切走后缀时，分类框已选的值同步回普通框
+          extMs.combobox.remove();
+          extMs.destroy();
+          extMounted = false;
+        }
+        valInput.style.display = '';
         valInput.removeAttribute('list');
-        extTriggerWrap.style.display = 'none';
       }
       valHint.textContent = OPS_NO_VALUE.includes(opSel.value)
         ? ''
@@ -155,13 +170,14 @@ export   function conditionRow(cond, onRemove) {
       opSel,
       valWrap,
       el('label', { class: 'check', title: '不区分大小写（如 Path 与 path 视为相同）' }, [icCb, el('span', { text: '不区分大小写' })]),
-      el('button', { class: 'btn btn-sm btn-danger', text: '×', onclick: () => { row.remove(); onRemove && onRemove(); } }),
+      el('button', { class: 'btn btn-sm btn-danger', text: '×', onclick: () => { if (extMounted) extMs.destroy(); row.remove(); onRemove && onRemove(); } }),
     ]);
 
     // 读取该行的当前值（供条件组编辑器汇总）。
     // 缺失此返回值会导致 conditionsEditor 解构得到 undefined，规则编辑器一打开即崩溃。
     const read = () => {
-      const value = valInput.value;
+      // 后缀模式下值来自分类框输入（已挂载时同步到 valInput，未挂载直接取 extMs.input）。
+      const value = extMounted ? extMs.input.value : valInput.value;
       const values = value
         ? value.split(',').map((s) => s.trim()).filter(Boolean)
         : [];

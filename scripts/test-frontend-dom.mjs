@@ -680,6 +680,39 @@ export async function runFrontendDomTest() {
     }
   }
 
+  // ── 用例 E：匹配条件值控件越界回归 ───────────────────────────────────
+  // 复现 bug：conditionRow 无论匹配对象选什么（host/path/query 等），值控件都渲染
+  // 「文件后缀多选分类框」（.ms-trigger--combo），但该分类框只服务于「文件后缀 /
+  // 后缀为 / 后缀不为」条件，对其他匹配条件属越界。修复后：非后缀条件行 valWrap
+  // 不含 .ms-trigger--combo，仅普通输入框；后缀条件行才挂载该分类框。
+  console.log('▸ 用例 E：匹配条件值控件越界回归（后缀分类框仅服务 extension 条件）');
+  {
+    const T = window.__TEST__;
+    if (T && typeof T.conditionRow === 'function') {
+      const hasCombo = (cond) => {
+        const { row } = T.conditionRow(cond);
+        const valWrap = row.querySelector('.cond-cell:last-of-type') || row;
+        return !!valWrap.querySelector('.ms-trigger--combo');
+      };
+      // 非后缀条件：host / path / query / header 一律不得渲染后缀分类框
+      assert(!hasCombo({ target: 'host', op: 'equal', values: [] }),
+        '匹配对象=host 不渲染文件后缀分类框（越界已修复）');
+      assert(!hasCombo({ target: 'path', op: 'prefix', values: [] }),
+        '匹配对象=path 不渲染文件后缀分类框（越界已修复）');
+      assert(!hasCombo({ target: 'header', op: 'exists', values: [] }),
+        '匹配对象=header 不渲染文件后缀分类框（越界已修复）');
+      // 后缀条件：extension 对象 + suffix/notSuffix 操作符必须渲染分类框
+      assert(hasCombo({ target: 'extension', op: 'equal', values: [] }),
+        '匹配对象=extension 渲染文件后缀分类框（服务正确）');
+      assert(hasCombo({ target: 'path', op: 'suffix', values: [] }),
+        '操作符=后缀为 渲染文件后缀分类框（服务正确）');
+      assert(hasCombo({ target: 'path', op: 'notSuffix', values: [] }),
+        '操作符=后缀不为 渲染文件后缀分类框（服务正确）');
+    } else {
+      assert(false, 'window.__TEST__.conditionRow 已暴露以验证越界修复');
+    }
+  }
+
   // 5) 全程无运行时错误（最终汇总）
   assert(errors.length === 0, '全程（登录→全视图→抽屉新建规则）无运行时报错', errors.slice(0, 5).map(String).join(' | '));
 

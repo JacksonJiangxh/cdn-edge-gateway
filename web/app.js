@@ -7,6 +7,8 @@ import {
 } from './app/ui.js';
 import { route, $$nav } from './app/router.js';
 import { getOp } from './app/rule-editor/card.js';
+import { conditionRow } from './app/rule-editor/conditions.js';
+
 import { headerEditor, cacheEditor, rewriteEditor } from './app/rule-editor/ops.js';
 import { refreshData } from './app/state.js';
 
@@ -76,6 +78,7 @@ if (typeof window !== 'undefined' && window.__ENABLE_TEST_HOOK__) {
   window.__TEST__ = {
     getOp,
     headerEditor, cacheEditor, rewriteEditor, el,
+    conditionRow: (cond) => conditionRow(cond),
   };
 }
 

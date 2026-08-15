@@ -77,37 +77,6 @@ export   function opSection(key, title, desc, opts, children) {
   const TARGETS_WITH_KEY = ['header', 'cookie', 'query'];
   const OPS_NO_VALUE = ['exists', 'notExists'];
 
-  // 后缀候选值（与 src/config/templates.js 的 EXTENSION_PRESETS 同构；前端无打包无法 import，
-  // 由 build.mjs 做一致性断言。规则编辑器的「文件后缀 / 后缀为」值以此作为下拉候选）。
-  const EXTENSION_PRESETS = [
-    '7z', 'avi', 'avif', 'apk', 'bin', 'bmp', 'bz2', 'class', 'css', 'csv',
-    'doc', 'docx', 'dmg', 'ejs', 'eot', 'eps', 'exe', 'flac', 'gif', 'gz',
-    'ico', 'iso', 'jar', 'jpg', 'jpeg', 'js', 'mid', 'midi', 'mkv', 'mp3',
-    'mp4', 'ogg', 'otf', 'pdf', 'pict', 'pls', 'png', 'ppt', 'pptx', 'ps',
-    'rar', 'svg', 'svgz', 'swf', 'tar', 'tif', 'tiff', 'ttf', 'webm', 'webp',
-    'woff', 'woff2', 'xls', 'xlsx', 'zip', 'zst',
-  ];
-  // 错误状态码候选值（与 src/config/templates.js 的 ERROR_CODE_PRESETS 同构）。
-  const ERROR_CODE_PRESETS = [
-    400, 401, 403, 404, 405, 406, 408, 409, 410, 412, 413, 415, 422, 429,
-    500, 502, 503, 504,
-  ];
-  // 后缀候选按资源类型分组（仅前端展示层，便于 EO/CF 风格的分类多选下拉）。
-  // 不改动 EXTENSION_PRESETS 数组定义，避免破坏 build.mjs 一致性断言。
-  const EXTENSION_GROUPS = [
-    { label: '网页与脚本', values: ['css', 'js', 'ejs', 'class', 'swf'] },
-    { label: '图片', values: ['bmp', 'gif', 'ico', 'jpg', 'jpeg', 'png', 'svg', 'svgz', 'tif', 'tiff', 'avif', 'webp', 'pict', 'eps', 'eot', 'otf', 'ttf', 'woff', 'woff2'] },
-    { label: '音视频', values: ['avi', 'flac', 'mid', 'midi', 'mkv', 'mp3', 'mp4', 'ogg', 'webm'] },
-    { label: '文档', values: ['csv', 'doc', 'docx', 'pdf', 'ppt', 'pptx', 'ps', 'xls', 'xlsx'] },
-    { label: '压缩包与镜像', values: ['7z', 'bz2', 'gz', 'rar', 'tar', 'zip', 'zst', 'dmg', 'iso'] },
-    { label: '程序与二进制', values: ['apk', 'bin', 'exe', 'jar', 'pls'] },
-  ];
-  // 错误码按 4xx / 5xx 分组（仅展示层）。
-  const ERROR_CODE_GROUPS = [
-    { label: '4xx 客户端错误', values: [400, 401, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 418, 429, 498, 499] },
-    { label: '5xx 服务端错误', values: [500, 502, 503, 504, 508, 520, 521, 522, 523, 524, 525, 526, 530, 581, 582, 583, 584, 594, 595, 596, 598, 599] },
-  ];
-
   // 单个条件行：[匹配对象] [键名] [操作符] [值] [忽略大小写] [删除]
   let _OP_BUILDERS = null;
 export 
