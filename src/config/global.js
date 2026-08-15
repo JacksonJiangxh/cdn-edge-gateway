@@ -75,7 +75,7 @@ export const DEFAULT_GLOBAL = Object.freeze({
   disguise: Object.freeze({
     mode: 'static',
     target: '',
-    status: 200,
+    status: 502,
   }),
   version: CONFIG_VERSION,
 });

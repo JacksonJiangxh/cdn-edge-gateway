@@ -29,32 +29,89 @@ const DISGUISE_SERVER_NAME = 'nginx';
 /**
  * 内置静态伪装页。
  *
- * 刻意模仿 nginx 默认欢迎页：这是互联网上最常见、最不值得深究的页面之一，
- * 扫描器看到它通常会直接判定为「未配置的空站点」而跳过。
+ * 仿 Cloudflare 5xx 拦截页（对齐现有 Nginx 静态 502 页的视觉），用于「host 未匹配到站点」
+ * 时的兜底：让扫描器 / 盗刷脚本以为是真实的 Cloudflare 边缘在拦截，从而放弃进一步探测。
+ *
+ * 遵循伪装页设计要点（见文件头）：
+ *  - 无 Ray ID / 无域名 / 无 host 指纹；
+ *  - 无 Click-to-reveal IP 等 JS 交互（静态页，可被边缘稳定长缓存、零失败面）；
+ *  - 大区为固定占位（真实 CF 风格的边缘节点代码），不暴露任何配置信息；
+ *  - 内联样式，无外部依赖、无外部可观测信号。
+ *
+ * 注意：本页与 src/errorPage.js 的 buildErrorPage（异常兜底页，带随机 Ray ID / IP reveal）
+ * 用途不同——disguise 必须「静态 + 可缓存 + 零失败」，故不复用，独立维护此静态版。
  */
 const STATIC_HTML = `<!DOCTYPE html>
-<html>
+<!--[if lt IE 7]><html class="no-js ie6 oldie" lang="en-US"><![endif]-->
+<!--[if IE 7]><html class="no-js ie7 oldie" lang="en-US"><![endif]-->
+<!--[if IE 8]><html class="no-js ie8 oldie" lang="en-US"><![endif]-->
+<!--[if gt IE 8]><!-->
+<html class="no-js" lang="en-US">
+<!--<![endif]-->
 <head>
-<title>Welcome to nginx!</title>
-<style>
-    body {
-        width: 35em;
-        margin: 0 auto;
-        font-family: Tahoma, Verdana, Arial, sans-serif;
-    }
-</style>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge">
+    <meta name="robots" content="noindex, nofollow">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>502: Bad gateway</title>
+    <style>
+      body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#333;background:#fff}
+      #cf-wrapper{max-width:960px;margin:0 auto;padding:0 16px}
+      .code-label{display:inline-block;margin-left:.5rem;padding:.1rem .5rem;font-size:.8rem;background:#f3f4f6;color:#6b7280;border-radius:.25rem}
+      h1{font-weight:300;font-size:2rem;line-height:1.2;margin:.5rem 0}
+      .grid{display:flex;flex-wrap:wrap;margin:2rem 0;border-top:1px solid #eee;padding-top:1.5rem}
+      .cell{flex:1 1 33%;min-width:200px;padding:1rem;text-align:center}
+      .ok{color:#16a34a}.err{color:#dc2626}
+      h2{font-size:1.25rem;font-weight:400;margin:.5rem 0}
+      .meta{border-top:1px solid #eee;margin-top:1.5rem;padding-top:1rem;font-size:.8rem;color:#6b7280}
+    </style>
 </head>
+
 <body>
-<h1>Welcome to nginx!</h1>
-<p>If you see this page, the nginx web server is successfully installed and
-working. Further configuration is required.</p>
+    <div id="cf-wrapper">
+        <div id="cf-error-details">
+            <header>
+                <h1>
+                    <span>Bad gateway</span>
+                    <span class="code-label">Error code 502</span>
+                </h1>
+                <div>Visit <a href="https://www.cloudflare.com/5xx-error-landing?utm_source=errorcode_502" target="_blank" rel="noopener noreferrer">cloudflare.com</a> for more information.</div>
+            </header>
 
-<p>For online documentation and support please refer to
-<a href="http://nginx.org/">nginx.org</a>.<br/>
-Commercial support is available at
-<a href="http://nginx.com/">nginx.com</a>.</p>
+            <div class="grid">
+                <div class="cell">
+                    <span class="ok">&#9679;</span>
+                    <h3>Browser</h3>
+                    <span class="ok">Working</span>
+                </div>
+                <div class="cell">
+                    <span class="ok">&#9679;</span>
+                    <h3>Cloudflare</h3>
+                    <span class="ok">Working</span>
+                    <div>HKG</div>
+                </div>
+                <div class="cell">
+                    <span class="err">&#9679;</span>
+                    <h3>Host</h3>
+                    <span class="err">Error</span>
+                </div>
+            </div>
 
-<p><em>Thank you for using nginx.</em></p>
+            <div>
+                <h2>What happened?</h2>
+                <p>The web server reported a bad gateway error.</p>
+                <h2>What can I do?</h2>
+                <p>Please try again in a few minutes.</p>
+            </div>
+
+            <div class="meta">
+                Cloudflare Ray ID: <strong>0000000000000000</strong>
+                <span> &bull; </span>
+                Performance &amp; security by
+                <a rel="noopener noreferrer" href="https://www.cloudflare.com/5xx-error-landing?utm_source=errorcode_502" target="_blank">Cloudflare</a>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
 `;
