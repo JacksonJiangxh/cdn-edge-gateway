@@ -12,7 +12,7 @@
  */
 
 import { getGlobalRules } from '../config/store.js';
-import { DEFAULT_GLOBAL_RULES, DEBUG_HEADER_NAMES } from '../config/defaults.js';
+import { DEFAULT_GLOBAL_RULES, DEBUG_HEADER_NAMES, NO_CACHE_STATUS_LIST } from '../config/defaults.js';
 import { expandVars, pickClientIp } from '../config/vars.js';
 
 /**
@@ -211,6 +211,14 @@ export async function buildClientHeaders(ctx, originResp, policy, ops) {
       out.set('Cache-Control', `public, max-age=0, s-maxage=${ttl}`);
       setEdgeCacheControl(ttl, policy?.staleWhileRevalidate);
     }
+  } else if (NO_CACHE_STATUS_LIST.includes(status)) {
+    // 引擎铁律兜底：用户未用 statusTtl 显式配置该码、且该码属于「不应缓存」内置枚举
+    // （4xx/5xx 等错误码，见 contracts.js 的 NO_CACHE_STATUS）时，强制下发 no-store。
+    // 与 platform/cache.js 的 isCacheable 第 5 步兜底层级一致，保证「响应头下发」与
+    // 「是否落盘」两处判定对错误码的行为统一。
+    out.set('Cache-Control', 'no-store');
+    out.set('CDN-Cache-Control', 'no-store');
+    if (isCf) out.set('Cloudflare-CDN-Cache-Control', 'no-store');
   } else if (policy?.enabled && policy.mode !== 'origin') {
     // mode === 'origin' 表示遵循源站缓存策略，此时完全不改写缓存头
     // TTL 取配置值；若为 0 则回落到分层铁律默认值（边缘半年 / 浏览器 30 分钟）
