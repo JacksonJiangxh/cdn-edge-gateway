@@ -4,7 +4,7 @@
 # 烤入内容：
 #   1) Debian 13 的 25+ 个 chromium 系统共享库（运行时免 apt-get）
 #   2) npm ci 好的项目依赖（/space/node_modules）
-#   3) Playwright 的 chromium 二进制（~/ .cache/ms-playwright）
+#   3) Playwright 的 chromium 二进制（/opt/playwright-browsers）
 #   4) 全局 esa-cli（ESA 按钮免 npm install -g）
 #
 # 重建触发：.cnb.yml 中 docker:cache 任务的 by=[package.json,package-lock.json]，
@@ -40,9 +40,19 @@ RUN npm ci \
 
 # ---------- 3) Playwright chromium 二进制 ----------
 # 注意：chromium 已由上面 npm ci 的 postinstall（scripts/ensure-playwright-browsers.mjs，
-# 在 root 环境走 --with-deps）装好，默认落在 /root/.cache/ms-playwright。
-# 这里仅声明浏览器缓存路径（与脚本默认一致），无需重复下载。
-ENV PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
+# 在 root 环境走 --with-deps）装好。
+# 关键：浏览器二进制必须落在 /opt/playwright-browsers，而非默认的 /root/.cache/ms-playwright。
+# 原因（官方文档佐证，https://docs.cnb.cool/zh/build/grammar.html 的 DOCKER.VOLUMES 章节）：
+#   - volumes 的 copy-on-write 模式「并非实时跨 stage 共享可变写层」，且「挂载点会覆盖（遮蔽）
+#     容器内原有内容」。install 阶段写入 /root/.cache/ms-playwright 的私有副本，build 阶段
+#     看不到；即便可见，空卷挂载还会遮蔽镜像层，导致 build 阶段又重新下载约 300MB。
+#   - 官方结论：「二进制固化进镜像层后，不需要挂卷来提供本身」。故将 chromium 固化到 /opt
+#     （非 /root/.cache 标准缓存目录，规避 docker:cache 导出链路对其的不可靠保留），所有
+#     stage 直接读镜像层、零下载。脚本 ensure-playwright-browsers.mjs / e2e-browser.mjs
+#     会自动尊重该 ENV。
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+RUN mkdir -p /opt/playwright-browsers \
+ && echo "✓ Playwright 浏览器缓存目录已就绪: $PLAYWRIGHT_BROWSERS_PATH"
 
 # ---------- 4) 全局 esa-cli（ESA 按钮复用） ----------
 RUN npm install -g esa-cli \

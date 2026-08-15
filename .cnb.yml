@@ -16,9 +16,12 @@
 # 跨同构建机的多次流水线复用，免重复下载。覆盖三类环境部署产物：
 #   1) node_modules              —— npm ci 装好的项目依赖（命中后 up to date 秒过）
 #   2) /root/.npm                —— npm 本地缓存（加速 npm ci 与 npm install -g）
-#   3) /root/.cache/ms-playwright —— playwright 的 chromium 二进制（postinstall 跳过下载）
-#   4) /var/cache/apt/archives    —— apt 下载的 .deb（setup-browser-deps 免联网下载）
-#   5) /usr/local/lib/node_modules—— 全局包（esa-cli 等，ESA 按钮免 npm install -g）
+#   3) /var/cache/apt/archives    —— apt 下载的 .deb（setup-browser-deps 免联网下载）
+#   4) /usr/local/lib/node_modules—— 全局包（esa-cli 等，ESA 按钮免 npm install -g）
+# 说明：Playwright 的 chromium 二进制【不再挂卷】——它已固化进 docker:cache 镜像层
+#   （/opt/playwright-browsers，见 cache.dockerfile），所有 stage 直接读镜像层、零下载。
+#   此前挂 /root/.cache/ms-playwright 卷无效：该路径在 docker:cache 导出时被丢弃，跨 stage
+#   的 copy-on-write 卷也不共享写层，反而空卷遮蔽镜像层内容，导致 build 阶段重下 300MB。
 # 说明：volumes 缓存在「当前构建机」有效；构建机轮换则需重新预热（仍比纯裸跑快，
 #      因为 apt/npm 缓存卷大概率仍在）。需要跨构建机/跨流水线稳定命中请改用 docker:cache 镜像。
 # 远程开发（vscode 事件）刻意不挂此卷，保持纯净 debian 环境。
@@ -26,7 +29,6 @@
   volumes:
     - node_modules:copy-on-write
     - /root/.npm:copy-on-write
-    - /root/.cache/ms-playwright:copy-on-write
     - /var/cache/apt/archives:copy-on-write
     - /usr/local/lib/node_modules:copy-on-write
 
@@ -34,8 +36,8 @@
 # 把环境部署整体烤进镜像（apt 库 + node_modules + chromium + esa-cli），
 # 推到远端镜像源，跨构建机/跨流水线稳定命中（彻底免运行期 apt/npm/下载）。
 # 与 volumes 并存时需注意：volumes 挂载点会覆盖容器内同路径，故 docker:cache 按钮
-# 只用「精简版」volumes（纯网络加速项 + ms-playwright），不含 node_modules/全局包，
-# 避免空卷遮蔽镜像内已固化的内容。
+# 只用「精简版」volumes（纯网络加速项），不含 node_modules/全局包/chromium，
+# 避免空卷遮蔽镜像内已固化的内容。chromium 已固化进 /opt/playwright-browsers 镜像层，不挂卷。
 # 缓存镜像构建任务（每个启用镜像缓存的按钮 stages 首项）：
 # 【关键】CNB 的 docker:cache 构建上下文 ONLY 包含 by 列表里的文件 + Dockerfile 本身，
 #   未列出的文件在构建时「视为不存在」。故 COPY . . 的上下文由 by 决定。
@@ -78,18 +80,24 @@
   exports:
     name: DOCKER_CACHE_IMAGE_NAME
 # 引用缓存镜像（stage 级 image，供 build/install 等阶段复用）：
+# env 显式声明浏览器缓存路径，与镜像层内 cache.dockerfile 固化值一致，
+# 确保 postinstall（ensure-playwright-browsers.mjs）/ e2e（e2e-browser.mjs）读到同一目录。
+# 即便容器继承镜像 ENV 也在此冗余声明，避免任何继承歧义。
 .docker-cache-image: &docker-cache-image
   image: $DOCKER_CACHE_IMAGE_NAME
-# docker:cache 按钮专用的精简 volumes。
-# 注意：node_modules / 全局包（/usr/local/lib/node_modules）不挂——它们已固化在镜像层，
-# 挂载空卷反而遮蔽。但 ms-playwright 在实测中【未固化进镜像层】（docker:cache 导出时丢弃
-# /root/.cache 这类构建缓存目录），导致 build 阶段容器里 ms-playwright 为空、e2e 脚本又自动
-# 重新下载 300MB。故此处显式挂 ms-playwright 卷，让 install 阶段的 chromium 跨 stage 复用，
-# 消除重复下载。
+  env:
+    PLAYWRIGHT_BROWSERS_PATH: /opt/playwright-browsers
+# docker:cache 按钮专用的精简 volumes（纯网络加速项）。
+# 官方依据（https://docs.cnb.cool/zh/build/grammar.html DOCKER.VOLUMES）：
+#   - copy-on-write 卷「并非实时跨 stage 共享可变写层」，且挂载点「会覆盖（遮蔽）容器内原有内容」。
+#   - 官方结论：「二进制固化进镜像层后，不需要挂卷来提供本身」。
+# 故 node_modules / 全局包（/usr/local/lib/node_modules）/ chromium（/opt/playwright-browsers）
+# 均【不挂】——它们已固化在镜像层，挂载空卷反而遮蔽。chromium 此前曾挂 /root/.cache/ms-playwright
+# 卷，但该卷跨 stage 不共享写层、且空卷遮蔽镜像层，导致 build 阶段重下 300MB。现固化进镜像层后，
+# 不再依赖任何卷来传递浏览器二进制。
 .docker-cache-image-vol: &docker-cache-image-vol
   volumes:
     - /root/.npm:copy-on-write
-    - /root/.cache/ms-playwright:copy-on-write
     - /var/cache/apt/archives:copy-on-write
 
 # 密钥仓库地址。CNB 不支持仓库级 Secret 直填，凭据须放在独立的「密钥仓库」，
@@ -153,8 +161,8 @@
   - *setup-browser-deps
   - name: install
     <<: *docker-cache-image
-    # postinstall（scripts/ensure-playwright-browsers.mjs）会在此下载 chromium，
-    # 系统库已由上一步就位，故下载完即可直接启动。
+    # postinstall（scripts/ensure-playwright-browsers.mjs）探测到 /opt/playwright-browsers
+    # 的 chromium 已就绪（镜像层固化），秒过、零下载；系统库也由镜像/cache 卷命中跳过 apt。
     script: |
       set -e
       # 从缓存镜像把依赖拷到工作区（命中则 npm ci 直接 up to date）
