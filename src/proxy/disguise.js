@@ -85,7 +85,7 @@ const STATIC_HTML = `<!DOCTYPE html>
                     <span class="code-label">Error code 502</span>
                 </h1>
                 <div>Visit <a href="https://www.cloudflare.com/5xx-error-landing?utm_source=errorcode_502" target="_blank" rel="noopener noreferrer">cloudflare.com</a> for more information.</div>
-                <div class="mt-3">2026-08-15 12:00:00 UTC</div>
+                <div class="mt-3">2026-03-28 07:42:15 UTC</div>
             </header>
 
             <div class="grid">
@@ -98,7 +98,7 @@ const STATIC_HTML = `<!DOCTYPE html>
                     <span class="ok">&#9679;</span>
                     <h3>Cloudflare</h3>
                     <span class="ok">Working</span>
-                    <div>HKG</div>
+                    <div>SJC</div>
                 </div>
                 <div class="cell">
                     <span class="err">&#9679;</span>
@@ -115,7 +115,7 @@ const STATIC_HTML = `<!DOCTYPE html>
             </div>
 
             <div class="cf-error-footer">
-                Cloudflare Ray ID: <strong>8a2c4f1e9b3d7c05</strong>
+                Cloudflare Ray ID: <strong>f3b9e1a7c2d4f608</strong>
                 <span> &bull; </span>
                 Performance &amp; security by
                 <a rel="noopener noreferrer" href="https://www.cloudflare.com/5xx-error-landing?utm_source=errorcode_502" target="_blank">Cloudflare</a>
