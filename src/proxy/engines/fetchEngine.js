@@ -18,6 +18,8 @@
  *   自建 TCP 并自行发送带正确 SNI/Host 的 HTTP 请求（socketEngine.rawTcpFetch）。
  */
 
+import { UpstreamError } from '../../utils/errors.js';
+
 /**
  * 判断给定 URL 是否为裸 IP（而非域名）。用于决定是否需要 SNI 兜底。
  * @param {URL|string} url
@@ -93,6 +95,14 @@ export async function fetchOrigin(ctx, origin, originUrl, headers, timeoutMs, op
 
   try {
     return await fetch(String(originUrl), init);
+  } catch (err) {
+    // 回源网络错误 / 超时（AbortError）等：统一包成 UpstreamError(502)。
+    // 真实上游地址、证书、DNS 细节不外泄（expose=false）；
+    // 上层 failover 仍会捕获该 Error 换下一个源站，语义不变。
+    throw new UpstreamError(`回源失败 (${String(originUrl)})`, {
+      cause: err,
+      details: { origin: String(originUrl), timeoutMs: timeout },
+    });
   } finally {
     // 无论成功失败都要清掉定时器，避免 Worker 实例被无谓地保活
     clearTimeout(timer);

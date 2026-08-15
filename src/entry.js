@@ -18,6 +18,7 @@ import { initMemBudget } from './platform/memBudget.js';
 import { handleRequest } from './core/app.js';
 import { resolveRequestId, REQUEST_ID_HEADER } from './utils/reqid.js';
 import { normalizeError, sanitizeMessage } from './utils/errors.js';
+import { buildErrorPage } from './errorPage.js';
 
 /**
  * Cloudflare Pages / EdgeOne Pages 入口
@@ -113,10 +114,21 @@ async function dispatch(request, env, waitUntilFn) {
       `[entry] unhandled error reqId=${reqId} code=${appErr.code} msg=${sanitizeMessage(appErr.message)}`,
       appErr.cause instanceof Error ? appErr.cause.stack : undefined
     );
-    return new Response(`Internal Server Error (request id: ${reqId})`, {
-      status: 500,
+    // 返回「仿 Cloudflare 5xx 伪装页」而非裸文本：保留正确状态码（502/503/500），
+    // 随机 Ray ID + 大区文案用于防盗刷 / 防探测；真实内部细节不出现。
+    const status = appErr.status || 500;
+    const html = buildErrorPage({
+      status,
+      code: appErr.code,
+      reqId,
+      domain: url ? url.hostname : '',
+    });
+    return new Response(html, {
+      status,
       headers: {
-        'content-type': 'text/plain; charset=utf-8',
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-robots-tag': 'noindex, nofollow',
         [REQUEST_ID_HEADER]: reqId,
       },
     });

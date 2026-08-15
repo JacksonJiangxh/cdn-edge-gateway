@@ -35,6 +35,34 @@
 
 import { fetchOrigin } from './engines/fetchEngine.js';
 import { decryptSecret } from '../utils/cipher.js';
+import { buildErrorPage } from '../errorPage.js';
+import { REQUEST_ID_HEADER } from '../utils/reqid.js';
+
+/**
+ * 仓库型回源的配置类错误（缺 token / 解密失败 / 空 token）对外统一返回
+ * 「仿 Cloudflare 502 伪装页」，真实原因仅进日志（隐藏源站架构细节，防盗刷 / 探测）。
+ *
+ * @param {import('../contracts.js').Ctx} ctx
+ * @param {string} reason 仅用于日志的内部原因
+ * @param {string} [reqId]
+ * @returns {Response}
+ */
+function repoErrorPage(ctx, reason, reqId) {
+  console.error(`[repoEngine] ${reason} reqId=${reqId || ''}`);
+  const domain = ctx?.url?.hostname || '';
+  return new Response(
+    buildErrorPage({ status: 502, code: 'INTERNAL', reqId: reqId || '', domain }),
+    {
+      status: 502,
+      headers: {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-robots-tag': 'noindex, nofollow',
+        ...(reqId ? { [REQUEST_ID_HEADER]: reqId } : {}),
+      },
+    }
+  );
+}
 
 /**
  * 回源 host（对终端用户隐藏，由引擎 + 是否公开决定）。
@@ -244,25 +272,16 @@ export async function fetchRepoOrigin(ctx, origin, originUrl, headers, timeoutMs
   }
 
   if (!stored) {
-    return new Response(`仓库型源站 ${engine} 缺失访问令牌（${tokenField}）`, {
-      status: 502,
-      headers: { 'content-type': 'text/plain; charset=utf-8' },
-    });
+    return repoErrorPage(ctx, `仓库型源站 ${engine} 缺失访问令牌（${tokenField}）`, ctx?.reqId);
   }
   let token;
   try {
     token = await decryptSecret(stored, ctx);
   } catch (e) {
-    return new Response(`仓库型源站 ${engine} 令牌解密失败：${e.message}`, {
-      status: 502,
-      headers: { 'content-type': 'text/plain; charset=utf-8' },
-    });
+    return repoErrorPage(ctx, `仓库型源站 ${engine} 令牌解密失败：${e?.message}`, ctx?.reqId);
   }
   if (!token) {
-    return new Response(`仓库型源站 ${engine} 令牌为空`, {
-      status: 502,
-      headers: { 'content-type': 'text/plain; charset=utf-8' },
-    });
+    return repoErrorPage(ctx, `仓库型源站 ${engine} 令牌为空`, ctx?.reqId);
   }
   headers.set('Authorization', buildAuthHeader(engine, token));
   // 回源到固定 host（originUrl 已是重写后的上游 host，此处无需再改）
