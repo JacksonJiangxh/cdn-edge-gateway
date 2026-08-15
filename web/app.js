@@ -8,15 +8,7 @@ import {
 import { route, $$nav } from './app/router.js';
 import { getOp } from './app/rule-editor/card.js';
 import { headerEditor, cacheEditor, rewriteEditor } from './app/rule-editor/ops.js';
-
-async function refreshData() {
-  const [sites, pools] = await Promise.all([
-    API.sites.list().catch(() => ({ sites: [] })),
-    API.pools.list().catch(() => ({ pools: [] })),
-  ]);
-  APP_DATA.sites = sites.sites || [];
-  APP_DATA.pools = pools.pools || [];
-}
+import { refreshData } from './app/state.js';
 
 // 主题切换（轻量）
 function bindTheme() {

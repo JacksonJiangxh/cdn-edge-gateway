@@ -13,3 +13,18 @@ export const globalStages = {};
 // 全局引用，等价于原 const API = window.API / const PLATFORM = window.__PLATFORM__。
 export const API = window.API;
 export const PLATFORM = window.__PLATFORM__ || 'unknown';
+
+/**
+ * 重新拉取站点/源站列表并刷新 APP_DATA（单一真相源）。
+ * 各视图在增删改后调用，使列表视图拿到最新数据。
+ * 注意：不刷新平台 info（避免每次操作都打 info 接口），如需一并刷新请用 loadAll。
+ * @returns {Promise<void>}
+ */
+export async function refreshData() {
+  const [sites, pools] = await Promise.all([
+    API.sites.list().catch(() => ({ sites: [] })),
+    API.pools.list().catch(() => ({ pools: [] })),
+  ]);
+  APP_DATA.sites = sites.sites || [];
+  APP_DATA.pools = pools.pools || [];
+}

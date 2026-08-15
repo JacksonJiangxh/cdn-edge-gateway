@@ -1,7 +1,7 @@
 // poolKind / originSummary / buildPoolOptions / refsCell / renderPools / openRefsDrawer / openPoolDrawer / removePool
 
 import { $, el } from '../../dom.js';
-import { API, APP_DATA } from '../state.js';
+import { API, APP_DATA, refreshData } from '../state.js';
 import { section } from '../rule-editor/card.js';
 import { actions, field, select, table } from '../util.js';
 import { closeDrawer, confirmDialog, openDrawer, toast } from '../ui.js';

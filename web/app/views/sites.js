@@ -2,8 +2,9 @@
 
 import { $, clear, el } from '../../dom.js';
 import { buildRuleCard, section } from '../rule-editor/card.js';
-import { API, APP_DATA } from '../state.js';
+import { API, APP_DATA, refreshData } from '../state.js';
 import { buildPoolOptions, poolKind } from './pools.js';
+import { openCacheDrawer } from './cache.js';
 import { actions, field, ruleStage, select, table } from '../util.js';
 import { confirmDialog, openDrawer, scrollToAnchor, toast } from '../ui.js';
 import { STAGE_OPS } from '../../_stage.gen.js';

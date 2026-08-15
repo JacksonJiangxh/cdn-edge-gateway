@@ -25,7 +25,7 @@ import { buildCacheKey, shouldBypassCache } from './cachekey.js';
 import { buildOriginUrl, resolveHostHeader, mergeRewrite, mergeHeaderOps, mergeStageHeaderOps } from './rewrite.js';
 import { getPool, getGlobal, getGlobalRules } from '../config/store.js';
 import { renderDisguise } from './disguise.js';
-import { DEFAULT_FAILOVER, DEFAULT_GLOBAL_RULES, deepClone } from '../config/defaults.js';
+import { DEBUG_HEADER_NAMES, DEFAULT_FAILOVER, DEFAULT_GLOBAL_RULES, deepClone } from '../config/defaults.js';
 import { STAGE_ORDER } from '../config/stages.js';
 import { cacheMatch, cachePut, isCacheable } from '../platform/cache.js';
 import { checkSecurity } from '../security/guard.js';

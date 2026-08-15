@@ -2,7 +2,7 @@
 
 import { GLOBAL_ONLY_STAGE_OPS, STAGE_OPS, isGlobalOnlyStage } from '../../_stage.gen.js';
 import { GLOBAL_STAGE_OPS, actionToGlobalStage, globalStageToAction } from './shared.js';
-import { API, globalStages } from '../state.js';
+import { API, globalStages, refreshData } from '../state.js';
 import { openDrawer, toast } from '../ui.js';
 import { buildPoolOptions } from '../views/pools.js';
 import { buildRuleCard } from './card.js';
