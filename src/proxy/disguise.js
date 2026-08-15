@@ -14,17 +14,21 @@
  *  5. 【配额优化】伪装页响应设置长 CDN 缓存（24h），让 CF 边缘直接缓存，
  *     后续同一未授权 URL 的请求不再打到 Workers，节省每日 10W 次请求配额。
  *     proxy 模式额外增加 isolate 级内存缓存，同一 isolate 内只 fetch 一次目标。
+ *  6. 【指纹自洽】内置静态页是「仿 Cloudflare 5xx 拦截页」，故 Server 响应头同步为
+ *     `cloudflare`（而非 nginx），避免出现「页面声称 CF、响应头却是 nginx」的致命矛盾。
  * ============================================================================
  */
 
 import { DEFAULT_DISGUISE, DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
 
 /**
- * 伪装页 Server 头指纹（默认 'nginx'）。
- * 此值本质是「流量序列内部量」——伪装页要表现得像一台普通 nginx，故不作为可配项。
- * 若需变更伪装指纹，改此引擎常量即可，无需在管理面板暴露。
+ * 伪装页 Server 头指纹（默认 'cloudflare'）。
+ * 与内置 STATIC_HTML（仿 Cloudflare 5xx 拦截页）语义自洽：
+ * 页面声称是 Cloudflare 拦截页，响应头也必须是 cloudflare，否则「页面 CF、头 nginx」
+ * 的矛盾会成为最强的「这是假 CF」指纹。
+ * 此值本质是「流量序列内部量」，不作为可配项；若需变更伪装指纹，改此引擎常量即可。
  */
-const DISGUISE_SERVER_NAME = 'nginx';
+const DISGUISE_SERVER_NAME = 'cloudflare';
 
 /**
  * 内置静态伪装页。
@@ -33,10 +37,15 @@ const DISGUISE_SERVER_NAME = 'nginx';
  * 时的兜底：让扫描器 / 盗刷脚本以为是真实的 Cloudflare 边缘在拦截，从而放弃进一步探测。
  *
  * 遵循伪装页设计要点（见文件头）：
- *  - 无 Ray ID / 无域名 / 无 host 指纹；
+ *  - 无域名 / 无 host 指纹；
  *  - 无 Click-to-reveal IP 等 JS 交互（静态页，可被边缘稳定长缓存、零失败面）；
- *  - 大区为固定占位（真实 CF 风格的边缘节点代码），不暴露任何配置信息；
- *  - 内联样式，无外部依赖、无外部可观测信号。
+ *  - 所有可辨识字段（Ray ID / 大区）采用「固定但格式真实」的占位值：
+ *    真实 CF 每次请求 Ray ID 不同，但本伪装页依赖长 CDN 缓存省 Workers 配额，
+ *    故用固定值以保证缓存命中；取值刻意写成真实 CF 的 16 位 hex / 机场码形态，
+ *    外观与真实页无差异，又不泄露任何配置信息；
+ *  - 内联样式，无外部依赖、无外部可观测信号；
+ *  - `Server` 响应头同步为 `cloudflare`（见 staticDisguise），与页面语义自洽，
+ *    避免出现「页面声称 CF、响应头却是 nginx」的致命指纹矛盾。
  *
  * 注意：本页与 src/errorPage.js 的 buildErrorPage（异常兜底页，带随机 Ray ID / IP reveal）
  * 用途不同——disguise 必须「静态 + 可缓存 + 零失败」，故不复用，独立维护此静态版。
@@ -63,7 +72,7 @@ const STATIC_HTML = `<!DOCTYPE html>
       .cell{flex:1 1 33%;min-width:200px;padding:1rem;text-align:center}
       .ok{color:#16a34a}.err{color:#dc2626}
       h2{font-size:1.25rem;font-weight:400;margin:.5rem 0}
-      .meta{border-top:1px solid #eee;margin-top:1.5rem;padding-top:1rem;font-size:.8rem;color:#6b7280}
+      .cf-error-footer{margin-top:1.5rem;padding-top:1rem;border-top:1px solid #eee;font-size:.8rem;color:#6b7280}
     </style>
 </head>
 
@@ -76,6 +85,7 @@ const STATIC_HTML = `<!DOCTYPE html>
                     <span class="code-label">Error code 502</span>
                 </h1>
                 <div>Visit <a href="https://www.cloudflare.com/5xx-error-landing?utm_source=errorcode_502" target="_blank" rel="noopener noreferrer">cloudflare.com</a> for more information.</div>
+                <div class="mt-3">2026-08-15 12:00:00 UTC</div>
             </header>
 
             <div class="grid">
@@ -104,8 +114,8 @@ const STATIC_HTML = `<!DOCTYPE html>
                 <p>Please try again in a few minutes.</p>
             </div>
 
-            <div class="meta">
-                Cloudflare Ray ID: <strong>0000000000000000</strong>
+            <div class="cf-error-footer">
+                Cloudflare Ray ID: <strong>8a2c4f1e9b3d7c05</strong>
                 <span> &bull; </span>
                 Performance &amp; security by
                 <a rel="noopener noreferrer" href="https://www.cloudflare.com/5xx-error-landing?utm_source=errorcode_502" target="_blank">Cloudflare</a>
@@ -183,8 +193,8 @@ export async function renderDisguise(ctx, disguise) {
 function staticDisguise(status, dg) {
   const code = Number.isInteger(status) && status >= 200 && status <= 599 ? status : 200;
   const maxAge = dg?.cdnMaxAge ?? 86400;
-  // 伪装成普通 nginx 的服务端指纹：Server 名取自引擎常量 DISGUISE_SERVER_NAME（'nginx'），
-  // 属引擎内部量，不作为可配项。
+  // 服务端指纹与页面语义自洽：Server 名取自引擎常量 DISGUISE_SERVER_NAME（'cloudflare'），
+  // 与仿 CF 拦截页一致，避免「页面 CF、头 nginx」的致命指纹矛盾。
   const serverName = DISGUISE_SERVER_NAME;
   return new Response(STATIC_HTML, {
     status: code,
@@ -245,8 +255,8 @@ async function proxyDisguise(ctx, target, dg, proxyUA) {
     const body = new TextDecoder().decode(buf);
     const ct = upstream.headers.get('content-type');
     const maxAge = dg?.cdnMaxAge ?? 86400;
-    // 伪装成普通 nginx 的服务端指纹：Server 名取自引擎常量 DISGUISE_SERVER_NAME（'nginx'），
-    // 属引擎内部量，不作为可配项。
+    // 服务端指纹与页面语义自洽：Server 名取自引擎常量 DISGUISE_SERVER_NAME（'cloudflare'），
+    // 与仿 CF 拦截页一致，避免「页面 CF、头 nginx」的致命指纹矛盾。
     const serverName = DISGUISE_SERVER_NAME;
 
     const headers = {
