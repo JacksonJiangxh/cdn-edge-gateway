@@ -54,20 +54,21 @@ export   function statusTtlEditor(initial) {
     };
 
     const addRow = (code, ttl) => {
-      const codeInput = el('input', {
-        class: 'input st-code',
-        value: code || '',
-        placeholder: '404 / 4xx / 52x',
-      });
-      // 状态码单选分组下拉（参照「文件后缀」的触发框 + 分组面板风格，但为单选：
-      // 每行一个映射，点击候选即把该码填入本行输入框，不拼接、不清空其他行）。
+      // 状态码「可输入可下拉」组合框：既支持手输精确码/通配，也可点箭头从分组面板选。
+      // 该组合框本身即输入框（class 含 st-code 供 validate/read 统一取值），无需再并列独立框。
+      // codeInput 先声明为 null：singleSelectPanel 初始化期会同步调用 getValue（此时尚为 null，
+      // 返回空串即可），picker 建好后再指向其真实 input，避免引用未初始化的 picker 触发 TDZ。
+      let codeInput = null;
       const picker = singleSelectPanel({
         groups: STATUS_PATTERN_GROUPS,
-        placeholder: '选状态码',
-        getValue: () => codeInput.value,
-        setValue: (v) => { codeInput.value = v; codeInput.dispatchEvent(new Event('input')); },
+        placeholder: '404 / 4xx / 52x',
+        getValue: () => (codeInput ? codeInput.value : ''),
+        setValue: (v) => { if (codeInput) { codeInput.value = v; validate(); } },
       });
-      codeInput.addEventListener('input', () => { validate(); picker.syncFromInput(); });
+      codeInput = picker.input;
+      codeInput.classList.add('st-code');
+      const pickerEl = picker.combobox;
+
       const ttlInput = el('input', {
         class: 'input st-ttl',
         type: 'number',
@@ -88,8 +89,7 @@ export   function statusTtlEditor(initial) {
       syncTtlHint();
 
       const row = el('div', { class: 'kv-row' }, [
-        codeInput,
-        picker.trigger,
+        pickerEl,
         el('div', { class: 'kv-val' }, [ttlInput, ttlHint]),
         el('button', {
           class: 'btn btn-sm btn-danger',

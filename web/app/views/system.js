@@ -139,7 +139,7 @@ export   async function renderSystem() {
       el('h4', {}, '全局配置'),
       el('div', { class: 'form-stack', id: 'global-form' }, [
         field('管理面路径', gAdminPath, '留空表示沿用当前已保存的值。'),
-        field('自定义面板域名', gAdminDomain, '留空=任意绑定域名均可进管理面板（兼容旧逻辑）；填写后仅此域名 + 管理面路径可进入，规避探测与越界。'),
+        field('自定义面板域名', gAdminDomain, '留空=任意绑定域名均可进管理面板；填写后仅此域名 + 管理面路径可进入，规避探测与越界。'),
         field('Token 有效期（秒）', gTokenTtl, '留空表示沿用当前已保存的值。'),
         field('配置缓存 TTL（秒）', gConfigCacheTtl, '留空表示沿用当前已保存的值。'),
         field('全局限流（req/s）⚠️实验特性', gGlobalRateLimit, '⚠️ 实验特性（待开发）：全局请求频率上限，0 表示不限制；最少 10 req/s。当前为实验阶段，不建议生产依赖。'),
@@ -175,7 +175,7 @@ export   async function renderSystem() {
                 return String(v) !== String(saved[k]);
               });
               if (adjusted.length) {
-                toast('已保存，但部分值被后端修正：' + adjusted.join('、'), 'warn');
+                toast('已保存，但部分值被系统自动修正：' + adjusted.join('、'), 'warn');
               } else {
                 toast('已保存全局配置', 'ok');
               }
