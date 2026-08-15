@@ -206,7 +206,11 @@ export
         field('仓库归属（repoUser）', repoUserIn, 'cnb=组织/用户；github=owner。'),
         field('仓库名（repoName）', repoNameIn, '不含 .git 后缀、不含组织前缀。'),
         field('分支（repoBranch）', repoBranchIn, '映射到 raw URL 的 ref 段，默认 main。'),
-        field('是否私有仓库（repoPrivate）', repoPrivateIn, '勾选=私有（注入 Authorization 鉴权）；不勾=公开（匿名回源，可不填 token）。'),
+        el('div', { class: 'field' }, [
+          el('label', {}, '是否私有仓库（repoPrivate）'),
+          el('label', { class: 'check' }, [repoPrivateIn, el('span', { text: '勾选=私有（注入 Authorization 鉴权）；不勾=公开（匿名回源，可不填 token）' })]),
+          el('div', { class: 'field-hint muted', text: '' }),
+        ]),
         field('访问令牌（token）', repoTokenIn, '加密后落盘（每站独立）。公开仓库可留空；编辑时留空表示不改。'),
       ]);
       // 回源连接参数（协议/端口/引擎/Host）属于整池物理默认；⑨ Origin Rules
