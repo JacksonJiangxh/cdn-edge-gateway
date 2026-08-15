@@ -67,6 +67,9 @@ export   function statusTtlEditor(initial) {
       });
       codeInput = picker.input;
       codeInput.classList.add('st-code');
+      // 把初始值回填到 combobox 输入框（singleSelectPanel 内部创建 input 时 getValue
+      // 因 codeInput 尚未赋值而返回空串，所以需在此处显式写入后端数据中的状态码）。
+      if (code) { codeInput.value = code; }
       const pickerEl = picker.combobox;
 
       const ttlInput = el('input', {
