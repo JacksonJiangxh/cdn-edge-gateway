@@ -200,15 +200,16 @@ export
       const repoNameIn = el('input', { class: 'input o-repo-name', value: o.repoName || '', placeholder: '仓库名（不含 .git）' });
       const repoBranchIn = el('input', { class: 'input o-repo-branch', value: o.repoBranch || 'main', placeholder: '分支，默认 main' });
       const repoPrivateIn = el('input', { class: 'input o-repo-private', type: 'checkbox', checked: !!o.repoPrivate });
-      const repoTokenIn = el('input', { class: 'input o-repo-token', type: 'password', value: o._tokenPlain || '', placeholder: '访问令牌（公开仓库可留空）' });
+      const hasStoredToken = !!(o.cnbTokenEnc || o.githubTokenEnc);
+      const repoTokenIn = el('input', { class: 'input o-repo-token', type: 'password', value: '', placeholder: hasStoredToken ? '已设置加密 token，留空表示不改' : '访问令牌（公开仓库可留空）' });
       const repoFields = el('div', { class: 'o-repo-fields' }, [
         field('仓库归属（repoUser）', repoUserIn, 'cnb=组织/用户；github=owner。'),
         field('仓库名（repoName）', repoNameIn, '不含 .git 后缀、不含组织前缀。'),
         field('分支（repoBranch）', repoBranchIn, '映射到 raw URL 的 ref 段，默认 main。'),
         el('div', { class: 'field' }, [
           el('label', {}, '是否私有仓库（repoPrivate）'),
-          el('label', { class: 'check' }, [repoPrivateIn, el('span', { text: '勾选=私有（注入 Authorization 鉴权）；不勾=公开（匿名回源，可不填 token）' })]),
-          el('div', { class: 'field-hint muted', text: '' }),
+          el('label', { class: 'check' }, [repoPrivateIn]),
+          el('div', { class: 'field-hint muted' }, '勾选=私有（注入 Authorization 鉴权）；不勾=公开（匿名回源，可不填 token）'),
         ]),
         field('访问令牌（token）', repoTokenIn, '加密后落盘（每站独立）。公开仓库可留空；编辑时留空表示不改。'),
       ]);

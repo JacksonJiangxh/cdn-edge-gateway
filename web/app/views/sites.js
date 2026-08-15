@@ -74,6 +74,7 @@ export   async function openSiteDrawer(host, anchor) {
     // ── ② 默认源站（仅新建时出现）────────────────────────────────────
     // 新建站点时必须绑定一个源站；可选「填写域名/IP」（自动创建单一源站）或「选择已有源站」
     let fOriginMode, fPoolSel, fAddr, fPort, fScheme, fEngine, fR2Binding, fHostMode, fHostCustom;
+    let fRepoUser, fRepoName, fRepoBranch, fRepoPrivate, fRepoToken;
     if (!editing) {
       const poolOptions = buildPoolOptions();
       fOriginMode = select('f-origin-mode', [
@@ -119,16 +120,20 @@ export   async function openSiteDrawer(host, anchor) {
       const hostCustomField = field('回源 Host 自定义值', fHostCustom, '仅用于回源请求的 Host 头，与站点配置的「加速域名」无关。');
 
       // ---- cnb / github 仓库型引擎专用字段（仅引擎选 cnb/github 时显示）----
-      const fRepoUser = el('input', { class: 'input f-repo-user', value: '', placeholder: '组织 / owner' });
-      const fRepoName = el('input', { class: 'input f-repo-name', value: '', placeholder: '仓库名（不含 .git）' });
-      const fRepoBranch = el('input', { class: 'input f-repo-branch', value: 'main', placeholder: '分支，默认 main' });
-      const fRepoPrivate = el('input', { class: 'input f-repo-private', type: 'checkbox', checked: false });
-      const fRepoToken = el('input', { class: 'input f-repo-token', type: 'password', value: '', placeholder: '访问令牌（公开仓库可留空）' });
+      fRepoUser = el('input', { class: 'input f-repo-user', value: '', placeholder: '组织 / owner' });
+      fRepoName = el('input', { class: 'input f-repo-name', value: '', placeholder: '仓库名（不含 .git）' });
+      fRepoBranch = el('input', { class: 'input f-repo-branch', value: 'main', placeholder: '分支，默认 main' });
+      fRepoPrivate = el('input', { class: 'input f-repo-private', type: 'checkbox', checked: false });
+      fRepoToken = el('input', { class: 'input f-repo-token', type: 'password', value: '', placeholder: '访问令牌（公开仓库可留空）' });
       const repoFields = el('div', { class: 'f-repo-fields' }, [
         field('仓库归属（repoUser）', fRepoUser, 'cnb=组织/用户；github=owner。'),
         field('仓库名（repoName）', fRepoName, '不含 .git 后缀、不含组织前缀。'),
         field('分支（repoBranch）', fRepoBranch, '映射到 raw URL 的 ref 段，默认 main。'),
-        field('是否私有仓库（repoPrivate）', fRepoPrivate, '勾选=私有（注入 Authorization 鉴权，回源到 api.cnb.cool）；不勾=公开（走 cnb.cool 公网，可不填 token）。'),
+        el('div', { class: 'field' }, [
+          el('label', {}, '是否私有仓库（repoPrivate）'),
+          el('label', { class: 'check' }, [fRepoPrivate]),
+          el('div', { class: 'field-hint muted' }, '勾选=私有（注入 Authorization 鉴权，回源到 api.cnb.cool）；不勾=公开（走 cnb.cool 公网，可不填 token）。'),
+        ]),
         field('访问令牌（token）', fRepoToken, '加密后落盘（每站独立）。公开仓库可留空；编辑时留空表示不改。'),
       ]);
 
