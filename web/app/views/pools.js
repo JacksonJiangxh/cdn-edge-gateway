@@ -221,7 +221,9 @@ export
       // 该字段只有 socket 引擎能真正生效，故仅 socket 时显示。
       const hostNote = el('div', { class: 'hint', text: 'fetch 引擎下该 Host 由回源地址决定、无法自定义；如需自定义 Host 请把引擎改为 socket。' });
       // 别名（仅展示用，方便在列表里区分）
-      const nameField = field('别名（选填）', el('input', { class: 'input o-name', value: o.name || '', placeholder: '如 主站 / 北京备份' }), '给自己看的备注，不写则回显为地址。');
+      // 源站名称（折叠时显示在标题行；对标规则卡「规则名称」）
+      const nameInput = el('input', { class: 'input o-name', value: o.name || '', placeholder: '如 主站 / 北京备份' });
+      const nameField = field('源站名称', nameInput, '给这台源站起个一眼能看懂的名字，会显示在折叠后的标题行。');
       // 权重仅在「加权」调度策略下生效，其余策略隐藏（syncWeight 在策略下拉建好后统一调用）
       const weightField = field('权重（加权/轮询/链式策略生效）', el('input', { class: 'input o-weight', type: 'number', value: o.weight || 1 }), '默认 1 即可。weighted 严格按权重平滑分配；roundrobin 配了权重即生效；chain 用 order 派生权重、显式填了则优先按此权重。');
       weightFields.push(weightField);
@@ -241,16 +243,17 @@ export
         hostNote.style.display = eng === 'fetch' ? '' : 'none';
       };
       engineSel.onchange = syncEngine;
-      // —— 整行可折叠（仿规则卡 opNode）：折叠态仅显示别名+删除，展开才显全部 ——
-      const nameInput = nameField.querySelector('input');
-      // 折叠态标题行：grip + 别名 + 删除
-      const titleRow = el('div', { class: 'origin-title' }, [
-        el('span', { class: 'origin-grip tw', text: '▸' }),
-        el('span', { class: 'origin-name-label', text: o.name || o.addr || '(未命名)' }),
+      // —— 整行可折叠（严格照规则卡 rule-card：header 常驻显示名称，detail 里才是名称/备注输入框）——
+      const isExisting = !!(o && o.id);
+      const nameLabel = el('span', { class: 'origin-name-label', text: o.name || o.addr || (isExisting ? '（未命名源站）' : '新建源站') });
+      const head = el('div', { class: 'origin-head' }, [
+        el('span', { class: 'origin-grip', text: '⠿', title: '拖拽调整优先级（上=优先）' }),
+        el('span', { class: 'origin-tw', text: '▸' }),
+        nameLabel,
         el('button', { class: 'btn btn-sm btn-danger', text: '移除源站', onclick: (e) => { e.stopPropagation(); row.remove(); } }),
       ]);
-      // 展开态内容：引擎(第一行) → 地址(第二行) → 高级字段(折叠在 subcard 里)
-      const body = el('div', { class: 'section-body origin-body' }, [
+      const body = el('div', { class: 'origin-detail' }, [
+        nameField,
         field('引擎类型', engineSel, '先选引擎，下方地址格式与字段随之变化：① fetch=标准 HTTP 回源；② socket=已弃用；③ r2=回源到 R2 桶（仅 CF）；④ cnb/github=仓库型引擎（自动生成重写+请求头规则）。可被⑨规则覆盖。'),
         addrField,
         portField,
@@ -262,22 +265,18 @@ export
         weightField,
         overrideHint,
       ]);
-      const row = el('div', { class: 'subcard origin-card' }, [ titleRow, body ]);
-      // 默认折叠——多源站时列表紧凑，折叠态只露别名
-      row.classList.add('collapsed');
-      // 点标题行切换折叠；输入控件上的点击不触发
-      titleRow.onclick = (e) => { if (e.target.closest('button')) return; row.classList.toggle('collapsed'); };
-      // 折叠/展开时同步箭头方向 + 标题文字（用户改了别名也要实时更新）
-      const refreshTitle = () => {
-        titleRow.querySelector('.tw').textContent = row.classList.contains('collapsed') ? '▸' : '▾';
-        titleRow.querySelector('.origin-name-label').textContent = nameInput.value.trim() || addrInput.value.trim() || '(未命名)';
+      const row = el('div', { class: 'subcard origin-card' + (isExisting ? ' collapsed' : ''), id: 'o-' + (o.id || 'new') }, [ head, body ]);
+      // 点 header 折叠/展开（删除按钮已 stopPropagation，不会误触）
+      head.onclick = () => row.classList.toggle('collapsed');
+      // 折叠/展开时同步箭头方向 + 名称 label 实时跟随「源站名称」输入框
+      const refresh = () => {
+        head.querySelector('.origin-tw').textContent = row.classList.contains('collapsed') ? '▸' : '▾';
+        nameLabel.textContent = nameInput.value.trim() || addrInput.value.trim() || (isExisting ? '（未命名源站）' : '新建源站');
       };
-      // 用 MutationObserver 监听 collapsed 类变化来刷新箭头
-      new MutationObserver(refreshTitle).observe(row, { attributes: true, attributeFilter: ['class'] });
-      // 用户手输别名/地址时也实时更新折叠标题
-      nameInput.addEventListener('input', refreshTitle);
-      addrInput.addEventListener('input', refreshTitle);
-      refreshTitle();
+      new MutationObserver(refresh).observe(row, { attributes: true, attributeFilter: ['class'] });
+      nameInput.addEventListener('input', refresh);
+      addrInput.addEventListener('input', refresh);
+      refresh();
       // 回显时根据已有 engine 显隐 R2 字段 + 地址提示
       syncEngine();
       originList.appendChild(row);
@@ -381,6 +380,7 @@ export
               ? (engine + '_' + $('.o-repo-name', row).value.trim())
               : addr),
           enabled: true, order: i, weight: Number($('.o-weight', row).value) || 1,
+          name: ($('.o-name', row).value || '').trim(),
           engine,
           scheme: $('.o-scheme', row) ? $('.o-scheme', row).value : 'https',
           addr: (engine === 'r2' || isRepo) ? '' : addr,

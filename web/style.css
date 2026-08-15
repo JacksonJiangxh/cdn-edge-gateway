@@ -930,19 +930,35 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
 /* 来源站高级配置里嵌套的 subcard 缩进视觉 */
 .origin-row .subcard { margin: 10px 0; }
 
-/* 源站行（仿规则卡 opNode）：折叠态仅露别名标题，展开显全部字段 */
-.origin-card { margin: 10px 0; }
-/* 折叠态标题行：grip箭头 + 别名 + 删除按钮，一行紧凑 */
-.origin-title { display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer; user-select: none; }
-.origin-title:hover { background: var(--panel-2); }
-.origin-title .origin-grip { color: var(--text-mute); font-size: 13px; line-height: 1; flex-shrink: 0; transition: transform .15s; }
-.origin-card.collapsed .origin-grip { transform: rotate(0deg); }
-.origin-card:not(.collapsed) .origin-grip { transform: rotate(90deg); }
-.origin-name-label { flex: 1; font-weight: 500; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.origin-title .btn-danger { flex-shrink: 0; opacity: 0.7; }
-.origin-title .btn-danger:hover { opacity: 1; }
-/* 展开内容区 */
-.origin-body > .field { margin-bottom: 8px; }
+/* 源站行：严格照规则卡 rule-card 模式（折叠态只显示名称，展开显详情） */
+.origin-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  overflow: hidden;
+  margin: 10px 0;
+}
+.origin-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+  flex-wrap: wrap;
+  cursor: pointer;
+  user-select: none;
+}
+.origin-grip { flex: 0 0 auto; font-size: 15px; line-height: 1; color: var(--text-mute); cursor: grab; user-select: none; padding: 0 2px; border-radius: 5px; }
+.origin-grip:hover { color: var(--primary); background: var(--panel-2); }
+.origin-tw { font-size: 10px; color: var(--text-mute); transition: transform .15s; flex: 0 0 auto; }
+.origin-name-label { font-weight: 600; font-size: 14px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
+.origin-card.collapsed .origin-tw { transform: rotate(0deg); }
+.origin-card:not(.collapsed) .origin-tw { transform: rotate(90deg); }
+.origin-card.collapsed .origin-detail { display: none; }
+.origin-card:not(.collapsed) .origin-detail { display: block; }
+.origin-detail { padding: 12px; }
+.origin-detail > .field { margin-bottom: 10px; }
 
 /* 站点抽屉内的「直接填写源站」内联编辑区 */
 .inline-origin-box {
