@@ -64,7 +64,7 @@ export const TEMPLATE_PARAM_META = Object.freeze({
   }),
   errorTtl: Object.freeze({
     label: '错误页缓存时间',
-    hint: '源站返回 4xx/5xx（400/401/403/404/405/500/502/503/504）时缓存这么久，挡住对不存在的资源或故障源站的反复穿透。几秒就够了，设 0 不缓存。',
+    hint: '给 4xx/5xx 错误页也加短暂边缘缓存，挡住对不存在资源或故障源站的反复穿透。底层直接生成 statusTtl 的「4xx/5xx 段通配 → 该秒数」（项目字段已原生支持段通配与 ! 例外，无需逐码枚举）。几秒就够了，设 0 不缓存（回落到全站默认的 4xx/5xx/52x 不缓存基线）。',
     unit: 's',
     min: 0,
     max: 3600,
@@ -110,16 +110,6 @@ const EXT_DYNAMIC = Object.freeze(['php', 'jsp', 'asp', 'aspx', 'do', 'dwr', 'cg
  * 此全集即 EXT_ASSET，集中在此导出，避免前端与后端各持一份、改一处漏一处。
  */
 export const EXTENSION_PRESETS = EXT_ASSET;
-
-/**
- * 生产环境最常用的错误状态码子集——前端「错误页缓存（码:秒）」的候选码值来源。
- * 这些码代表「客户端非法 / 鉴权失败 / 资源缺失 / 服务端故障」，可短时缓存以挡住
- * 对源站的重复穿透。导出供前端作为候选，与模板 statusTtlOf 枚举保持一致。
- */
-export const ERROR_CODE_PRESETS = Object.freeze([
-  400, 401, 403, 404, 405, 406, 408, 409, 410, 412, 413, 415, 422, 429,
-  500, 502, 503, 504,
-]);
 
 /**
  * 站点场景模板。
@@ -378,28 +368,26 @@ function prefixCond(p) {
 }
 
 /**
- * 由「错误页缓存时间」参数生成 statusTtl 映射，覆盖常见 4xx/5xx 状态码。
- * 枚举采用生产环境最常用子集（见 HTTP 4xx~5xx 状态码清单）：
- *   400 401 403 404 405 406 408 409 410 412 413 415 422 429 500 502 503 504
- * 这些码代表「客户端非法 / 鉴权失败 / 资源缺失 / 服务端故障」，可短时缓存以挡住对源站的重复穿透。
+ * 由「错误页缓存时间」参数生成 statusTtl 映射。
  *
- * 值为 0 的项直接不写入——0 在 statusTtl 里语义含糊（缓存 0 秒 ≈ 不缓存），
- * 省略掉可让最终配置更干净，也更贴合「克制」原则。
+ * 直接利用项目 statusTtl 字段原生支持的「段通配」能力（4xx/5xx/52x，
+ * 见 contracts.js 的 STATUS_PATTERN_RE），一次性覆盖整段错误码，而非逐个
+ * 枚举 400/401/403/404… 这类易遗漏、难维护的清单。新增状态码天然命中段，
+ * 无需回头补枚举。
+ *
+ * 语义对齐全站默认：全站 cache 阶段默认 `{'4xx':0,'5xx':0,'52x':0}`（错误码一律
+ * 不缓存）。此处用 `{'4xx':ttl,'5xx':ttl}` 给错误页**开**短暂缓存（挡穿透），
+ * 属于对全站基线的「精细正向覆盖」，52x 仍保持不缓存（边缘网关扩展错误码，缓存意义低）。
+ *
+ * 值为 0 时返回 {} —— 不写任何项，回落到全站默认的「错误码不缓存」基线，
+ * 让最终配置更干净，也避免与全站默认值产生重复声明。
  * @param {Object} p 最终参数
  * @returns {Record<string, number>}
  */
 function statusTtlOf(p) {
   const ttl = Number(p?.errorTtl) || 0;
   if (ttl <= 0) return {};
-  /** 生产最常用错误码子集（仅枚举纳入，缓存时长一律由 errorTtl 参数决定，不采用外部时长建议）。 */
-  const CACHEABLE_ERROR_STATUSES = Object.freeze([
-    400, 401, 403, 404, 405, 406, 408, 409, 410, 412, 413, 415, 422, 429,
-    500, 502, 503, 504,
-  ]);
-  /** @type {Record<string, number>} */
-  const out = {};
-  for (const c of CACHEABLE_ERROR_STATUSES) out[String(c)] = ttl;
-  return out;
+  return Object.freeze({ '4xx': ttl, '5xx': ttl });
 }
 
 /**

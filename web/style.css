@@ -1203,12 +1203,17 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
 .cond-rows { display: flex; flex-direction: column; gap: 6px; }
 
 /* 匹配对象 | 键名 | 操作符 | 值 | Aa | × */
+/* 条件行用 grid 布局，顶对齐避免某列下方带说明文字时其它列被上移错位 */
 .cond-row {
   display: grid;
   grid-template-columns: minmax(120px, 1.1fr) minmax(0, 0.9fr) minmax(110px, 1fr) minmax(0, 1.6fr) auto auto;
   gap: 6px;
-  align-items: center;
+  align-items: flex-start;
 }
+/* 行内动作控件（删除 ×、复选框等）单独垂直居中，避免贴着顶部与输入框第一行错位 */
+.cond-row > .btn,
+.cond-row > .check,
+.cond-row > label.check-wrap { align-self: center; }
 .cond-row .input { min-width: 0; }
 .cond-cell { min-width: 0; }
 .cond-row .check { padding: 4px 8px; }
