@@ -24,6 +24,7 @@
  */
 
 import { getKV } from '../platform/kv.js';
+import { hourKey } from '../utils/hourKey.js';
 
 /** 分片数量。契约规定 0-7。 */
 const SHARD_COUNT = 8;
@@ -71,7 +72,7 @@ const MAX_SHARD_READS_PER_QUERY = SHARD_COUNT * 3;
  * 把时间戳格式化为 `yyyymmddhh`（UTC）。
  * 统一用 UTC，避免不同边缘节点时区不一致导致同一小时被写进两个桶。
  * @param {number} [ts] 时间戳（ms），缺省为当前时间
-import { hourKey } from '../utils/hourKey.js';
+ */
 
 /**
  * 规整 host，防止非法字符污染 KV 键空间。

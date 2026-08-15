@@ -15,10 +15,10 @@
  * ============================================================================
  */
 
+import { hourKey } from '../utils/hourKey.js';
+
 /** 聚合表名。 */
 const TABLE = 'stats_hourly';
-
-import { hourKey } from '../utils/hourKey.js';
 
 /** 建表语句是否已在本 isolate 内执行过（避免每次 flush 都跑一遍 DDL）。 */
 let schemaReady = false;
