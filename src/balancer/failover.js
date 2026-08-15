@@ -157,20 +157,19 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
     ctx.debug.originId = origin.id;
     ctx.debug.originAddr = `${origin.addr}:${origin.port || (origin.scheme === 'http' ? 80 : 443)}`;
 
-    const mergedRewrite = mergeRewrite(origin.rewrite, ra.rewrite);
-    const mergedReqHeaders = mergeHeaderOps(origin.reqHeaders, ra.reqHeaders);
-    const mergedClientIpHeader = mergeClientIpHeader(origin.clientIpHeader, ruleOrigin.clientIpHeader);
+    // 源站对象已不再承载任何流量序列字段（rewrite/头/超时/跟随），全部由规则层
+    // （rule.action）提供。这里只使用规则层值，origin 参数传 undefined 表示无源站级覆盖。
+    const mergedRewrite = mergeRewrite(undefined, ra.rewrite);
+    const mergedReqHeaders = mergeHeaderOps(undefined, ra.reqHeaders);
+    const mergedClientIpHeader = mergeClientIpHeader(undefined, ruleOrigin.clientIpHeader);
 
-    const originTimeout = Number(origin.originTimeoutMs) || 0;
     const ruleTimeout = Number(ruleOrigin.originTimeoutMs) || 0;
     // 单次尝试超时：受剩余预算约束（最后一次用尽剩余预算），至少 500ms
     const remaining = budget - (Date.now() - startTs);
-    const baseTimeout = ruleTimeout > 0 ? ruleTimeout : originTimeout > 0 ? originTimeout : poolTimeout;
+    const baseTimeout = ruleTimeout > 0 ? ruleTimeout : poolTimeout;
     const timeoutMs = Math.min(baseTimeout, Math.max(500, remaining));
 
-    const followRedirect = ruleOrigin.followRedirect !== undefined
-      ? ruleOrigin.followRedirect === true
-      : origin.followRedirect === true;
+    const followRedirect = ruleOrigin.followRedirect === true;
 
     const effectiveRule = { action: { rewrite: mergedRewrite } };
     const originHostHeader = resolveHostHeader(rule?.action?.hostHeader, origin.hostHeader, hostHeader);

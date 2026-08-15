@@ -64,12 +64,11 @@ export function buildRepoPresetRules(engine, opts = {}) {
   const branch = opts.repoBranch || 'main';
   const isPrivate = !!opts.repoPrivate;
 
-  // 匹配条件：池场景用 originId（源站 id）区分；单源站站点用 host 区分。
+  // 匹配条件：仅池场景（一个域名多个后端）需要 originId 区分各源站；
+  // 单源站站点域名第一步已匹配，留空即「匹配所有」，避免冗余的 host 条件。
   let matchConditions = [];
   if (opts.originId) {
     matchConditions = [{ target: 'origin', op: 'equal', values: [opts.originId] }];
-  } else if (opts.host) {
-    matchConditions = [{ target: 'host', op: 'equal', values: [opts.host] }];
   }
   const match = { conditions: [matchConditions] };
 

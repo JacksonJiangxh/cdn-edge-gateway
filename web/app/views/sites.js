@@ -298,7 +298,6 @@ export   async function openSiteDrawer(host, anchor) {
             repoName: origin.repoName,
             repoBranch: origin.repoBranch,
             repoPrivate: origin.repoPrivate,
-            host: h,
           });
           mergedRules.push(preset.rewrite, preset.respHeaders);
           if (preset.reqHeaders) mergedRules.push(preset.reqHeaders);
@@ -445,11 +444,11 @@ export   async function openInitialOriginDrawer(host, anchor) {
       syncHost();
       syncEngine();
       // 本抽屉只负责「③ 初始回源对象」这一包：地址/端口/协议/前缀/Host/引擎/权重。
-      // 源站级的 rewrite/cache/reqHeaders/respHeaders/超时/跟随3xx 属于 ⑨ / ⑪ / ⑭，
-      // 由「路由规则」「源站池」抽屉各自管理；这里原样保留，保存时回写，绝不越界改写。
+      // 源站对象已不再承载任何流量序列字段（rewrite/cache/reqHeaders/respHeaders/
+      // 超时/跟随3xx 等全部由「全站规则 + 站点规则」两层承载），这里只保留真正的
+      // 回源元数据 extraHeaders（前端不编辑但需防丢），保存时回写，绝不越界改写流量字段。
       row._carry = {};
-      ['rewrite', 'cache', 'reqHeaders', 'respHeaders', 'originTimeoutMs', 'followRedirect', 'extraHeaders']
-        .forEach((k) => { if (o[k] !== undefined) row._carry[k] = o[k]; });
+      if (o.extraHeaders !== undefined) row._carry.extraHeaders = o.extraHeaders;
       inlineOriginList.appendChild(row);
     };
     // 单一源站恰好一行地址，不再回显站点内联数组（该概念已废弃）

@@ -1266,19 +1266,8 @@ function normR2Origin(input, idx, label, errors) {
     else if (!r.value) errors.push(`${label} r2KeyMode='regex' 时必须填写 r2KeyPrefixRule`);
   }
 
-  // 公共基础字段（与 normOrigin 对齐，便于下游统一处理）
-  const rewrite = normRewrite(input.rewrite);
-  errors.push(...rewrite.errors);
-  const reqHeaders = normHeaderOps(input.reqHeaders, `${label} reqHeaders`);
-  errors.push(...reqHeaders.errors);
-  const respHeaders = normHeaderOps(input.respHeaders, `${label} respHeaders`);
-  errors.push(...respHeaders.errors);
-  const cache = normCachePolicy(input.cache);
-  const followRedirect = bool(input.followRedirect, DEFAULT_ORIGIN.followRedirect);
-  const originTimeoutMs = int(input.originTimeoutMs, DEFAULT_ORIGIN.originTimeoutMs, 0, 60000);
-  const clientIpHeader = normClientIpHeader(input.clientIpHeader, `${label} clientIpHeader`);
-  errors.push(...clientIpHeader.errors);
-
+  // R2 不接受源站级流量序列字段（rewrite/头/cache/超时/跟随），全部由规则层承载；
+  // 源站对象只描述回源目标与 R2 引擎参数。
   // R2 下 hostHeader 固定为 inherit（无公网 Host 概念），scheme/addr/port 留占位
   return {
     value: {
@@ -1294,13 +1283,6 @@ function normR2Origin(input, idx, label, errors) {
       extraHeaders: Object.freeze({}),
       hostHeader: { mode: 'inherit', custom: '' },
       sni: null,
-      rewrite: rewrite.value,
-      reqHeaders: reqHeaders.value,
-      respHeaders: respHeaders.value,
-      cache,
-      followRedirect,
-      originTimeoutMs,
-      clientIpHeader: clientIpHeader.value,
       r2Binding: binding,
       r2KeyPrefix: keyPrefix,
       r2KeyMode: keyMode,
@@ -1341,19 +1323,8 @@ function normRepoOrigin(input, idx, label, errors, engine) {
   if (!repoUser) errors.push(`${label} engine='${engine}' 时必须填写仓库归属（repoUser）`);
   if (!repoName) errors.push(`${label} engine='${engine}' 时必须填写仓库名（repoName）`);
 
-  // 公共基础字段（与 normOrigin 对齐，便于下游统一处理）
-  const rewrite = normRewrite(input.rewrite);
-  errors.push(...rewrite.errors);
-  const reqHeaders = normHeaderOps(input.reqHeaders, `${label} reqHeaders`);
-  errors.push(...reqHeaders.errors);
-  const respHeaders = normHeaderOps(input.respHeaders, `${label} respHeaders`);
-  errors.push(...respHeaders.errors);
-  const cache = normCachePolicy(input.cache);
-  const followRedirect = bool(input.followRedirect, DEFAULT_ORIGIN.followRedirect);
-  const originTimeoutMs = int(input.originTimeoutMs, DEFAULT_ORIGIN.originTimeoutMs, 0, 60000);
-  const clientIpHeader = normClientIpHeader(input.clientIpHeader, `${label} clientIpHeader`);
-  errors.push(...clientIpHeader.errors);
-
+  // 仓库型源站「不承载」任何流量序列字段（rewrite/头/cache/超时/跟随），这些全部由
+  // 站点规则层（新建站点时按源站 id 生成的 repo-* 规则）承载，源站对象只保存回源元数据。
   // 回源 host/scheme/port 由引擎常量决定（repoEngine），此处填占位。
   return {
     value: {
@@ -1369,13 +1340,6 @@ function normRepoOrigin(input, idx, label, errors, engine) {
       extraHeaders: Object.freeze({}),
       hostHeader: { mode: 'inherit', custom: '' },
       sni: null,
-      rewrite: rewrite.value,
-      reqHeaders: reqHeaders.value,
-      respHeaders: respHeaders.value,
-      cache,
-      followRedirect,
-      originTimeoutMs,
-      clientIpHeader: clientIpHeader.value,
       r2Binding: '',
       r2KeyPrefix: '',
       r2KeyMode: 'none',
@@ -1450,19 +1414,8 @@ function normOrigin(input, idx) {
     );
   }
 
-  // ---- 源站级扩展回源规则（规则级同名配置优先覆盖，源站级为基础值）----
-  const rewrite = normRewrite(input.rewrite);
-  errors.push(...rewrite.errors);
-  const reqHeaders = normHeaderOps(input.reqHeaders, `${label} reqHeaders`);
-  errors.push(...reqHeaders.errors);
-  const respHeaders = normHeaderOps(input.respHeaders, `${label} respHeaders`);
-  errors.push(...respHeaders.errors);
-  const cache = normCachePolicy(input.cache);
-  const followRedirect = bool(input.followRedirect, DEFAULT_ORIGIN.followRedirect);
-  const originTimeoutMs = int(input.originTimeoutMs, DEFAULT_ORIGIN.originTimeoutMs, 0, 60000);
-  const clientIpHeader = normClientIpHeader(input.clientIpHeader, `${label} clientIpHeader`);
-  errors.push(...clientIpHeader.errors);
-
+  // ---- 源站级回源元数据已收集完毕；流量序列字段（rewrite/头/cache/超时/跟随）
+  // 全部由全站规则 + 站点规则两层承载，源站对象不再落这些字段。
   return {
     value: {
       // 源站机器 id（系统生成，用户不应自填；导入已有配置时可保留其 id 以稳定引用）。
@@ -1478,13 +1431,6 @@ function normOrigin(input, idx) {
       extraHeaders: eh.value,
       hostHeader: { mode: hhMode, custom: hhCustom },
       sni: input.sni ? str(input.sni, '', LIMITS.HOST_MAX).toLowerCase() : null,
-      rewrite: rewrite.value,
-      reqHeaders: reqHeaders.value,
-      respHeaders: respHeaders.value,
-      cache,
-      followRedirect,
-      originTimeoutMs,
-      clientIpHeader: clientIpHeader.value,
       // R2 默认占位（非 R2 引擎不生效）
       r2Binding: '',
       r2KeyPrefix: '',

@@ -289,15 +289,15 @@ async function runPipeline(ctx) {
     ctx.origin = reSelected;
     primaryOriginActual = reSelected;
   }
-  const originCache = primaryOriginActual?.cache || {};
+  // 源站对象已不再承载 cache（全交给规则层）；仅用规则层 cache 叠加默认策略。
   const ruleCache = rule?.action?.cache || {};
-  const policy = { ...DEFAULT_POLICY, ...originCache, ...ruleCache };
+  const policy = { ...DEFAULT_POLICY, ...ruleCache };
   const bypass = shouldBypassCache(ctx, policy);
 
   let cacheKey = null;
   if (!bypass && ctx.caps?.hasEdgeCache) {
-    // 合并源站级 rewrite + 规则级 rewrite 用于构造缓存键
-    const mergedRewrite = mergeRewrite(primaryOriginActual.rewrite, rule?.action?.rewrite);
+    // 合并规则级 rewrite 用于构造缓存键（源站级 rewrite 已不再存在）
+    const mergedRewrite = mergeRewrite(undefined, rule?.action?.rewrite);
     const keyUrl = buildOriginUrl(ctx, primaryOriginActual, { action: { rewrite: mergedRewrite } }, effectiveHostHeader);
     // cacheGen 是站点级的「缓存代次」，管理面执行整站清除缓存时会 +1，
     // 从而让所有旧缓存键失效（Cache API 没有按前缀批量删除的能力）
@@ -309,9 +309,8 @@ async function runPipeline(ctx) {
     const hit = await cacheMatch(ctx, cacheKey);
     if (hit) {
       ctx.debug.cache = 'HIT';
-      // 响应头改写合并：源站级打底，规则级覆盖（用实际选中的源站，而非首选）
-      const hitOrigin = pool?.origins?.find(o => o.id === ctx.debug.originId) || primaryOriginActual;
-      const mergedRespHeaders = mergeHeaderOps(hitOrigin.respHeaders, rule?.action?.respHeaders);
+      // 响应头改写合并：使用规则层（源站级 respHeaders 已不再存在）
+      const mergedRespHeaders = mergeHeaderOps(undefined, rule?.action?.respHeaders);
       const headers = await buildClientHeaders(ctx, hit, policy, mergedRespHeaders);
       recordSafely(ctx, { status: hit.status, cacheHit: 'HIT' });
       return new Response(hit.body, {
@@ -399,15 +398,9 @@ async function runPipeline(ctx) {
   }
 
   // ---- 9. 改写响应头 ----
-  // 响应头改写合并：使用 ctx 中记录的当前选中源站（在 failover 中更新），取其源站级配置
-  const currentOrigin = pool?.origins?.find(o => o.id === ctx.debug.originId) || primaryOriginActual;
-  // 缓存 TTL 按「实际选中的源站」生效：规则级 cache 优先，未配置时退回该源站级 cache。
-  // （缓存键仍用 primaryOrigin，避免改动回源前时序；同池源站 cache 通常一致，差异时以实际源站为准下发响应头）
-  const selOriginCache = currentOrigin?.cache || {};
-  if (ruleCache.enabled === undefined && selOriginCache.enabled !== undefined) policy.enabled = selOriginCache.enabled;
-  if (!ruleCache.edgeTtl && selOriginCache.edgeTtl) policy.edgeTtl = selOriginCache.edgeTtl;
-  if (!ruleCache.browserTtl && selOriginCache.browserTtl) policy.browserTtl = selOriginCache.browserTtl;
-  const mergedRespHeaders = mergeHeaderOps(currentOrigin.respHeaders, rule?.action?.respHeaders);
+  // 响应头改写合并：规则层 cache 已携带全部 TTL/开关（源站级 cache 已不再存在），
+  // 直接用规则层 cache 决定的 policy 下发响应头。
+  const mergedRespHeaders = mergeHeaderOps(undefined, rule?.action?.respHeaders);
   const headers = await buildClientHeaders(ctx, originResp, policy, mergedRespHeaders);
   const clientResp = new Response(originResp.body, {
     status: originResp.status,
