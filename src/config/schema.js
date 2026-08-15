@@ -1042,6 +1042,17 @@ export function validateGlobalRulesStages(input, base) {
     if (r.errors.length) errors.push(...r.errors.map((e) => `全站规则[${stage}] ${e}`));
     out[stage] = r.value;
   }
+  // 全站独有阶段 fixContentType：内容类型纠正（网关作为中间人的责任）。
+  // 不在 STAGE_ORDER / GLOBAL_ONLY_STAGE_ORDER 中（无需前端编辑表单，只有 enabled 一个开关），
+  // 此处单独透传 + 补默认，保证用户可在管理面关闭、且落盘后能被读回与合并补全。
+  // 仅当上游 Content-Type 缺失/通用/疑似错误时，按请求 URL 后缀名自动纠正为正确 MIME（零 body 成本）。
+  {
+    const rawFix = rawStages && isObj(rawStages.fixContentType) ? rawStages.fixContentType : undefined;
+    const defFix = isObj(DEFAULT_GLOBAL_RULES.fixContentType) ? DEFAULT_GLOBAL_RULES.fixContentType : { enabled: true };
+    out.fixContentType = {
+      enabled: bool(rawFix && rawFix.enabled, defFix.enabled !== false),
+    };
+  }
   return { ok: errors.length === 0, value: { stages: out }, errors };
 }
 
@@ -1295,16 +1306,103 @@ function normR2Origin(input, idx, label, errors) {
   };
 }
 
-function normOrigin(input, idx) {
+/**
+ * 规范化仓库型源站（cnb / github）。
+ * 后端实际是仓库 raw API：回源 host 由引擎常量固定（对用户隐藏），鉴权 token 站点级
+ * 加密落盘（存储层异步加密；详见 src/utils/cipher.js 与 src/proxy/repoEngine.js）。
+ * 此处仅做字段级校验与基础值组装，不在此处加密（保持 norm 同步、加密上移到存储层）。
+ *
+ * @param {any} input
+ * @param {number} idx
+ * @param {string} label
+ * @param {string[]} errors
+ * @param {'cnb'|'github'} engine
+ * @returns {{value: import('../contracts.js').Origin|null, errors: string[]}}
+ */
+function normRepoOrigin(input, idx, label, errors, engine) {
+  const repoUser = str(input.repoUser, '', 128).trim();
+  const repoName = str(input.repoName, '', 128).trim();
+  const repoPrivate = bool(input.repoPrivate, false);
+  const repoBranch = str(input.repoBranch, 'main', 128).trim() || 'main';
+  // token：明文或已加密串（编辑时未改动则原样保留密文）。
+  // 公开仓库（repoPrivate=false）走匿名分支，可不填 token；私密仓库必须填。
+  const rawToken = input.cnbTokenEnc != null ? input.cnbTokenEnc : input.githubTokenEnc;
+  const tokenField = engine === 'cnb' ? 'cnbTokenEnc' : 'githubTokenEnc';
+  const tokenVal = str(rawToken, '', 4096).trim();
+  if (!tokenVal && repoPrivate) {
+    errors.push(`${label} engine='${engine}' 私有仓库必须填写访问令牌（token）`);
+  }
+  if (!repoUser) errors.push(`${label} engine='${engine}' 时必须填写仓库归属（repoUser）`);
+  if (!repoName) errors.push(`${label} engine='${engine}' 时必须填写仓库名（repoName）`);
+
+  // 公共基础字段（与 normOrigin 对齐，便于下游统一处理）
+  const rewrite = normRewrite(input.rewrite);
+  errors.push(...rewrite.errors);
+  const reqHeaders = normHeaderOps(input.reqHeaders, `${label} reqHeaders`);
+  errors.push(...reqHeaders.errors);
+  const respHeaders = normHeaderOps(input.respHeaders, `${label} respHeaders`);
+  errors.push(...respHeaders.errors);
+  const cache = normCachePolicy(input.cache);
+  const followRedirect = bool(input.followRedirect, DEFAULT_ORIGIN.followRedirect);
+  const originTimeoutMs = int(input.originTimeoutMs, DEFAULT_ORIGIN.originTimeoutMs, 0, 60000);
+  const clientIpHeader = normClientIpHeader(input.clientIpHeader, `${label} clientIpHeader`);
+  errors.push(...clientIpHeader.errors);
+
+  // 回源 host/scheme/port 由引擎常量决定（repoEngine），此处填占位。
+  return {
+    value: {
+      id: str(input.id, '', 64) || `o_${idx}_${Date.now().toString(36)}`,
+      enabled: bool(input.enabled, true),
+      order: int(input.order, idx, 0, 10000),
+      weight: int(input.weight, DEFAULT_ORIGIN.weight, 0, 10000),
+      engine,
+      scheme: 'https',
+      addr: '',
+      port: 443,
+      pathPrefix: '',
+      extraHeaders: Object.freeze({}),
+      hostHeader: { mode: 'inherit', custom: '' },
+      sni: null,
+      rewrite: rewrite.value,
+      reqHeaders: reqHeaders.value,
+      respHeaders: respHeaders.value,
+      cache,
+      followRedirect,
+      originTimeoutMs,
+      clientIpHeader: clientIpHeader.value,
+      r2Binding: '',
+      r2KeyPrefix: '',
+      r2KeyMode: 'none',
+      r2KeyPrefixRule: '',
+      r2KeyRegexTo: '',
+      r2ContentType: DEFAULT_ORIGIN.r2ContentType,
+      // 仓库型字段
+      repoUser,
+      repoName,
+      repoBranch,
+      repoPrivate,
+      [tokenField]: tokenVal,
+    },
+    errors,
+  };
+}
   const errors = [];
   const label = `源站[${idx}]`;
   if (!isObj(input)) return { value: null, errors: [`${label} 不是合法对象`] };
 
-  const engine = enumOf(input.engine, ['fetch', 'socket', 'r2'], DEFAULT_ORIGIN.engine);
+  const engine = enumOf(input.engine, ['fetch', 'socket', 'r2', 'cnb', 'github'], DEFAULT_ORIGIN.engine);
 
   // R2 回源：不需要 addr/scheme/port/hostHeader，只校验绑定与 key 配置
   if (engine === 'r2') {
     return normR2Origin(input, idx, label, errors);
+  }
+
+  // 仓库型回源（cnb / github）：后端实际是仓库 raw API，回源 host 由引擎常量固定（对用户隐藏），
+  // 鉴权 token 站点级加密落盘（详见 repoEngine）。只校验仓库元数据与 token 是否存在，
+  // token 的加密落盘在存储层（store.putPool / ensureSingleOrigin）异步完成；回源时由
+  // failover + repoEngine 解密注入 Authorization。
+  if (engine === 'cnb' || engine === 'github') {
+    return normRepoOrigin(input, idx, label, errors, engine);
   }
 
   const addrRes = validateAddr(input.addr);
@@ -1508,7 +1606,7 @@ export function validatePool(input, caps) {
     }
     if (o.engine === 'api') {
       c.errors.push(
-        `源站[${i}] 使用了尚未实现的 api 引擎（cnb/github 等第三方 API 请求引擎待接入）。`
+        `源站[${i}] 使用了已移除的 api 引擎：请改用 cnb 或 github 仓库型引擎（回源到对应仓库 raw API）。`
       );
     }
   });

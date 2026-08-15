@@ -332,6 +332,13 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
       isolateTtlMs: 600000,
     }),
   }),
+  // 内容类型纠正（全站默认，可关闭）：网关作为中间人，按 URL 后缀名自动纠正上游返回的
+  // 错误/通用 Content-Type（如 raw 接口把图片标成 text/plain），让浏览器正确渲染。
+  // 零 body 成本（只按后缀名，绝不读响应体），仅当上游类型缺失/通用/疑似错误时覆盖。
+  // 用户可在全站规则 stages.fixContentType 中将 enabled 置为 false 关闭。
+  fixContentType: Object.freeze({
+    enabled: true,
+  }),
   respHeaders: Object.freeze({
     // 全站兜底「默认响应头」。所有响应默认注入本项目品牌头 Server / Via，
     // 并剥离上游敏感响应头（与旧 headers.js 写死的 PRODUCT_NAME / DEFAULT_STRIP_RESP_HEADERS 一致）。
@@ -347,12 +354,29 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
       via: '1.1 ${product_name}',
     }),
     remove: Object.freeze([
-      'cross-origin-resource-policy',
+      // —— 全站通用兜底：仅剥离【实测 CNB 与 GitHub 共有、且对所有源站都该剥】的头 ——
+      // 其余「仓库接口特有的头」已下沉到 cnb / github 引擎关联的「内置预设规则模板」
+      // (respHeaders 阶段)，按引擎分别处理，不污染全站默认。
+      'cross-origin-resource-policy', // CNB same-origin / GitHub cross-origin（实测两者都有）
       'cross-origin-embedder-policy',
-      'content-security-policy',
+      'content-security-policy', // 全有（360 渲染杀器之一）
       'content-security-policy-report-only',
-      'x-frame-options',
-      'set-cookie',
+      'x-frame-options', // 全有
+      'set-cookie', // 通用安全
+      // 上游常回 X-Content-Type-Options: nosniff（全部 5 个 URL 都有！这是 360 不渲染主因）。
+      // 作为 CDN/网关，下发给浏览器的 Content-Type 由本项目 fixContentType 控制并信任，
+      // 无需上游 nosniff 约束；部分内核较严的浏览器（如 360）在 nosniff 下会因任何 MIME
+      // 边角问题拒绝渲染图片（Chrome/Edge 有更强内部嗅探兜底故正常）。故默认剥离。
+      'x-content-type-options',
+      // 上游源站的 CORS 策略（CNB 写死 https://docs.cnb.cool；GitHub 写死 *），对你的用户
+      // 是错误且无效的；两者实测都有，全站统一剥离（后续可由网关统一主动下发正确 CORS 策略）。
+      'access-control-allow-origin',
+      // —— 以下均为【仓库接口特有头】，已下沉到对应引擎的站点规则（见 repoEngine.js）——
+      // CNB 特有：access-control-allow-credentials / access-control-expose-headers /
+      //   referrer-policy / traceparent / x-trace-id / x-ratelimit-* / x-repo-commit
+      // GitHub 特有：x-xss-protection / strict-transport-security / x-github-request-id /
+      //   x-github-edge-region / x-fastly-request-id / x-served-by / x-timer / x-cache /
+      //   x-cache-hits / source-age / via
     ]),
   }),
 });

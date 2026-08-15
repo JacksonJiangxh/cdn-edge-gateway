@@ -209,9 +209,20 @@ export async function verifyHmacSha256(key, data, signature) {
  * @example
  * const key = await sha256Hex(`${host}:${path}`);
  */
-export async function sha256Hex(str) {
+/**
+ * 对字符串做 SHA-256 摘要，返回原始字节（Uint8Array）。
+ * 用于从任意长度的主密钥材料（如 JWT_SECRET）派生定长密钥。
+ * @param {string} str 输入字符串
+ * @returns {Promise<Uint8Array>} 32 字节摘要
+ */
+export async function sha256Bytes(str) {
   const c = getCrypto();
   const digest = await c.subtle.digest('SHA-256', utf8(str));
+  return new Uint8Array(digest);
+}
+
+export async function sha256Hex(str) {
+  const digest = await sha256Bytes(str);
   return bufToHex(digest);
 }
 

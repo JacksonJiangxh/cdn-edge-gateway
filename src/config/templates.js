@@ -43,21 +43,21 @@ import { DEFAULT_CACHE_POLICY } from './defaults.js';
 export const TEMPLATE_PARAM_META = Object.freeze({
   edgeTtl: Object.freeze({
     label: '边缘缓存时间',
-    hint: '内容在边缘节点上保留多久。越长回源越少、越省钱，但源站更新后生效越慢。改完内容记得清缓存。',
+    hint: '内容在边缘节点上保留多久。越长回源越少、越省钱，但源站更新后生效越慢。这是相对全站默认基线（cache.enabled=true、edgeTtl=86400）的「覆盖值」——模板只针对匹配到的资源改这个值，其余请求仍走全站默认。改完内容记得清缓存。',
     unit: 's',
     min: 0,
     max: 31536000,
   }),
   browserTtl: Object.freeze({
     label: '浏览器缓存时间',
-    hint: '下发给访客浏览器的 max-age。浏览器缓存无法主动清除，除非文件名带版本号（如 app.a1b2c3.js），否则别设太长。填 -1 表示不改写、完全跟随源站。',
+    hint: '下发给访客浏览器的 max-age。浏览器缓存无法主动清除，除非文件名带版本号（如 app.a1b2c3.js），否则别设太长。填 -1 表示不改写、完全跟随源站。同样相对全站默认基线（browserTtl=3600）做覆盖。',
     unit: 's',
     min: -1,
     max: 31536000,
   }),
   staleWhileRevalidate: Object.freeze({
     label: '过期后宽限时间',
-    hint: '边缘缓存过期后的这段时间内，先拿旧内容响应访客、同时后台悄悄回源刷新。能显著削平源站流量尖峰，设 0 关闭。',
+    hint: '边缘缓存过期后的这段时间内，先拿旧内容响应访客、同时后台悄悄回源刷新。能显著削平源站流量尖峰，设 0 关闭。相对全站默认基线（staleWhileRevalidate=3600）做覆盖。',
     unit: 's',
     min: 0,
     max: 604800,
@@ -159,7 +159,11 @@ export const SITE_TEMPLATES = Object.freeze([
           // 借鉴 EO「网站加速」CacheKey：忽略查询串，避免 ?t=1 / ?v=2 之类产生无意义的缓存碎片。
           // 带指纹的资源文件名本身已区分版本，忽略查询串不会命中错误内容。
           ignoreQuery: true,
+          // 以下均为显式写出，不依赖全站默认值——用户可直接在这里改，无需查文档：
           statusTtl: statusTtlOf(p),
+          preRefresh: true,
+          preRefreshPercent: 80,
+          offlineCache: true,
         },
       },
       {
@@ -227,8 +231,13 @@ export const SITE_TEMPLATES = Object.freeze([
           edgeTtl: p.edgeTtl,
           browserTtl: p.browserTtl,
           staleWhileRevalidate: p.staleWhileRevalidate,
+          // 流媒体分片常带 ?key= / ?token= 鉴权，必须按完整 URL 区分缓存（覆盖全站默认 ignoreQuery=true）
           ignoreQuery: false,
           statusTtl: statusTtlOf(p),
+          // 大文件分片不做预刷新（避免无谓回源浪费带宽）、不做断网兜底（过期媒体不可用体验更差）
+          preRefresh: false,
+          preRefreshPercent: 80,
+          offlineCache: false,
         },
       },
       {
@@ -242,6 +251,11 @@ export const SITE_TEMPLATES = Object.freeze([
           browserTtl: 0,
           staleWhileRevalidate: 0,
           ignoreQuery: false,
+          // 清单即时性强，错误页不缓存（回落全站 4xx/5xx/52x:0 基线，此处不写 statusTtl）
+          statusTtl: {},
+          preRefresh: false,
+          preRefreshPercent: 80,
+          offlineCache: false,
         },
       },
       {
@@ -277,8 +291,14 @@ export const SITE_TEMPLATES = Object.freeze([
           edgeTtl: p.edgeTtl,
           browserTtl: p.browserTtl,
           staleWhileRevalidate: p.staleWhileRevalidate,
-          ignoreQuery: true,
+          // 下载链接常带签名 / 鉴权查询串（?token=xxx&expires=123），必须按完整 URL
+          // 区分缓存——忽略查询串会把不同签名的私密文件当成同一份缓存，导致签名失效或越权。
+          // 全站默认 ignoreQuery=true 在此显式翻转为 false。
+          ignoreQuery: false,
           statusTtl: statusTtlOf(p),
+          preRefresh: true,
+          preRefreshPercent: 80,
+          offlineCache: true,
         },
       },
       {
@@ -321,9 +341,12 @@ export const SITE_TEMPLATES = Object.freeze([
           edgeTtl: p.edgeTtl,
           browserTtl: p.browserTtl,
           staleWhileRevalidate: p.staleWhileRevalidate,
-          // 同 website：忽略查询串，避免无意义的缓存碎片
+          // 同 website：WP 资源多带 ?ver= 版本号，忽略查询串安全
           ignoreQuery: true,
           statusTtl: statusTtlOf(p),
+          preRefresh: true,
+          preRefreshPercent: 80,
+          offlineCache: true,
         },
       },
       {

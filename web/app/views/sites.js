@@ -4,6 +4,7 @@ import { $, clear, el } from '../../dom.js';
 import { buildRuleCard, section } from '../rule-editor/card.js';
 import { API, APP_DATA, refreshData } from '../state.js';
 import { buildPoolOptions, poolKind } from './pools.js';
+import { buildRepoPresetRules, REPO_ENGINE_LABEL } from '../lib/repoPreset.js';
 import { openCacheDrawer } from './cache.js';
 import { actions, field, ruleStage, select, table } from '../util.js';
 import { confirmDialog, openDrawer, scrollToAnchor, toast } from '../ui.js';
@@ -95,6 +96,8 @@ export   async function openSiteDrawer(host, anchor) {
         { value: 'fetch', label: 'fetch（标准回源，支持自定义 Host）' },
         { value: 'socket', label: 'socket（已弃用：自定义 Host 现由 fetch 支持，勿用）', disabled: true },
         { value: 'r2', label: 'r2（回源到 R2 桶，仅 CF）', disabled: !(APP_DATA.info && APP_DATA.info.caps && APP_DATA.info.caps.hasR2) },
+        { value: 'cnb', label: 'cnb（CNB 仓库 raw，自动生成关联规则）' },
+        { value: 'github', label: 'github（GitHub 仓库 raw，自动生成关联规则）' },
       ]);
       fEngine.className = 'input';
       fHostMode = select('f-host-mode', [], 'origin', [
@@ -105,27 +108,43 @@ export   async function openSiteDrawer(host, anchor) {
       fHostMode.className = 'input';
       fHostCustom = el('input', { class: 'input', id: 'f-host-custom', value: '', placeholder: '如 backend.internal' });
 
-      const addrField = field('源站地址（域名 / IP）', fAddr, '你的真实服务器地址。r2 引擎不需要此字段。');
+      const addrField = field('源站地址（域名 / IP）', fAddr, '你的真实服务器地址。r2 / cnb / github 引擎不需要此字段。');
       const portField = field('端口', fPort, 'https 默认 443，http 默认 80。');
       const schemeField = field('回源协议', fScheme, '选择 https 则回源时走加密通道。');
-      const engineField = field('引擎', fEngine, 'fetch=标准回源（所有平台可用，支持自定义 Host 头）；socket=已弃用（自定义 Host 现由 fetch 原生支持）；r2=回源到 R2 桶（仅 CF）。');
+      const engineField = field('引擎', fEngine, 'fetch=标准回源（支持自定义 Host）；r2=回源到 R2 桶（仅 CF）；cnb/github=仓库型引擎（填仓库参数即可，自动生成 URL 重写 + 请求头 + 响应头 关联规则）。');
       // R2 引擎必填的绑定名（与 wrangler.toml 的 [[r2_buckets]].binding 一致），仅在引擎选 r2 时显示
       fR2Binding = el('input', { class: 'input', id: 'f-r2-binding', value: '', placeholder: 'CDN_R2（必须与 wrangler.toml 的 R2 绑定名一致）' });
       const r2BindingField = field('R2 绑定名（r2Binding）', fR2Binding, 'wrangler.toml 里 [[r2_buckets]].binding 的值，如 CDN_R2。引擎选 r2 时必填，保存时自动创建「单一源站」。');
       const hostModeField = field('回源 Host', fHostMode, '源站响应请求时看到的 Host 头。选「自定义域名」时需填下方输入框。');
       const hostCustomField = field('回源 Host 自定义值', fHostCustom, '仅用于回源请求的 Host 头，与站点配置的「加速域名」无关。');
 
+      // ---- cnb / github 仓库型引擎专用字段（仅引擎选 cnb/github 时显示）----
+      const fRepoUser = el('input', { class: 'input f-repo-user', value: '', placeholder: '组织 / owner' });
+      const fRepoName = el('input', { class: 'input f-repo-name', value: '', placeholder: '仓库名（不含 .git）' });
+      const fRepoBranch = el('input', { class: 'input f-repo-branch', value: 'main', placeholder: '分支，默认 main' });
+      const fRepoPrivate = el('input', { class: 'input f-repo-private', type: 'checkbox', checked: false });
+      const fRepoToken = el('input', { class: 'input f-repo-token', type: 'password', value: '', placeholder: '访问令牌（公开仓库可留空）' });
+      const repoFields = el('div', { class: 'f-repo-fields' }, [
+        field('仓库归属（repoUser）', fRepoUser, 'cnb=组织/用户；github=owner。'),
+        field('仓库名（repoName）', fRepoName, '不含 .git 后缀、不含组织前缀。'),
+        field('分支（repoBranch）', fRepoBranch, '映射到 raw URL 的 ref 段，默认 main。'),
+        field('是否私有仓库（repoPrivate）', fRepoPrivate, '勾选=私有（注入 Authorization 鉴权，回源到 api.cnb.cool）；不勾=公开（走 cnb.cool 公网，可不填 token）。'),
+        field('访问令牌（token）', fRepoToken, '加密后落盘（每站独立）。公开仓库可留空；编辑时留空表示不改。'),
+      ]);
+
       const inlineFields = el('div', { id: 'origin-inline-fields' }, [
-        engineField, addrField, portField, schemeField, r2BindingField, hostModeField, hostCustomField,
+        engineField, addrField, portField, schemeField, r2BindingField, hostModeField, hostCustomField, repoFields,
       ]);
 
       const syncEngine = () => {
         const eng = fEngine.value;
         const isR2 = eng === 'r2';
-        addrField.style.display = isR2 ? 'none' : '';
-        portField.style.display = isR2 ? 'none' : '';
-        schemeField.style.display = isR2 ? 'none' : '';
+        const isRepo = eng === 'cnb' || eng === 'github';
+        addrField.style.display = (isR2 || isRepo) ? 'none' : '';
+        portField.style.display = (isR2 || isRepo) ? 'none' : '';
+        schemeField.style.display = (isR2 || isRepo) ? 'none' : '';
         r2BindingField.style.display = isR2 ? '' : 'none';
+        repoFields.style.display = isRepo ? '' : 'none';
       };
       const syncHostCustom = () => { hostCustomField.style.display = fHostMode.value === 'custom' ? '' : 'none'; };
       const syncOriginMode = () => {
@@ -208,17 +227,37 @@ export   async function openSiteDrawer(host, anchor) {
         } else {
           // 「填写域名/IP」：构建 origin 对象，后端 ensureSingleOrigin 自动查重/创建并回填 poolId
           const eng = fEngine.value;
-          if (eng !== 'r2' && !fAddr.value.trim()) throw new Error('请填写源站地址');
-          if (eng === 'r2' && !(fR2Binding && fR2Binding.value.trim())) {
-            throw new Error('引擎为 r2 时必须填写 R2 绑定名（如 CDN_R2）');
+          const isRepo = eng === 'cnb' || eng === 'github';
+          if (eng === 'r2') {
+            if (!(fR2Binding && fR2Binding.value.trim())) {
+              throw new Error('引擎为 r2 时必须填写 R2 绑定名（如 CDN_R2）');
+            }
+          } else if (isRepo) {
+            if (!fRepoUser.value.trim() || !fRepoName.value.trim()) {
+              throw new Error(`引擎为 ${REPO_ENGINE_LABEL[eng]} 时必须填写仓库归属与仓库名`);
+            }
+            if (fRepoPrivate.checked && !fRepoToken.value.trim()) {
+              throw new Error(`私有 ${REPO_ENGINE_LABEL[eng]} 仓库必须填写访问令牌`);
+            }
+          } else if (!fAddr.value.trim()) {
+            throw new Error('请填写源站地址');
           }
           const o = {
-            addr: eng === 'r2' ? '' : fAddr.value.trim(),
+            addr: (eng === 'r2' || isRepo) ? '' : fAddr.value.trim(),
             port: eng === 'r2' ? null : (Number(fPort.value) || 443),
             scheme: eng === 'r2' ? 'https' : fScheme.value,
             engine: eng,
           };
           if (eng === 'r2') o.r2Binding = (fR2Binding && fR2Binding.value.trim()) || '';
+          if (isRepo) {
+            // 仓库型：把参数与 token 一并带上，后端加密落盘 + 自动铺预设规则到源站级
+            o.repoUser = fRepoUser.value.trim();
+            o.repoName = fRepoName.value.trim();
+            o.repoBranch = fRepoBranch.value.trim() || 'main';
+            o.repoPrivate = !!fRepoPrivate.checked;
+            const tokenField = eng === 'cnb' ? 'cnbTokenEnc' : 'githubTokenEnc';
+            o[tokenField] = fRepoToken.value.trim();
+          }
           basics.origins = [o];
           basics.defaultHostHeader = {
             mode: fHostMode.value,
@@ -234,18 +273,32 @@ export   async function openSiteDrawer(host, anchor) {
         // 选中后直接以流量序列的规则接口（saveRules）把规则写进该站点的
         // 「流量序列」，等价于用户自己新建空白站点后再手动添加这些规则。
         await API.sites.save(h, basics);
+        // 合并「站点场景模板规则」+「引擎关联预设规则」后统一写入流量序列。
+        const mergedRules = [];
         if (tplState.id && tplState.id !== 'blank') {
-          // 用清单里固定的 rules（模板预设参数生成，不可在新建时修改）；
-          // 落库一律走流量序列规则接口，与手动添加完全一致。
           const tpl = tplState.list.find((t) => t.id === tplState.id);
           const rules = (tpl && tpl.rules) || [];
-          if (rules.length) {
-            await API.sites.saveRules(h, rules);
-          }
-          toast('站点已创建，并已按模板写入 ' + rules.length + ' 条基础规则');
-        } else {
-          toast('站点已创建');
+          mergedRules.push(...rules);
         }
+        // cnb/github 引擎：把关联的 rewrite + reqHeaders + respHeaders 预设规则并入
+        const eng = fEngine.value;
+        if ((eng === 'cnb' || eng === 'github') && basics.origins && basics.origins[0]) {
+          const origin = basics.origins[0];
+          const preset = buildRepoPresetRules(eng, {
+            repoUser: origin.repoUser,
+            repoName: origin.repoName,
+            repoBranch: origin.repoBranch,
+            repoPrivate: origin.repoPrivate,
+            host: h,
+          });
+          mergedRules.push(preset.rewrite, preset.respHeaders);
+          if (preset.reqHeaders) mergedRules.push(preset.reqHeaders);
+        }
+        if (mergedRules.length) {
+          await API.sites.saveRules(h, mergedRules);
+        }
+        const n = mergedRules.length;
+        toast(n ? `站点已创建，并已写入 ${n} 条基础规则（模板 + 引擎关联规则）` : '站点已创建');
       }
       await refreshData();
     });

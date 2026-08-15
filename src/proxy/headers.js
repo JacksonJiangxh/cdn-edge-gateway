@@ -14,6 +14,7 @@
 import { getGlobalRules } from '../config/store.js';
 import { DEFAULT_GLOBAL_RULES, DEBUG_HEADER_NAMES, NO_CACHE_STATUS_LIST } from '../config/defaults.js';
 import { expandVars, pickClientIp } from '../config/vars.js';
+import { resolveContentType } from '../utils/mime.js';
 
 /**
  * 读取某个全站阶段的默认动作（单轨：唯一真相源是全站规则的 stages）。
@@ -257,6 +258,32 @@ export async function buildClientHeaders(ctx, originResp, policy, ops) {
     setIfPresent(out, names.ruleId, d.ruleId);
     setIfPresent(out, names.retryCount, d.retries != null ? String(d.retries) : undefined);
     setIfPresent(out, names.edgeTime, `${Date.now() - ctx.startTime}ms`);
+  }
+
+  // ---- 4.5 内容类型纠正（网关作为中间人的责任）----
+  // 项目本质是边缘网关：代替用户去上游源站（CNB / Git raw 等）拉取资源再回传。
+  // 上游 raw 接口返回的 Content-Type 常常不正确（缺失、text/plain、octet-stream、
+  // 或带 charset 的文本类型），而部分浏览器不会回退到 URL 后缀名判定，导致图片等
+  // 资源出现「未知类型」错误。作为中间人，此处按「请求 URL 后缀名」自动纠正为正确 MIME。
+  //
+  // 零 body 成本：只依据 URL 后缀名，绝不读取响应体（无内存压力，大文件友好）。
+  // 智能触发：仅当上游 Content-Type 缺失/通用/疑似错误，且能从后缀名推导出可信 MIME 时才覆盖；
+  //           上游已给出具体可信类型则尊重之。
+  // 可关闭：是否启用由全站默认阶段 fixContentType.enabled 控制（见 config/stages-defaults.js）。
+  try {
+    const fixCfg = (ctx && ctx.__globalStages && ctx.__globalStages.fixContentType)
+      || DEFAULT_GLOBAL_RULES.fixContentType;
+    if (fixCfg && fixCfg.enabled !== false) {
+      const upstreamCt = out.get('content-type');
+      const requestUrl = (ctx && ctx.request && ctx.request.url) || '';
+      const res = resolveContentType(upstreamCt, requestUrl);
+      if (res.changed && res.contentType) {
+        out.set('content-type', res.contentType);
+        appendDebugNote(ctx, `fix-content-type:${upstreamCt || '∅'}→${res.contentType}`);
+      }
+    }
+  } catch {
+    // 纠正失败绝不影响主链路：保留上游原始 Content-Type 原样下发
   }
 
   // ---- 5. 品牌响应头（Server/Via）----

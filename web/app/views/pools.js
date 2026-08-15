@@ -7,6 +7,7 @@ import { actions, field, select, table } from '../util.js';
 import { closeDrawer, confirmDialog, openDrawer, toast } from '../ui.js';
 import { openSiteDrawer } from './sites.js';
 import { route } from '../router.js';
+import { buildRepoPresetRules, REPO_ENGINE_LABEL } from '../lib/repoPreset.js';
 export   function poolKind(p) {
     if (p && (p.kind === 'single' || p.kind === 'pool')) return p.kind;
     return ((p && p.origins) || []).length === 1 ? 'single' : 'pool';
@@ -153,6 +154,8 @@ export
         { value: 'fetch', label: 'fetch（支持自定义 Host）' },
         { value: 'socket', label: 'socket（已弃用）', disabled: true },
         { value: 'r2', label: 'r2（回源到 R2 桶，仅 CF）', disabled: !(APP_DATA.info && APP_DATA.info.caps && APP_DATA.info.caps.hasR2) },
+        { value: 'cnb', label: 'cnb（CNB 仓库 raw，自动生成的规则）' },
+        { value: 'github', label: 'github（GitHub 仓库 raw，自动生成的规则）' },
       ]);
       engineSel.value = o.engine || 'fetch';
       engineSel.className = 'input o-engine';
@@ -184,6 +187,19 @@ export
       };
       r2KeyModeSel.onchange = syncR2Key;
       syncR2Key();
+      // ---- cnb / github 仓库型引擎专用字段 ----
+      const repoUserIn = el('input', { class: 'input o-repo-user', value: o.repoUser || '', placeholder: '组织 / owner' });
+      const repoNameIn = el('input', { class: 'input o-repo-name', value: o.repoName || '', placeholder: '仓库名（不含 .git）' });
+      const repoBranchIn = el('input', { class: 'input o-repo-branch', value: o.repoBranch || 'main', placeholder: '分支，默认 main' });
+      const repoPrivateIn = el('input', { class: 'input o-repo-private', type: 'checkbox', checked: !!o.repoPrivate });
+      const repoTokenIn = el('input', { class: 'input o-repo-token', type: 'password', value: o._tokenPlain || '', placeholder: '访问令牌（公开仓库可留空）' });
+      const repoFields = el('div', { class: 'o-repo-fields' }, [
+        field('仓库归属（repoUser）', repoUserIn, 'cnb=组织/用户；github=owner。'),
+        field('仓库名（repoName）', repoNameIn, '不含 .git 后缀、不含组织前缀。'),
+        field('分支（repoBranch）', repoBranchIn, '映射到 raw URL 的 ref 段，默认 main。'),
+        field('是否私有仓库（repoPrivate）', repoPrivateIn, '勾选=私有（注入 Authorization 鉴权）；不勾=公开（匿名回源，可不填 token）。'),
+        field('访问令牌（token）', repoTokenIn, '加密后落盘（每站独立）。公开仓库可留空；编辑时留空表示不改。'),
+      ]);
       // 回源连接参数（协议/端口/引擎/Host）属于整池物理默认；⑨ Origin Rules
       // 可针对请求条件覆盖这些参数，故仅作「默认」保留、不再与⑨重复成独立编辑点。
       const overrideHint = el('div', { class: 'hint', text: '回源连接参数（协议 / 端口 / 引擎 / Host）作为本源站整池默认；如需按请求条件差异化，请在⑨「Origin Rules」里设置对应规则，规则级设置会覆盖此处默认值。' });
@@ -200,10 +216,12 @@ export
       const syncEngine = () => {
         const eng = engineSel.value;
         const isR2 = eng === 'r2';
+        const isRepo = eng === 'cnb' || eng === 'github';
         r2Fields.style.display = isR2 ? '' : 'none';
-        addrField.style.display = isR2 ? 'none' : '';
-        portField.style.display = isR2 ? 'none' : '';
-        schemeField.style.display = isR2 ? 'none' : '';
+        repoFields.style.display = isRepo ? '' : 'none';
+        addrField.style.display = (isR2 || isRepo) ? 'none' : '';
+        portField.style.display = (isR2 || isRepo) ? 'none' : '';
+        schemeField.style.display = (isR2 || isRepo) ? 'none' : '';
         hostField.style.display = eng === 'socket' ? '' : 'none';
         hostNote.style.display = eng === 'fetch' ? '' : 'none';
       };
@@ -214,8 +232,9 @@ export
         schemeField,
         hostField,
         hostNote,
-        field('引擎', engineSel, '回源方式（整池默认）：① fetch=标准回源，支持自定义 Host 头（CF/EO/ESA 均可用，Host 由「回源域名/地址」或规则级 hostHeader 决定）；② socket=已弃用（自定义 Host 现由 fetch 原生支持，CF 上裸 IP+HTTPS+自定义 SNI 由 fetchEngine 内部自动走 socket 兜底）；③ r2=回源到 R2 桶（仅 CF，需先在 wrangler.toml 绑定）。可被⑨规则覆盖。'),
+        field('引擎', engineSel, '回源方式（整池默认）：① fetch=标准回源，支持自定义 Host 头（CF/EO/ESA 均可用，Host 由「回源域名/地址」或规则级 hostHeader 决定）；② socket=已弃用；③ r2=回源到 R2 桶（仅 CF）；④ cnb/github=仓库型引擎（填仓库参数即可，自动生成 URL 重写 + 请求头规则）。可被⑨规则覆盖。'),
         r2Fields,
+        repoFields,
         weightField,
         overrideHint,
         el('button', { class: 'btn btn-sm btn-danger', text: '移除源站', onclick: () => row.remove() }),
@@ -269,18 +288,47 @@ export
       Array.from(originList.children).forEach((row, i) => {
         const engine = $('.o-engine', row).value;
         const addr = $('.o-addr', row).value.trim();
-        // r2 引擎无公网地址，按 r2Binding 标识；其余引擎必须有 addr
-        if (engine !== 'r2' && !addr) return;
+        const isRepo = engine === 'cnb' || engine === 'github';
+        // r2 / 仓库型 引擎无公网地址；其余引擎必须有 addr
+        if (engine !== 'r2' && !isRepo && !addr) return;
         // 保留既有源站的回源高级配置（hostHeader/extraHeaders/pathPrefix），
         // 这些由规则引擎托管，前端此处不编辑，但编辑源站池时不应清空
         const legacy = (pool.origins && pool.origins[i]) || {};
         const r2KeyMode = $('.o-r2-keymode', row) ? $('.o-r2-keymode', row).value : 'none';
+
+        // 仓库型引擎：收集仓库参数 + 自动铺「内置预设规则模板」（rewrite + reqHeaders）
+        let repoExtra = {};
+        if (isRepo) {
+          const repoUser = $('.o-repo-user', row).value.trim();
+          const repoName = $('.o-repo-name', row).value.trim();
+          const repoBranch = $('.o-repo-branch', row).value.trim() || 'main';
+          const repoPrivate = !!$('.o-repo-private', row).checked;
+          const tokenField = engine === 'cnb' ? 'cnbTokenEnc' : 'githubTokenEnc';
+          const tokenPlain = $('.o-repo-token', row).value; // 明文输入；留空=不改（保留密文）
+          // 编辑时留空：保留 legacy 已有的（加密）token；新建必填校验交给后端
+          const tokenVal = tokenPlain ? tokenPlain : (legacy[tokenField] || '');
+          const preset = buildRepoPresetRules(engine, { repoUser, repoName, repoBranch, repoPrivate });
+          repoExtra = {
+            repoUser, repoName, repoBranch, repoPrivate,
+            [tokenField]: tokenVal,
+            // 引擎关联的预设规则：rewrite + reqHeaders（公开为 null）+ respHeaders（剥离仓库特有头）
+            // 一并写入源站级；站点里仍可叠加「网站加速 / api」等其它模板规则。
+            rewrite: preset.rewrite,
+            reqHeaders: preset.reqHeaders || { match: { type: 'all', conditions: [] }, actions: [{ type: 'setHeaders', set: {}, remove: [] }] },
+            respHeaders: preset.respHeaders,
+          };
+        }
+
         origins.push({
-          id: 'o' + i + '_' + (engine === 'r2' ? ($('.o-r2-binding', row).value.trim() || 'r2') : addr),
+          id: 'o' + i + '_' + (engine === 'r2'
+            ? ($('.o-r2-binding', row).value.trim() || 'r2')
+            : isRepo
+              ? (engine + '_' + $('.o-repo-name', row).value.trim())
+              : addr),
           enabled: true, order: i, weight: Number($('.o-weight', row).value) || 1,
           engine,
           scheme: $('.o-scheme', row) ? $('.o-scheme', row).value : 'https',
-          addr: engine === 'r2' ? '' : addr,
+          addr: (engine === 'r2' || isRepo) ? '' : addr,
           port: Number($('.o-port', row).value) || 443,
           pathPrefix: legacy.pathPrefix || '',
           hostHeader: ($('.o-host', row).value || '').trim()
@@ -296,6 +344,7 @@ export
                 r2KeyRegexTo: $('.o-r2-to', row).value.trim(),
               }
             : {}),
+          ...repoExtra,
           // 纯两层架构（站点级 + 源站级基础地址/引擎）：源站级不再承载专属回源规则
           // （路径重写/缓存/请求头/响应头/超时/跟随3xx 一律由「路由规则」按条件绑定，
           // 旧数据若残留这些字段将由后端 failover 原样保留、但不在此编辑）。

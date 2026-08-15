@@ -22,6 +22,7 @@
  */
 
 import { getKV } from '../platform/kv.js';
+import { encryptSecret } from '../utils/cipher.js';
 import { BAKE_DEFAULTS } from './baked.defaults.js';
 import {
   DEFAULT_GLOBAL,
@@ -936,6 +937,20 @@ export async function getPool(ctx, poolId) {
  */
 export async function putPool(ctx, pool) {
   const id = String(pool.id);
+  // 仓库型源站（cnb/github）的访问令牌在落盘前用平台主密钥（复用 JWT_SECRET 派生，
+  // AES-256-GCM）加密（站点级独立、灵活可配）。
+  // 已加密（enc:）/降级明文（plain:）前缀的值跳过，避免重复加密。
+  if (Array.isArray(pool.origins)) {
+    for (const o of pool.origins) {
+      if (o && (o.engine === 'cnb' || o.engine === 'github')) {
+        const field = o.engine === 'cnb' ? 'cnbTokenEnc' : 'githubTokenEnc';
+        const v = o[field];
+        if (typeof v === 'string' && v && !v.startsWith('enc:') && !v.startsWith('plain:')) {
+          o[field] = await encryptSecret(v, ctx);
+        }
+      }
+    }
+  }
   await writeJson(ctx, kPool(id), pool);
 
   const idx = await getPoolIndex(ctx);
@@ -1189,7 +1204,7 @@ function foldLegacySettingsIntoStages(stages, legacySettings) {
  * 单轨化后，原 settings 段的字段都落在 GLOBAL_ONLY_STAGE_ORDER 这三个阶段里，
  * 因此补全缺失阶段时必须把它们一并算进来，否则升级后新阶段永远为空。
  */
-const ALL_GLOBAL_STAGE_KEYS = [...STAGE_ORDER, ...GLOBAL_ONLY_STAGE_ORDER];
+const ALL_GLOBAL_STAGE_KEYS = [...STAGE_ORDER, ...GLOBAL_ONLY_STAGE_ORDER, 'fixContentType'];
 
 export async function getGlobalRules(ctx) {
   // 烘焙模式：直接返回烤制的 globalRules（合并内置默认补齐缺失阶段）。

@@ -17,6 +17,7 @@ import { buildOriginUrl, resolveHostHeader, applyRewrite, joinPath, mergeRewrite
 import { buildOriginHeaders } from '../proxy/headers.js';
 import { fetchOrigin } from '../proxy/engines/fetchEngine.js';
 import { fetchOrigin as r2FetchOrigin } from '../proxy/engines/r2Engine.js';
+import { fetchRepoOrigin } from '../proxy/repoEngine.js';
 import { DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
 
 // 重试时为了避免把整请求体物化进内存，超过该上限的 body 直接关闭重试（流式透传）。
@@ -249,9 +250,10 @@ async function dispatch(ctx, origin, originUrl, headers, timeoutMs, opts) {
     return r2FetchOrigin(ctx, origin, originUrl, headers, timeoutMs, opts);
   }
 
-  if (origin.engine === 'api') {
-    // 未来扩展：cnb / github api 请求引擎。尚未实现，先明确报错避免静默失败。
-    throw new Error("engine 'api' 尚未实现：第三方 API 请求引擎（cnb/github）待接入");
+  if (origin.engine === 'cnb' || origin.engine === 'github') {
+    // 仓库型回源（cnb / github）：rewrite 规则已把 URL 改写成对应 raw API 地址，
+    // 此处仅解密站点级 token 注入 Authorization 后复用 fetchEngine 回源。
+    return fetchRepoOrigin(ctx, origin, originUrl, headers, timeoutMs, opts);
   }
 
   if (origin.engine === 'socket') {

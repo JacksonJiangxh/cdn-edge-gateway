@@ -143,7 +143,7 @@ export const DEFAULT_ORIGIN = Object.freeze({
 });
 
 /** engine 可取的值。 */
-export const ORIGIN_ENGINES = Object.freeze(['fetch', 'socket', 'r2']);
+export const ORIGIN_ENGINES = Object.freeze(['fetch', 'socket', 'r2', 'cnb', 'github']);
 
 /**
  * 默认源站池。

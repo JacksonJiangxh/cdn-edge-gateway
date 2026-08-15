@@ -158,6 +158,9 @@
  * @property {Origin}             [origin]      默认回源配置（hostHeader 等）
  * @property {CachePolicy}        [cache]       默认缓存策略（默认不缓存）
  * @property {HeaderOps}          [respHeaders] 默认响应头操作（通常为空操作）
+ * @property {{enabled?:boolean}} [fixContentType] 全站内容类型纠正：上游 Content-Type 缺失/通用/疑似错误时，
+ *                                                  按请求 URL 后缀名自动纠正为正确 MIME（零 body 成本）。默认开启，
+ *                                                  可在全站规则 stages.fixContentType 置 enabled:false 关闭。
  */
 
 /**
@@ -327,7 +330,7 @@
  * @property {boolean} enabled
  * @property {number}  order              chain 策略排序，升序
  * @property {number}  weight             weighted 策略权重
- * @property {'fetch'|'r2'|'api'} engine  fetch=默认公网回源（CF/EO/ESA 均支持，可自定义 Host 头）；r2 仅 CF 可用，回源到 R2 桶绑定（不走公网）；api=未来扩展（如 cnb/github api 引擎）。socket 不再是可选值。
+ * @property {'fetch'|'r2'|'cnb'|'github'} engine  fetch=默认公网回源（CF/EO/ESA 均支持，可自定义 Host 头）；r2 仅 CF 可用，回源到 R2 桶绑定（不走公网）；cnb=CNB 仓库 raw 引擎（回源 api.cnb.cool，token 站点级加密落盘）；github=GitHub 仓库 raw 引擎（回源 raw.githubusercontent.com，token 站点级加密落盘）。socket 不再是可选值。
  * @property {'http'|'https'} scheme
  * @property {string}  addr               域名或 IP（engine='r2' 时可留空）
  * @property {number}  port
@@ -338,6 +341,17 @@
  * @property {string}  [r2KeyPrefixRule]   r2KeyMode='prefix' 时加在前面的前缀；'strip' 时剥除的开头；'regex' 时的 regexFrom
  * @property {string}  [r2KeyRegexTo]      r2KeyMode='regex' 时的 regexTo（替换值）
  * @property {string}  [r2ContentType]     R2 对象缺失 content-type 时的兜底类型，默认 'application/octet-stream'
+ * —— engine='cnb' / engine='github' 专用字段 ——
+ * 仓库型引擎：后端实际是仓库 raw API，回源 host 由引擎常量固定（对用户隐藏），
+ * 鉴权 token 由平台主密钥（复用 env.JWT_SECRET 派生，AES-256-GCM）加密后落盘（站点级独立、灵活可配）。
+ * 路径映射由自动生成的站点 rewrite 规则托管（见 src/proxy/repoEngine.js）。
+ * @property {string}  [repoUser]    仓库归属（cnb=组织/用户；github=owner）
+ * @property {string}  [repoName]    仓库名（不含 .git 后缀；不含组织前缀）
+ * @property {string}  [repoBranch]  分支名（默认 'main'）；映射到 raw URL 的 ref 段
+ * @property {boolean} [repoPrivate] 是否私有仓库。私有走鉴权分支（注入 Authorization）；
+ *                                    公开走匿名分支（可不填 token，直接回源）
+ * @property {string}  [cnbTokenEnc]     CNB 访问令牌（加密落盘；明文时降级为 plain: 前缀）
+ * @property {string}  [githubTokenEnc]  GitHub 访问令牌（加密落盘；明文时降级为 plain: 前缀）
  * @property {string}  [pathPrefix]       回源路径前缀（向后兼容；建议改由规则 rewrite 托管）
  * @property {Record<string,string>} [extraHeaders]  值支持 "@secret:NAME" 引用（向后兼容；建议改由规则 reqHeaders 托管）
  * @property {{mode:'inherit'|'origin'|'client'|'custom', custom?:string}} [hostHeader]  回源 Host（向后兼容；规则 action.hostHeader 优先）
@@ -567,6 +581,30 @@ export const DEFAULT_STRIP_RESP_HEADERS = Object.freeze([
   'content-security-policy-report-only',
   'x-frame-options',
   'set-cookie',
+  // 上游常回 X-Content-Type-Options: nosniff（如 CNB raw）。作为 CDN/网关，下发的
+  // Content-Type 由本项目 fixContentType 控制并信任，无需上游 nosniff 约束；部分严格内核
+  // 浏览器（如 360）在 nosniff 下会因任何 MIME 边角问题拒绝渲染图片（Chrome/Edge 有嗅探兜底）。
+  'x-content-type-options',
+  // 上游源站专有 / 内部实现头：对客户浏览器无意义，且泄露上游拓扑，默认剥离。
+  'access-control-allow-credentials',
+  'access-control-expose-headers',
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+  'x-ratelimit-reset',
+  'x-repo-commit',
+  'traceparent',
+  'x-trace-id',
+  'x-github-request-id',
+  'x-github-edge-region',
+  'x-fastly-request-id',
+  'x-served-by',
+  'x-timer',
+  'x-cache-hits',
+  'source-age',
+  'via',
+  'x-xss-protection',
+  'strict-transport-security',
+  'referrer-policy',
 ]);
 
 /** 静态资源扩展名 */
