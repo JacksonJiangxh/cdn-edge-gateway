@@ -129,7 +129,7 @@ build.mjs                 # 健壮构建：自动生成入口 → 阶段字典�
 
 ## 快速上手（最短路径）
 
-> 要求 **Node.js ≥ 22**（Wrangler v4 要求 Node ≥ 20.19，推荐 22）。完整分步教程见 [02 环境准备](./docs/02-prerequisites.md)。
+> 要求 **Node.js ≥ 22**（Wrangler v4 要求 Node ≥ 20.19，推荐 22）。完整分步教程见 [02 环境准备](./docs-site/docs/user/02-prerequisites.md)。
 
 ```bash
 # 方式 A：本地马上跑（零账号、不需要任何云平台）
@@ -139,16 +139,16 @@ npm run dev                 # 启动后打开 http://localhost:8799/__panel
 # 方式 B：部署到生产（Cloudflare Workers）
 npm install
 npm run deploy:cf           # build + 生成临时 toml（保留远程绑定/变量）+ wrangler deploy
-                           # 详见 docs/03-deploy.md（务必用 deploy:cf，裸 deploy 会清空远程绑定）
+                           # 详见 docs-site/docs/user/03-deploy.md（务必用 deploy:cf，裸 deploy 会清空远程绑定）
 ```
 
 不想用命令行部署？CF 粘贴 / Pages、EdgeOne、以及流水线发版，全部操作步骤见
-**[部署指南 docs/03-deploy.md](./docs/03-deploy.md)**。
+**[部署指南 docs-site/docs/user/03-deploy.md](./docs-site/docs/user/03-deploy.md)**。
 
 > **输出目录务必填 `.`（仓库根），不要填 `dist/public`**：Pages 需要根目录的 `_worker.js`
 > 承载数据面代理与 `/__panel/api/*`。只部署 `dist/public` 会得到一个「管理面能打开、
 > 但代理和接口全部 404」的站点。静态资源省额度靠的是长缓存响应头 + Pages 的
-> Fetch handler 缓存开关，与输出目录无关，详见 [FAQ](./docs/08-faq.md)。
+> Fetch handler 缓存开关，与输出目录无关，详见 [FAQ](./docs-site/docs/user/08-faq.md)。
 
 **本质说明**：本项目是运行在边缘平台（CF Workers/Pages、EO Pages）上的一段处理代码，自身**无持久硬盘、内存极小**，不具备真实的本地缓存/存储。它的缓存、配置、统计全部依托底层平台能力：
 - 配置/统计 → 绑定平台的 **KV**（CF）/ **EdgeOne KV** 托管存储；

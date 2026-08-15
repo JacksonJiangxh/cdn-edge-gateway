@@ -175,7 +175,7 @@
 "build":        "node build.mjs",
 "deploy:cf":    "npm run build && node scripts/gen-deploy-config.mjs && wrangler deploy -c wrangler.deploy.toml && rm -f wrangler.deploy.toml",
 "deploy:pages": "npm run build && wrangler pages deploy .",
-"deploy:esa":   "npm run build && echo '=== ESA 部署步骤 ===' && echo '1) ESA 控制台设置环境变量 REDIS_URL...' && ... && echo '详见 docs/14-deploy-esa.md'",
+"deploy:esa":   "npm run build && echo '=== ESA 部署步骤 ===' && echo '1) ESA 控制台设置环境变量 REDIS_URL...' && ... && echo '详见 docs-site/docs/dev/14-deploy-esa.md'",
 "deploy:esa:cli":"npm run build && node scripts/deploy-esa-cli.mjs",
 "dev":          "node scripts/dev.mjs",
 "check":        "node scripts/check.mjs",
