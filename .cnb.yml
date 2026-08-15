@@ -580,25 +580,16 @@ $:
             echo "触发事件: $CNB_EVENT"
             echo "分支/提交: $CNB_BRANCH @ $CNB_COMMIT_SHORT"
             echo "目标: 强制推送当前 commit 到 GitHub 仓库"
-        - name: 二次确认
-          script: |
-            set -e
-            if [ "${confirm:-}" != "sync" ]; then
-              echo "✗ 确认串不正确（需输入 sync），已中止"
-              exit 1
-            fi
-            echo "✓ 已确认同步"
         - name: 校验凭据
           script: |
             set -e
             [ -n "$GITHUB_TOKEN" ] || { echo "✗ 缺少 GITHUB_TOKEN（请检查密钥仓库）"; exit 1; }
-            [ -n "$GITHUB_TARGET_REPO" ] || { echo "✗ 缺少 GITHUB_TARGET_REPO（请检查密钥仓库或按钮输入框）"; exit 1; }
+            [ -n "$GITHUB_TARGET_REPO" ] || { echo "✗ 缺少 GITHUB_TARGET_REPO（请检查密钥仓库）"; exit 1; }
             echo "✓ 凭据就绪"
         - name: 强制推送当前 commit 到 GitHub
           script: |
             set -e
-            # 按钮输入框优先，其次密钥仓库变量
-            TARGET_REPO="${github_target_repo:-${GITHUB_TARGET_REPO}}"
+            TARGET_REPO="$GITHUB_TARGET_REPO"
             TARGET_BRANCH="${github_target_branch:-main}"
             # 注入 GitHub 凭证：https://<token>@github.com/... 形式避免明文落日志
             AUTH_REPO="$(echo "$TARGET_REPO" | sed -E 's#^(https?://)([^/]+)(/.*)$#\1x-access-token:\'"$GITHUB_TOKEN"'\@\2\3#')"
