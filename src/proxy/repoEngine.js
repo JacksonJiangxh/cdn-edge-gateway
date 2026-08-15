@@ -56,7 +56,7 @@ function repoErrorPage(ctx, reason, reqId) {
       status: 502,
       headers: {
         'content-type': 'text/html; charset=utf-8',
-        'cache-control': 'no-store',
+        'cache-control': 'public, max-age=60, s-maxage=60',
         'x-robots-tag': 'noindex, nofollow',
         ...(reqId ? { [REQUEST_ID_HEADER]: reqId } : {}),
       },

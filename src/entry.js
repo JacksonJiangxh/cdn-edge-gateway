@@ -116,6 +116,8 @@ async function dispatch(request, env, waitUntilFn) {
     );
     // 返回「仿 Cloudflare 5xx 伪装页」而非裸文本：保留正确状态码（502/503/500），
     // 随机 Ray ID + 大区文案用于防盗刷 / 防探测；真实内部细节不出现。
+    // 强制边缘缓存：失败路径（如被探测的坏 URL）会被 Cloudflare 边缘缓存 60s，
+    // 命中后不再进入本 Worker，避免反复消耗 Workers 请求数（防盗刷的关键一环）。
     const status = appErr.status || 500;
     const html = buildErrorPage({
       status,
@@ -127,7 +129,7 @@ async function dispatch(request, env, waitUntilFn) {
       status,
       headers: {
         'content-type': 'text/html; charset=utf-8',
-        'cache-control': 'no-store',
+        'cache-control': 'public, max-age=60, s-maxage=60',
         'x-robots-tag': 'noindex, nofollow',
         [REQUEST_ID_HEADER]: reqId,
       },
