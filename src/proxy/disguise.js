@@ -33,22 +33,14 @@ const DISGUISE_SERVER_NAME = 'cloudflare';
 /**
  * 内置静态伪装页。
  *
- * 仿 Cloudflare 5xx 拦截页（对齐现有 Nginx 静态 502 页的视觉），用于「host 未匹配到站点」
- * 时的兜底：让扫描器 / 盗刷脚本以为是真实的 Cloudflare 边缘在拦截，从而放弃进一步探测。
+ * 直接复刻上游项目 502 模板（JacksonJiangxh/JacksonJiangxh.github.io/static-pages/502.html）：
+ *  - 引用 cloudflare.com/cdn-cgi/styles/main.css 还原官方 Cloudflare 5xx 拦截页视觉；
+ *  - 浏览器端 JS 按当前域名、时间、Ray ID、节点大区实时填充，呈现“真实”细节；
+ *  - 不暴露本项目的配置指纹。
+ * 页面内容固定，适合 CDN 长期缓存；JS 仅在客户端运行，不增加 Workers 开销。
  *
- * 遵循伪装页设计要点（见文件头）：
- *  - 无域名 / 无 host 指纹；
- *  - 无 Click-to-reveal IP 等 JS 交互（静态页，可被边缘稳定长缓存、零失败面）；
- *  - 所有可辨识字段（Ray ID / 大区）采用「固定但格式真实」的占位值：
- *    真实 CF 每次请求 Ray ID 不同，但本伪装页依赖长 CDN 缓存省 Workers 配额，
- *    故用固定值以保证缓存命中；取值刻意写成真实 CF 的 16 位 hex / 机场码形态，
- *    外观与真实页无差异，又不泄露任何配置信息；
- *  - 内联样式，无外部依赖、无外部可观测信号；
- *  - `Server` 响应头同步为 `cloudflare`（见 staticDisguise），与页面语义自洽，
- *    避免出现「页面声称 CF、响应头却是 nginx」的致命指纹矛盾。
- *
- * 注意：本页与 src/errorPage.js 的 buildErrorPage（异常兜底页，带随机 Ray ID / IP reveal）
- * 用途不同——disguise 必须「静态 + 可缓存 + 零失败」，故不复用，独立维护此静态版。
+ * 注意：本页与 src/errorPage.js 的 buildErrorPage（异常兜底页）用途不同，
+ * 这里用于 host 未匹配时的静态伪装响应。
  */
 const STATIC_HTML = `<!DOCTYPE html>
 <!--[if lt IE 7]><html class="no-js ie6 oldie" lang="en-US"><![endif]-->
@@ -62,69 +54,213 @@ const STATIC_HTML = `<!DOCTYPE html>
     <meta http-equiv="X-UA-Compatible" content="IE=Edge">
     <meta name="robots" content="noindex, nofollow">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>502: Bad gateway</title>
-    <style>
-      body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#333;background:#fff}
-      #cf-wrapper{max-width:960px;margin:0 auto;padding:0 16px}
-      .code-label{display:inline-block;margin-left:.5rem;padding:.1rem .5rem;font-size:.8rem;background:#f3f4f6;color:#6b7280;border-radius:.25rem}
-      h1{font-weight:300;font-size:2rem;line-height:1.2;margin:.5rem 0}
-      .grid{display:flex;flex-wrap:wrap;margin:2rem 0;border-top:1px solid #eee;padding-top:1.5rem}
-      .cell{flex:1 1 33%;min-width:200px;padding:1rem;text-align:center}
-      .ok{color:#16a34a}.err{color:#dc2626}
-      h2{font-size:1.25rem;font-weight:400;margin:.5rem 0}
-      .cf-error-footer{margin-top:1.5rem;padding-top:1rem;border-top:1px solid #eee;font-size:.8rem;color:#6b7280}
-    </style>
+    <title id="page-title">cloudflare.com | 502: Bad gateway</title>
+    <link rel="stylesheet" href="https://cloudflare.com/cdn-cgi/styles/main.css">
+
+    <script>
+        /* ==========  配置区：后续只改这里 ========== */
+        const rayIdList = [
+            '1145141919810CnM',
+            '114514gDx1919810',
+            '1145141919810Gjb',
+            'Qnm1145141919810',
+            '19210711949101CN',
+            '20200928-GenShin',
+            'CnmJBdlGgJBdXQnm'
+        ];
+
+        // 大区 → 小区（数组为空时代表只有大区本身）
+        const regionMap = {
+            Mondstadt: [
+                'Knights of Favonius',
+                'Mondstadt City',
+                'Stormbearer Mountains',
+                'Windrise'
+            ],
+            Liyue: [
+                'Liyue Harbor',
+                'Jueyun Karst',
+                'The Chasm',
+                'Guyun Stone Forest'
+            ],
+            Inazuma: [
+                'Ritou',
+                'Kamisato Estate',
+                'Tenshukaku',
+                'Narukami Island'
+            ],
+            Sumeru: [
+                'Sumeru City',
+                'Avidya Forest',
+                'Desert of Hadramaveth',
+                'Port Ormos'
+            ],
+            Fontaine: [
+                'Court of Fontaine',
+                'Erinnyes Forest',
+                'Liffey Region',
+                'Fortress of Meropide'
+            ],
+            Natlan: [
+                'People of the Springs',
+                'Stadium of the Sacred Flame',
+                'Tona Canyon',
+                'Basalt Mountain'
+            ]
+        };
+
+        /* ==========  逻辑区：无需改动 ========== */
+        function pickRandom(arr) {
+            return arr[Math.floor(Math.random() * arr.length)];
+        }
+
+        function generateRayId() {
+            return pickRandom(rayIdList);
+        }
+
+        function generateRegionText() {
+            const standaloneChance = 0.20;          // 20% 仅大区
+            const majorRegions = Object.keys(regionMap);
+
+            const major = pickRandom(majorRegions);
+            if (Math.random() < standaloneChance || regionMap[major].length === 0) {
+                return major;
+            }
+            const detail = pickRandom(regionMap[major]);
+            return \`\${major} - \${detail}\`;
+        }
+
+        function formatUTCTime() {
+            const now = new Date();
+            const pad = n => String(n).padStart(2, '0');
+            return \`\${now.getUTCFullYear()}-\${pad(now.getUTCMonth() + 1)}-\${pad(now.getUTCDate())} \${pad(now.getUTCHours())}:\${pad(now.getUTCMinutes())}:\${pad(now.getUTCSeconds())} UTC\`;
+        }
+
+        async function fetchIP() {
+            try {
+                const res = await fetch('https://cloudflare.com/cdn-cgi/trace');
+                const text = await res.text();
+                const ip = text.split('\n').find(l => l.startsWith('ip='))?.split('=')[1];
+                if (ip) document.getElementById('cf-footer-ip').textContent = ip;
+            } catch {}
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const domain = window.location.hostname;
+            document.title = \`\${domain} | 502: Bad gateway\`;
+            document.getElementById('cf-host-status-name').textContent = domain;
+            document.querySelector('.mt-3').textContent = formatUTCTime();
+
+            document.getElementById('ray-id').textContent = generateRayId();
+            document.getElementById('cf-region-name').textContent = generateRegionText();
+
+            fetchIP();
+        });
+    </script>
 </head>
 
 <body>
     <div id="cf-wrapper">
-        <div id="cf-error-details">
-            <header>
-                <h1>
-                    <span>Bad gateway</span>
+        <div id="cf-error-details" class="p-0">
+            <header class="mx-auto pt-10 lg:pt-6 lg:px-8 w-240 lg:w-full mb-8">
+                <h1 class="inline-block sm:block sm:mb-2 font-light text-60 lg:text-4xl text-black-dark leading-tight mr-2">
+                    <span class="inline-block">Bad gateway</span>
                     <span class="code-label">Error code 502</span>
                 </h1>
-                <div>Visit <a href="https://www.cloudflare.com/5xx-error-landing?utm_source=errorcode_502" target="_blank" rel="noopener noreferrer">cloudflare.com</a> for more information.</div>
-                <div class="mt-3">2026-03-28 07:42:15 UTC</div>
+                <div>
+                    Visit <a href="https://www.cloudflare.com/5xx-error-landing?utm_source=errorcode_502" target="_blank" rel="noopener noreferrer">cloudflare.com</a>
+                    for more information.
+                </div>
+                <div class="mt-3">2000-00-00 00:00:00 UTC</div>
             </header>
 
-            <div class="grid">
-                <div class="cell">
-                    <span class="ok">&#9679;</span>
-                    <h3>Browser</h3>
-                    <span class="ok">Working</span>
-                </div>
-                <div class="cell">
-                    <span class="ok">&#9679;</span>
-                    <h3>Cloudflare</h3>
-                    <span class="ok">Working</span>
-                    <div>SJC</div>
-                </div>
-                <div class="cell">
-                    <span class="err">&#9679;</span>
-                    <h3>Host</h3>
-                    <span class="err">Error</span>
+            <div class="my-8 bg-gradient-gray">
+                <div class="w-240 lg:w-full mx-auto">
+                    <div class="clearfix md:px-8">
+                        <div id="cf-browser-status" class="relative w-1/3 md:w-full py-15 md:p-0 md:py-8 md:text-left md:border-solid md:border-0 md:border-b md:border-gray-400 overflow-hidden float-left md:float-none text-center">
+                            <div class="relative mb-10 md:m-0">
+                                <span class="cf-icon-browser block md:hidden h-20 bg-center bg-no-repeat"></span>
+                                <span class="cf-icon-ok w-12 h-12 absolute left-1/2 md:left-auto md:right-0 md:top-0 -ml-6 -bottom-4"></span>
+                            </div>
+                            <span class="md:block w-full truncate">You</span>
+                            <h3 class="md:inline-block mt-3 md:mt-0 text-2xl text-gray-600 font-light leading-1.3">Browser</h3>
+                            <span class="leading-1.3 text-2xl text-green-success">Working</span>
+                        </div>
+
+                        <div id="cf-cloudflare-status" class="relative w-1/3 md:w-full py-15 md:p-0 md:py-8 md:text-left md:border-solid md:border-0 md:border-b md:border-gray-400 overflow-hidden float-left md:float-none text-center">
+                            <div class="relative mb-10 md:m-0">
+                                <a href="https://www.cloudflare.com/5xx-error-landing?utm_source=errorcode_502" target="_blank" rel="noopener noreferrer">
+                                    <span class="cf-icon-cloud block md:hidden h-20 bg-center bg-no-repeat"></span>
+                                    <span class="cf-icon-ok w-12 h-12 absolute left-1/2 md:left-auto md:right-0 md:top-0 -ml-6 -bottom-4"></span>
+                                </a>
+                            </div>
+                            <span class="md:block w-full truncate" id="cf-region-name">Liyue</span>
+                            <h3 class="md:inline-block mt-3 md:mt-0 text-2xl text-gray-600 font-light leading-1.3">
+                                <a href="https://www.cloudflare.com/5xx-error-landing?utm_source=errorcode_502" target="_blank" rel="noopener noreferrer">Cloudflare</a>
+                            </h3>
+                            <span class="leading-1.3 text-2xl text-green-success">Working</span>
+                        </div>
+
+                        <div id="cf-host-status" class="cf-error-source relative w-1/3 md:w-full py-15 md:p-0 md:py-8 md:text-left md:border-solid md:border-0 md:border-b md:border-gray-400 overflow-hidden float-left md:float-none text-center">
+                            <div class="relative mb-10 md:m-0">
+                                <span class="cf-icon-server block md:hidden h-20 bg-center bg-no-repeat"></span>
+                                <span class="cf-icon-error w-12 h-12 absolute left-1/2 md:left-auto md:right-0 md:top-0 -ml-6 -bottom-4"></span>
+                            </div>
+                            <span class="md:block w-full truncate" id="cf-host-status-name">cloudflare.com</span>
+                            <h3 class="md:inline-block mt-3 md:mt-0 text-2xl text-gray-600 font-light leading-1.3">Host</h3>
+                            <span class="leading-1.3 text-2xl text-red-error">Error</span>
+                        </div>
+                    </div>
                 </div>
             </div>
 
-            <div>
-                <h2>What happened?</h2>
-                <p>The web server reported a bad gateway error.</p>
-                <h2>What can I do?</h2>
-                <p>Please try again in a few minutes.</p>
+            <div class="w-240 lg:w-full mx-auto mb-8 lg:px-8">
+                <div class="clearfix">
+                    <div class="w-1/2 md:w-full float-left pr-6 md:pb-10 md:pr-0 leading-relaxed">
+                        <h2 class="text-3xl font-normal leading-1.3 mb-4">What happened?</h2>
+                        <p>The web server reported a bad gateway error.</p>
+                    </div>
+                    <div class="w-1/2 md:w-full float-left leading-relaxed">
+                        <h2 class="text-3xl font-normal leading-1.3 mb-4">What can I do?</h2>
+                        <p class="mb-6">Please try again in a few minutes.</p>
+                    </div>
+                </div>
             </div>
 
-            <div class="cf-error-footer">
-                Cloudflare Ray ID: <strong>f3b9e1a7c2d4f608</strong>
-                <span> &bull; </span>
-                Performance &amp; security by
-                <a rel="noopener noreferrer" href="https://www.cloudflare.com/5xx-error-landing?utm_source=errorcode_502" target="_blank">Cloudflare</a>
-            </div>
-        </div>
-    </div>
+            <div class="cf-error-footer cf-wrapper w-240 lg:w-full py-10 sm:py-4 sm:px-8 mx-auto text-center sm:text-left border-solid border-0 border-t border-gray-300">
+                <p class="text-13">
+                    <span class="cf-footer-item sm:block sm:mb-1">
+                        Cloudflare Ray ID: <strong class="font-semibold" id="ray-id">1145141919810CnM</strong>
+                    </span>
+                    <span class="cf-footer-separator sm:hidden">&bull;</span>
+                    <span id="cf-footer-item-ip" class="cf-footer-item hidden sm:block sm:mb-1">
+                        Your IP: <button type="button" id="cf-footer-ip-reveal" class="cf-footer-ip-reveal-btn">Click to reveal</button>
+                                                <span class="hidden" id="cf-footer-ip">1.1.1.1</span>
+                        <span class="cf-footer-separator sm:hidden">&bull;</span>
+                    </span>
+                    <span class="cf-footer-item sm:block sm:mb-1">
+                        <span>Performance &amp; security by</span>
+                        <a rel="noopener noreferrer" href="https://www.cloudflare.com/5xx-error-landing?utm_source=errorcode_502" id="brand_link" target="_blank">Cloudflare</a>
+                    </span>
+                </p>
+                <script>
+                    (function () {
+                        var b = document.getElementById("cf-footer-item-ip");
+                        var c = document.getElementById("cf-footer-ip-reveal");
+                        if (b && "classList" in b) {
+                            b.classList.remove("hidden");
+                            c.addEventListener("click", function () {
+                                c.classList.add("hidden");
+                                document.getElementById("cf-footer-ip").classList.remove("hidden");
+                            });
+                        }
+                    })();
+                </script>
+            </div><!-- /.error-footer -->
+        </div><!-- /#cf-error-details -->
+    </div><!-- /#cf-wrapper -->
 </body>
-</html>
-`;
+</html>`;
 
 // ============================================================================
 // 伪装页缓存策略
