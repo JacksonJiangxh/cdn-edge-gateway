@@ -241,14 +241,18 @@ export
         hostNote.style.display = eng === 'fetch' ? '' : 'none';
       };
       engineSel.onchange = syncEngine;
-      // —— 整行可折叠（仿流量序列规则卡）：头部先选引擎，再填地址，点头部折叠/展开 ——
-      const head = el('div', { class: 'section-toggle origin-row-head' }, [
-        el('span', { class: 'origin-grip', text: '⠿', title: '拖拽调整优先级（上=优先）' }),
+      // —— 整行可折叠（仿规则卡 opNode）：折叠态仅显示别名+删除，展开才显全部 ——
+      const nameInput = nameField.querySelector('input');
+      // 折叠态标题行：grip + 别名 + 删除
+      const titleRow = el('div', { class: 'origin-title' }, [
+        el('span', { class: 'origin-grip tw', text: '▸' }),
+        el('span', { class: 'origin-name-label', text: o.name || o.addr || '(未命名)' }),
+        el('button', { class: 'btn btn-sm btn-danger', text: '移除源站', onclick: (e) => { e.stopPropagation(); row.remove(); } }),
+      ]);
+      // 展开态内容：引擎(第一行) → 地址(第二行) → 高级字段(折叠在 subcard 里)
+      const body = el('div', { class: 'section-body origin-body' }, [
         field('引擎类型', engineSel, '先选引擎，下方地址格式与字段随之变化：① fetch=标准 HTTP 回源；② socket=已弃用；③ r2=回源到 R2 桶（仅 CF）；④ cnb/github=仓库型引擎（自动生成重写+请求头规则）。可被⑨规则覆盖。'),
         addrField,
-        nameField,
-      ]);
-      const body = el('div', { class: 'section-body' }, [
         portField,
         schemeField,
         hostField,
@@ -258,12 +262,22 @@ export
         weightField,
         overrideHint,
       ]);
-      const removeBtn = el('button', { class: 'btn btn-sm btn-danger', text: '移除源站', onclick: (e) => { e.stopPropagation(); row.remove(); } });
-      head.appendChild(removeBtn);
-      const row = el('div', { class: 'subcard origin-card' }, [ head, body ]);
-      // 默认折叠，让多源站列表更紧凑；点头部切换（输入控件上的点击不触发展开/折叠）
+      const row = el('div', { class: 'subcard origin-card' }, [ titleRow, body ]);
+      // 默认折叠——多源站时列表紧凑，折叠态只露别名
       row.classList.add('collapsed');
-      head.onclick = (e) => { if (e.target.closest('input,select,button')) return; row.classList.toggle('collapsed'); };
+      // 点标题行切换折叠；输入控件上的点击不触发
+      titleRow.onclick = (e) => { if (e.target.closest('button')) return; row.classList.toggle('collapsed'); };
+      // 折叠/展开时同步箭头方向 + 标题文字（用户改了别名也要实时更新）
+      const refreshTitle = () => {
+        titleRow.querySelector('.tw').textContent = row.classList.contains('collapsed') ? '▸' : '▾';
+        titleRow.querySelector('.origin-name-label').textContent = nameInput.value.trim() || addrInput.value.trim() || '(未命名)';
+      };
+      // 用 MutationObserver 监听 collapsed 类变化来刷新箭头
+      new MutationObserver(refreshTitle).observe(row, { attributes: true, attributeFilter: ['class'] });
+      // 用户手输别名/地址时也实时更新折叠标题
+      nameInput.addEventListener('input', refreshTitle);
+      addrInput.addEventListener('input', refreshTitle);
+      refreshTitle();
       // 回显时根据已有 engine 显隐 R2 字段 + 地址提示
       syncEngine();
       originList.appendChild(row);

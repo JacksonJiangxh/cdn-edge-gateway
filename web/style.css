@@ -930,21 +930,19 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
 /* 来源站高级配置里嵌套的 subcard 缩进视觉 */
 .origin-row .subcard { margin: 10px 0; }
 
-/* 源站行（仿流量序列规则卡）：头部横向紧凑，可折叠 */
+/* 源站行（仿规则卡 opNode）：折叠态仅露别名标题，展开显全部字段 */
 .origin-card { margin: 10px 0; }
-.origin-row-head { flex-wrap: wrap; align-items: flex-end; }
-.origin-row-head .origin-grip { cursor: grab; color: var(--text-mute); font-size: 14px; line-height: 1; padding-bottom: 4px; }
-.origin-row-head .origin-grip:active { cursor: grabbing; }
-/* 头部三要素（引擎/地址/别名）横向铺开，折叠态也保持一行可读 */
-.origin-row-head .field { flex: 1 1 180px; min-width: 160px; margin: 0; }
-.origin-row-head .field > label { font-size: 12px; color: var(--text-mute); margin-bottom: 2px; }
-.origin-row-head .field .input,
-.origin-row-head .field select { height: 30px; font-size: 13px; }
-.origin-row-head .field .field-hint { display: none; }
-.origin-row-head .btn-danger { margin-left: auto; flex: none; align-self: center; }
-/* 折叠时头部只露引擎+地址+别名概要，body 隐藏由 .subcard.collapsed 处理 */
-.origin-card.collapsed .origin-row-head { background: var(--panel-2); }
-.origin-card .tw { margin-right: 2px; }
+/* 折叠态标题行：grip箭头 + 别名 + 删除按钮，一行紧凑 */
+.origin-title { display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer; user-select: none; }
+.origin-title:hover { background: var(--panel-2); }
+.origin-title .origin-grip { color: var(--text-mute); font-size: 13px; line-height: 1; flex-shrink: 0; transition: transform .15s; }
+.origin-card.collapsed .origin-grip { transform: rotate(0deg); }
+.origin-card:not(.collapsed) .origin-grip { transform: rotate(90deg); }
+.origin-name-label { flex: 1; font-weight: 500; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.origin-title .btn-danger { flex-shrink: 0; opacity: 0.7; }
+.origin-title .btn-danger:hover { opacity: 1; }
+/* 展开内容区 */
+.origin-body > .field { margin-bottom: 8px; }
 
 /* 站点抽屉内的「直接填写源站」内联编辑区 */
 .inline-origin-box {
