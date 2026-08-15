@@ -102,6 +102,10 @@
 # ── 部署可选变量（留空则回退默认 cdn-edge-gateway，也可在按钮输入框覆盖）──
 #   CF_PAGES_PROJECT            —— 可选，CF Pages 项目名
 #   EO_PAGES_PROJECT            —— 可选，EO Pages 项目名
+# ── 同步 GitHub 凭据（web_trigger_sync_github 按钮必须）──
+#   GITHUB_TOKEN                —— GitHub Personal Access Token（需 repo 权限，用于 force push）
+#   GITHUB_TARGET_REPO          —— GitHub 目标仓库地址（如 github.com/xzydm/cdn-edge-gateway.git）
+#                                     按钮输入框 github_target_repo 可临时覆盖
 #
 # 注意：运行时业务变量（REDIS_URL / ADMIN_PASSWORD / JWT_SECRET 等）【不进密钥仓库】，
 #       它们属于各厂商控制台的运行期「环境变量」，部署后到控制台设置即可（见下方各 stage 注释）。
@@ -555,6 +559,52 @@ $:
             esa-cli deploy --name "$PROJECT" --assets .
             echo "✓ ESA Pages 部署完成（项目: $PROJECT / 环境: $TARGET_ENV）"
             echo "  记得在 ESA 控制台「环境变量」中设置 REDIS_URL 后才能保存配置。"
+
+  # ---- 按钮：把当前 commit 强制推送覆盖到 GitHub 仓库 ----
+  # 作用：把 CNB 当前分支的 HEAD（当前 commit）强制推送到 GitHub 目标仓库，
+  #       覆盖目标分支（force push）。用于「CNB 为主仓库、GitHub 为镜像」场景。
+  # 凭据：来自密钥仓库的 GITHUB_TOKEN（GitHub Personal Access Token，需 repo 权限）
+  #       与 GITHUB_TARGET_REPO（GitHub 仓库地址，如 github.com/xzydm/cdn-edge-gateway.git）。
+  # 安全：两个变量来自密钥仓库（imports），不落库、不进版本库；force push 仅作用于
+  #       目标 GitHub 仓库，不影响 CNB 仓库本身。要求 confirm=sync 二次确认防误触。
+  # 变量优先级：按钮输入框 GITHUB_TARGET_REPO > 密钥仓库 GITHUB_TARGET_REPO。
+  web_trigger_sync_github:
+    - runner:
+        <<: *runner2
+      docker:
+        <<: *docker-image
+      imports: *secret-envs
+      stages:
+        - name: 确认手动触发
+          script: |
+            echo "触发事件: $CNB_EVENT"
+            echo "分支/提交: $CNB_BRANCH @ $CNB_COMMIT_SHORT"
+            echo "目标: 强制推送当前 commit 到 GitHub 仓库"
+        - name: 二次确认
+          script: |
+            set -e
+            if [ "${confirm:-}" != "sync" ]; then
+              echo "✗ 确认串不正确（需输入 sync），已中止"
+              exit 1
+            fi
+            echo "✓ 已确认同步"
+        - name: 校验凭据
+          script: |
+            set -e
+            [ -n "$GITHUB_TOKEN" ] || { echo "✗ 缺少 GITHUB_TOKEN（请检查密钥仓库）"; exit 1; }
+            [ -n "$GITHUB_TARGET_REPO" ] || { echo "✗ 缺少 GITHUB_TARGET_REPO（请检查密钥仓库或按钮输入框）"; exit 1; }
+            echo "✓ 凭据就绪"
+        - name: 强制推送当前 commit 到 GitHub
+          script: |
+            set -e
+            # 按钮输入框优先，其次密钥仓库变量
+            TARGET_REPO="${github_target_repo:-${GITHUB_TARGET_REPO}}"
+            TARGET_BRANCH="${github_target_branch:-main}"
+            # 注入 GitHub 凭证：https://<token>@github.com/... 形式避免明文落日志
+            AUTH_REPO="$(echo "$TARGET_REPO" | sed -E 's#^(https?://)([^/]+)(/.*)$#\1x-access-token:\'"$GITHUB_TOKEN"'\@\2\3#')"
+            echo "▸ 推送当前 commit ($CNB_COMMIT_SHORT) 到 $TARGET_REPO @ $TARGET_BRANCH（force）"
+            git push --force "$AUTH_REPO" "HEAD:refs/heads/$TARGET_BRANCH"
+            echo "✓ 已覆盖推送当前 commit 到 GitHub 仓库：$TARGET_REPO @ $TARGET_BRANCH"
 
   # ---- 按钮：清理历史流水线记录 ----
   # 目的：删除当前仓库的历史流水线构建日志，只保留最近 keep 条，避免日志堆积。

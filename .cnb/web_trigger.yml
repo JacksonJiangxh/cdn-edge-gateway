@@ -91,6 +91,29 @@ branch:
             type: input
             required: false
 
+      # ---------------- 同步当前 commit 到 GitHub 仓库 ----------------
+      - name: 🔁 同步到 GitHub
+        description: 把当前 commit 强制推送覆盖到 GitHub 目标仓库（需确认输入 sync）
+        event: web_trigger_sync_github
+        inputs:
+          confirm:
+            name: 确认
+            description: 输入 sync 才会执行强制推送（防误触）
+            type: input
+            required: true
+            default: ""
+          github_target_repo:
+            name: GitHub 目标仓库地址
+            description: 留空则用密钥仓库的 GITHUB_TARGET_REPO（如 github.com/xzydm/cdn-edge-gateway.git）
+            type: input
+            required: false
+          github_target_branch:
+            name: 目标分支
+            description: 覆盖到的 GitHub 分支，默认 main
+            type: input
+            required: false
+            default: main
+
       # ---------------- 清理历史流水线记录 ----------------
       - name: 🧹 清理历史流水线记录
         description: 删除当前仓库的历史流水线构建日志（保留最近 N 条），需确认输入 clean
