@@ -104,8 +104,9 @@
 #   EO_PAGES_PROJECT            —— 可选，EO Pages 项目名
 # ── 同步 GitHub 凭据（web_trigger_sync_github 按钮必须）──
 #   GITHUB_TOKEN                —— GitHub Personal Access Token（需 repo 权限，用于 force push）
-#   GITHUB_TARGET_REPO          —— GitHub 目标仓库地址（如 github.com/xzydm/cdn-edge-gateway.git）
-#                                     按钮输入框 github_target_repo 可临时覆盖
+#   GITHUB_TARGET_REPO          —— GitHub 目标仓库地址，支持带/不带 https:// 前缀
+#                                     （如 github.com/xzydm/cdn-edge-gateway.git 或
+#                                      https://github.com/xzydm/cdn-edge-gateway.git）
 #
 # 注意：运行时业务变量（REDIS_URL / ADMIN_PASSWORD / JWT_SECRET 等）【不进密钥仓库】，
 #       它们属于各厂商控制台的运行期「环境变量」，部署后到控制台设置即可（见下方各 stage 注释）。
@@ -589,9 +590,14 @@ $:
         - name: 强制推送当前 commit 到 GitHub
           script: |
             set -e
-            TARGET_REPO="$GITHUB_TARGET_REPO"
             TARGET_BRANCH="${github_target_branch:-main}"
-            # 注入 GitHub 凭证：https://<token>@github.com/... 形式避免明文落日志
+            # 归一化仓库地址：支持「github.com/x/foo.git」或「https://github.com/x/foo.git」两种填法
+            TARGET_REPO="$GITHUB_TARGET_REPO"
+            case "$TARGET_REPO" in
+              https://*|http://*|git@*) ;;  # 已带协议，原样
+              *) TARGET_REPO="https://$TARGET_REPO" ;;  # 缺前缀则自动补 https://
+            esac
+            # 注入 GitHub 凭证：https://x-access-token:<token>@github.com/... 避免明文落日志
             AUTH_REPO="$(echo "$TARGET_REPO" | sed -E 's#^(https?://)([^/]+)(/.*)$#\1x-access-token:\'"$GITHUB_TOKEN"'\@\2\3#')"
             echo "▸ 推送当前 commit ($CNB_COMMIT_SHORT) 到 $TARGET_REPO @ $TARGET_BRANCH（force）"
             git push --force "$AUTH_REPO" "HEAD:refs/heads/$TARGET_BRANCH"
