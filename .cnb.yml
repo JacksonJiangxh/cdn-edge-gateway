@@ -40,20 +40,21 @@
 # 避免空卷遮蔽镜像内已固化的内容。chromium 已固化进 /opt/playwright-browsers 镜像层，不挂卷。
 # 缓存镜像构建任务（每个启用镜像缓存的按钮 stages 首项）：
 # 【关键】CNB 的 docker:cache 构建上下文 ONLY 包含 by 列表里的文件 + Dockerfile 本身，
-#   未列出的文件在构建时「视为不存在」。故 COPY . . 的上下文由 by 决定。
-#   当前 npm ci 的 postinstall 依赖 scripts/ensure-playwright-browsers.mjs，必须把
-#   scripts/ 下的具体文件纳入 by，否则镜像构建阶段 npm ci 会因找不到脚本而 MODULE_NOT_FOUND。
-# 【坑】by 里写目录/glob（如 scripts/*）在当前平台版本「不会」展开进 build context（实测
-#   日志显示 context 仍是 263kB、/space/scripts 不存在）。必须逐文件显式列出才生效。
+#   未列出的文件在构建时「视为不存在」。故 cache.dockerfile 内 COPY 的上下文由 by 决定。
 #
-# 【重要修正】by 同时决定「何时重建镜像」。本缓存镜像承载的是「环境依赖」
-#   （apt 库 + node_modules + chromium 二进制 + esa-cli），其唯一真相源是
-#   package-lock.json —— 依赖树变了才需要重建环境。
-#   因此 by 只保留 package-lock.json + 构建所需的最小脚本集（scripts/ 用于 npm ci
-#   的 postinstall 与 check，package.json 仅用于供 npm ci 读取 scripts/postinstall 字段）。
-#   业务代码（src/、web/、docs/ 等）的改动【不应】触发镜像重建 —— 那属于
-#   「监控上下文误覆盖到代码层面」，会导致每次 bug 修复/优化都重烤整镜像（约 40s~分钟级），
-#   而运行时各 stage 已有兜底的命令级快速跳过，无需重建环境。
+# 【矛盾与修复】by 同时承担「构建上下文白名单」与「重建触发条件」两职，原设计被迫把
+#   scripts/*.mjs 逐文件塞进 by（postinstall 依赖 scripts/ensure-playwright-browsers.mjs），
+#   导致「改脚本即重烤整镜像」且清单脆弱（新增脚本漏加即 MODULE_NOT_FOUND）。
+#   修复：cache.dockerfile 改用 `npm ci --ignore-scripts` + 显式 `npx playwright install`
+#   固化 chromium，构建上下文【不再需要 scripts/】，从而把 scripts/ 连同业务代码一起移出 by。
+#   依据官方文档：npm ci 仅需 package.json + package-lock.json 即可装依赖，无需业务代码。
+#
+# 【当前 by 三件套】只含「环境依赖真相源」：
+#   - package-lock.json / package.json：依赖树变化才需重建（versionBy 取 package-lock.json）；
+#   - cache.dockerfile：Dockerfile 内容变化需重建。
+#   业务代码（src/、web/、docs/）与 scripts/ 的改动【均不触发】镜像重建 —— 根治「改代码重烤镜像」。
+#   新增脚本无需再改 by，消除脆弱清单维护。运行时各 stage 在完整仓库 checkout 上跑 postinstall，
+#   探测 /opt 已固化的 chromium 秒过、零下载，行为不变。
 .docker-cache-task: &docker-cache-task
   name: 构建依赖缓存镜像
   type: docker:cache
@@ -63,18 +64,6 @@
       - package-lock.json
       - package.json
       - cache.dockerfile
-      - scripts/_tpl_check.mjs
-      - scripts/check.mjs
-      - scripts/cleanup-cnb-history.py
-      - scripts/deploy-esa-cli.mjs
-      - scripts/dev.mjs
-      - scripts/e2e-browser.mjs
-      - scripts/e2e-test.mjs
-      - scripts/ensure-playwright-browsers.mjs
-      - scripts/gen-deploy-config.mjs
-      - scripts/gen-entries.mjs
-      - scripts/test-frontend-dom.mjs
-      - scripts/test-mem-budget.mjs
     versionBy:
       - package-lock.json
   exports:

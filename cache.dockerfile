@@ -7,8 +7,14 @@
 #   3) Playwright 的 chromium 二进制（/opt/playwright-browsers）
 #   4) 全局 esa-cli（ESA 按钮免 npm install -g）
 #
-# 重建触发：.cnb.yml 中 docker:cache 任务的 by=[package.json,package-lock.json]，
-#           versionBy=[package-lock.json] —— 仅 lock 变化才重建镜像。
+# 重建触发：.cnb.yml 中 docker:cache 任务的 by=[package.json,package-lock.json,cache.dockerfile]，
+#           versionBy=[package-lock.json] —— 仅 lock/package.json 变化才重建镜像。
+# 关键设计：构建上下文【只含依赖清单】，不含业务代码（src/web/docs）也不含 scripts/。
+#   - npm ci 仅需 package.json + package-lock.json 即可装出完整 node_modules，无需业务代码；
+#   - postinstall（scripts/ensure-playwright-browsers.mjs）用 --ignore-scripts 跳过，
+#     故 scripts/ 无需进 by —— 改业务代码或改脚本都【不会】触发镜像重建；
+#   - chromium 改由下方显式 `npx playwright install --with-deps` 固化进镜像层（playwright 已在
+#     node_modules，不依赖 scripts/），运行时各 stage 探测 /opt 命中秒过、零下载。
 
 # 基础镜像与运行时流水线保持一致（debian:13-all 已预装 node24/npm11/git/curl/python3）
 FROM docker.cnb.cool/xzydm/mirrors/debian:13-all
@@ -32,16 +38,16 @@ RUN export DEBIAN_FRONTEND=noninteractive \
  && echo "✓ 系统共享库已固化进镜像"
 
 # ---------- 2) npm ci 项目依赖 ----------
-# 必须 COPY 整个上下文：postinstall（scripts/ensure-playwright-browsers.mjs）
-# 依赖 scripts/ 目录，缺失会导致 npm ci 失败。
-COPY . .
-RUN npm ci \
+# 只 COPY 依赖清单（最小集）：业务代码（src/web/docs）与 scripts/ 都不进构建上下文，
+# 从根本上杜绝「改代码触发镜像重建」。npm ci 仅需 package.json + package-lock.json
+# 即可按 lock 精确装出完整 node_modules（devDependencies 含 playwright/esbuild/wrangler/esa-cli）。
+# --ignore-scripts 跳过 postinstall（它依赖 scripts/ 上下文），chromium 改由下方第 3 步显式固化。
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts \
  && echo "✓ node_modules 已固化进镜像"
 
 # ---------- 3) Playwright chromium 二进制 ----------
-# 注意：chromium 已由上面 npm ci 的 postinstall（scripts/ensure-playwright-browsers.mjs，
-# 在 root 环境走 --with-deps）装好。
-# 关键：浏览器二进制必须落在 /opt/playwright-browsers，而非默认的 /root/.cache/ms-playwright。
+# 浏览器二进制必须落在 /opt/playwright-browsers，而非默认的 /root/.cache/ms-playwright。
 # 原因（官方文档佐证，https://docs.cnb.cool/zh/build/grammar.html 的 DOCKER.VOLUMES 章节）：
 #   - volumes 的 copy-on-write 模式「并非实时跨 stage 共享可变写层」，且「挂载点会覆盖（遮蔽）
 #     容器内原有内容」。install 阶段写入 /root/.cache/ms-playwright 的私有副本，build 阶段
@@ -50,9 +56,13 @@ RUN npm ci \
 #     （非 /root/.cache 标准缓存目录，规避 docker:cache 导出链路对其的不可靠保留），所有
 #     stage 直接读镜像层、零下载。脚本 ensure-playwright-browsers.mjs / e2e-browser.mjs
 #     会自动尊重该 ENV。
+# 此处用显式 `npx playwright install --with-deps` 固化（playwright 已在 node_modules，不依赖
+# scripts/），替代原 postinstall 的 chromium 准备；系统共享库已由第 1 步 apt 固化，--with-deps
+# 幂等且 so 已就绪、不会重复 apt。运行时各 stage 在完整仓库跑 postinstall 时探测 /opt 命中秒过。
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 RUN mkdir -p /opt/playwright-browsers \
- && echo "✓ Playwright 浏览器缓存目录已就绪: $PLAYWRIGHT_BROWSERS_PATH"
+ && npx playwright install --with-deps chromium \
+ && echo "✓ chromium 已固化进镜像: $PLAYWRIGHT_BROWSERS_PATH"
 
 # ---------- 4) 全局 esa-cli（ESA 按钮复用） ----------
 RUN npm install -g esa-cli \
