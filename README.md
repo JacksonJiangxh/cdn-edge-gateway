@@ -108,13 +108,21 @@ build.mjs                 # 健壮构建：自动生成入口 → 阶段字典�
 ```
 
 > **构建健壮性设计**：`build.mjs` 已去除「base64 内联 HTML / 函数 replacement 防 `$` 展开 / 前端不压缩 / STAGE_OPS 文本切片一致性断言 / 正则猜 HTML 标签结构」等脆弱 hack。
+>
 > 改为：
+>
 > ⓪ 前端入口 `web/_stage.entry.js` / `web/_app.entry.js` 由 `scripts/gen-entries.mjs` 在构建期自动生成（从 `src/config/stages.js` 抽取阶段字典子集、聚合 `web/api.js+app.js`），**不再依赖手写 gitignored 入口文件**，`npm run build` 开箱即用、从根上消除「手写入口 → 非标准导出/误转义 → 语法错误」；
+>
 > ① 前端阶段字典由 `src/config/stages.js` 单一真相源经 esbuild 生成 `web/_stage.gen.js`，`web/app.js` 直接 import，消除「改一处漏一处」；
+>
 > ② CSS/JS 注入改用 `web/index.html` 的显式注释标记 `<!-- BUILD:STYLE -->` / `<!-- BUILD:SCRIPT -->` 做确定性替换（`build.mjs` 的 `injectInline` / `injectExternal`），**不再用正则去猜 `<link style.css>` / `<script src=api|app.js>` / `</body>` 位置**，并加「注入后产物断言」——HTML 结构调整导致缺资源时构建显式失败而非隐性回归；
+>
 > ③ 内联 UI 用 `JSON.stringify` 生成 `src/ui.gen.js` 的直接字符串 `UI_HTML` / `UI_CSS`（esbuild 打包时再次安全转义，无边界破裂风险），**已移除 base64 双份冗余**（不再导出 `UI_HTML_B64` / `UI_CSS_B64`，体积更小、消费方更简单）；
+>
 > ④ 前端 JS 走正常 esbuild bundle（可压缩），经副作用入口保活避免死代码消除；
+>
 > ⑤ 构建末尾用 esbuild `transform` 解析内联脚本 + 栈式校验 HTML 标签闭合与括号配对，失败即非零退出，持续拦截「构建成功但产物不可用」的回归；
+>
 > ⑥ `npm run check`（`scripts/check.mjs`）在提交前/CI 做静态一致性检查：`CLOUD_PLATFORM` 取值恒为规范值 `cf|eo|esa`（拦截回退到 `edgeone`/`cloudflare`/`aliyun-esa`/`pages` 等旧别名），并校验前端入口可解析、缺失自动重建；已接入全部 5 个 GitHub Actions workflow（`ci.yml` + 4 个 `deploy-*.yml`）的构建前步骤，前置拦截平台口径/入口损坏类回归。
 
 ---
