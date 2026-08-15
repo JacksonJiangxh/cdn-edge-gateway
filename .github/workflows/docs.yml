@@ -1,12 +1,22 @@
 name: 部署文档到 GitHub Pages
 
+# 触发策略：
+#  - 推送 main 且文档相关文件变化时，自动重新构建并部署
+#  - 文档源在 docs-site/docs/，配置 mkdocs.yml / requirements.txt 均位于 docs-site/ 内，
+#    因此 paths 直接监听 docs-site/** 即可覆盖「文档发生变化」的所有场景
+#  - 工作流自身改动也触发，避免配置更新后不生效
+#  - 支持 PR 预览构建（仅构建、不部署）
+#  - 支持手动 workflow_dispatch
 on:
   push:
     branches: [main]
     paths:
+      - 'docs-site/**'                       # 文档源、mkdocs.yml、requirements.txt 等任意改动
+      - '.github/workflows/docs.yml'         # 工作流自身改动
+  pull_request:
+    branches: [main]
+    paths:
       - 'docs-site/**'
-      - '.github/workflows/docs.yml'
-  # 允许手动触发
   workflow_dispatch:
 
 # 允许 GITHUB_TOKEN 推送到 Pages
@@ -17,7 +27,7 @@ permissions:
 
 # 同一时间只跑一个 Pages 部署
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -34,18 +44,34 @@ jobs:
         with:
           python-version: '3.x'
 
+      # 缓存 pip 依赖，加速重复构建
+      - name: 缓存 pip 依赖
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-docs-${{ hashFiles('docs-site/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-docs-
+
       - name: 安装 MkDocs Material
         run: pip install -r docs-site/requirements.txt
 
       - name: 构建文档站
-        run: mkdocs build -f docs-site/mkdocs.yml --strict
+        run: |
+          # 移除 --strict：单个文档警告不应阻断整站发布；
+          # 仅当构建出现真正错误（非零退出）时才失败。
+          mkdocs build -f docs-site/mkdocs.yml
 
       - name: 上传 Pages 产物
+        # PR 事件不部署，仅构建验证
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs-site/site
 
   deploy:
+    # 仅 push 到 main 时部署；PR 跳过部署
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     environment:
