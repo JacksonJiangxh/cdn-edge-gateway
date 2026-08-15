@@ -80,29 +80,21 @@ export   function conditionRow(cond, onRemove) {
     const extDlId = 'ext-presets-dl-' + Math.random().toString(36).slice(2);
     const extDl = el('datalist', { id: extDlId }, EXTENSION_PRESETS.map((e) =>
       el('option', { value: e })));
-    const valInput = el('input', {
-      class: 'input',
-      value: (cond.values || []).join(', '),
-      placeholder: '多个值用逗号分隔（之间为“或”）',
-    });
     const icCb = el('input', { type: 'checkbox', checked: cond.ignoreCase !== false });
     const valHint = el('span', { class: 'field-hint muted' });
-    // 后缀候选：EO/CF 风格分类多选下拉（替代原先在值框下方平铺的 chips）。
-    // 点击触发框弹出分类面板，已选填充高亮、未选描边；同时保留逗号手填能力。
+    // 后缀候选：EO/CF 风格组合框多选（与状态码组合框同款，内嵌输入框 + 分组面板）。
+    // 既可手填逗号分隔值，也可点箭头勾选；已选高亮、未选描边。不再额外并排独立选择框。
     const extMs = multiSelectPanel({
       presets: EXTENSION_PRESETS,
       groups: EXTENSION_GROUPS,
-      getValue: () => valInput.value,
-      setValue: (t) => { valInput.value = t; valInput.focus(); },
       tokenOf: (e) => String(e).toLowerCase(),
-      isSelected: (e) => {
-        const norm = String(e).toLowerCase();
-        return valInput.value.split(',').map((s) => s.trim().replace(/^\./, '').toLowerCase()).filter(Boolean).includes(norm);
-      },
       render: (e) => '.' + e,
-      placeholder: '选择文件后缀（可多选）',
+      placeholder: '多个值用逗号分隔（之间为“或”）；或点右侧箭头选择文件后缀',
     });
-    const extTriggerWrap = el('div', { class: 'ms-trigger-wrap' }, [extMs.trigger]);
+    const valInput = extMs.input;
+    // 回填已有条件的值（编辑已有规则 / 初始化）到组合框输入框。
+    if (cond.values && cond.values.length) valInput.value = cond.values.join(', ');
+    const extTriggerWrap = el('div', { class: 'ms-trigger-wrap' }, [extMs.combobox]);
     valInput.addEventListener('input', () => extMs.syncFromInput());
 
     const keyWrap = el('div', { class: 'cond-cell' }, [keyInput]);

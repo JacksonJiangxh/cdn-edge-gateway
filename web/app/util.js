@@ -120,29 +120,35 @@ export function select(id, options, value, preset, extraClass) {
   return sel;
 }
 
-// multiSelectPanel
-export   function multiSelectPanel({ presets, groups, getValue, setValue, tokenOf, isSelected, render, placeholder }) {
+// multiSelectPanel（组合框多选）：与 singleSelectPanel 同款 combobox 形态，
+// 触发器内嵌入真实输入框——既可手填逗号分隔的值，也可点箭头展开分组面板勾选。
+// 这样整体上与「可输入可下拉」的状态码组合框风格统一，不再额外并排一个独立选择框。
+export   function multiSelectPanel({ presets, groups, tokenOf, render, placeholder }) {
     const tokenOfSafe = tokenOf || ((r) => String(r));
-    const isSelSafe = isSelected || ((r) => {
-      const cur = getValue().split(',').map((s) => s.trim()).filter(Boolean);
-      return cur.includes(tokenOfSafe(r));
-    });
     const renderSafe = render || ((r) => String(r));
 
-    // 触发框：只读摘要，点击展开面板；右侧箭头随开合旋转。
-    const trigger = el('button', {
-      type: 'button',
-      class: 'ms-trigger',
-      onclick: (e) => { e.preventDefault(); e.stopPropagation(); toggle(); },
-    }, [
-      el('span', { class: 'ms-trigger-text', text: '请选择…' }),
-      el('span', { class: 'ms-caret', text: '▾' }),
-    ]);
-    const triggerText = trigger.querySelector('.ms-trigger-text');
+    // 组合框：输入框（显示逗号分隔值、可手填）+ 右侧下拉箭头。
+    const input = el('input', {
+      class: 'input ms-combobox-input',
+      type: 'text',
+      value: '',
+      placeholder: placeholder || '请选择…',
+      spellcheck: 'false',
+      autocomplete: 'off',
+    });
+    const caret = el('span', { class: 'ms-caret', text: '▾' });
+    const trigger = el('div', { class: 'ms-trigger ms-trigger--combo' }, [input, caret]);
+    const getV = () => input.value;
+    const setV = (v) => { input.value = v; };
 
     // 弹出面板（初始隐藏，挂在 body 上）。
     const panel = el('div', { class: 'ms-panel', hidden: true });
     const optEls = new Map(); // raw -> 候选按钮节点
+
+    function isSelSafe(raw) {
+      const cur = getV().split(',').map((s) => s.trim()).filter(Boolean);
+      return cur.includes(tokenOfSafe(raw));
+    }
 
     for (const g of groups) {
       const groupEl = el('div', { class: 'ms-group' }, [
@@ -181,13 +187,9 @@ export   function multiSelectPanel({ presets, groups, getValue, setValue, tokenO
 
     function syncTrigger() {
       const count = [...optEls.keys()].filter((r) => isSelSafe(r)).length;
-      if (count > 0) {
-        triggerText.textContent = '已选 ' + count + ' 项';
-        trigger.classList.add('has-value');
-      } else {
-        triggerText.textContent = placeholder || '请选择…';
-        trigger.classList.remove('has-value');
-      }
+      // 多选用输入框本身承载已选值，trigger 不再显示独立摘要，仅高亮有无内容。
+      if (count > 0) trigger.classList.add('has-value');
+      else trigger.classList.remove('has-value');
     }
     function syncOpts() {
       for (const [raw, node] of optEls) {
@@ -195,12 +197,12 @@ export   function multiSelectPanel({ presets, groups, getValue, setValue, tokenO
       }
     }
     function toggleItem(raw) {
-      const cur = getValue().split(',').map((s) => s.trim()).filter(Boolean);
+      const cur = getV().split(',').map((s) => s.trim()).filter(Boolean);
       const token = tokenOfSafe(raw);
       const idx = cur.indexOf(token);
       if (idx >= 0) cur.splice(idx, 1);
       else cur.push(token);
-      setValue(cur.join(', '));
+      setV(cur.join(', '));
       syncTrigger();
       syncOpts();
     }
@@ -238,14 +240,17 @@ export   function multiSelectPanel({ presets, groups, getValue, setValue, tokenO
       if (panel.contains(e.target) || trigger.contains(e.target)) return;
       hide();
     }
-    // 手填值框时反向同步选中态与摘要。
+    // 手填值框时反向同步选中态与高亮。
     function syncFromInput() { syncOpts(); syncTrigger(); }
+
+    input.addEventListener('focus', show);
+    caret.addEventListener('click', (e) => { e.stopPropagation(); open ? hide() : (input.focus(), show()); });
 
     document.body.appendChild(panel);
     syncTrigger();
 
     return {
-      trigger, panel, syncFromInput,
+      combobox: trigger, input, panel, syncFromInput,
       destroy() {
         hide();
         panel.remove();
