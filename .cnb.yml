@@ -460,7 +460,11 @@ $:
           # ADMIN_PATH 是【纯运行时】变量，build 阶段不读取它（见 build.mjs）。
           # 管理面静态资源使用固定物理路径 /assets，与 ADMIN_PATH 解耦，
           # 改管理面入口前缀无需重新构建。运行时在「环境变量」里配 ADMIN_PATH 即可。
-          script: npm run build
+          script: |
+            npm run build
+            # 本地构建即产出 EO「仅上传产物」部署包 dist-eo/（薄壳+_worker.js+静态资源
+            # + 无 buildCommand 的精简 edgeone.json），后续发布 stage 直接上传、云端不重新构建。
+            node scripts/package-eo.mjs
         - name: 部署前自检清单
           <<: *docker-cache-image
           script: |
@@ -470,7 +474,7 @@ $:
             echo "• ADMIN_PATH（可选，不设用默认 __panel）/ CLOUD_PLATFORM（可不设，薄壳补全）"
         - name: 发布到 EO Pages
           imports: *secret-envs
-          image: tencentcom/deploy-eopages:latest
+          <<: *docker-cache-image
           script: |
             set -e
             [ -n "$EO_SECRET" ] || { echo "✗ 缺少 EO_SECRET（请检查密钥仓库）"; exit 1; }
@@ -479,16 +483,14 @@ $:
             TARGET_ENV="${eo_env:-preview}"
             echo "项目: $PROJECT / 环境: $TARGET_ENV"
 
-            # 【关键】对齐 Cloudflare 的「构建好只上传」语义，避免 EO 云端重复构建
-            # 消耗构建次数、并在云端重跑 e2e 校验：
-            #   1) 本地先 npm run build（产出 _worker.js + dist/public）
-            #   2) node scripts/package-eo.mjs 把薄壳 + 产物 + 静态资源 + 无 buildCommand 的
-            #      精简 edgeone.json 打包进 dist-eo/（云端读到该目录不再触发构建）
-            #   3) edgeone makers deploy dist-eo 只上传产物，云端不再 npm install / npm run build
-            command -v node >/dev/null 2>&1 || { echo "✗ 该部署镜像不含 node，无法本地构建；请改用基于 node 的镜像或前置 build stage"; exit 1; }
-            npm ci
-            npm run build
-            node scripts/package-eo.mjs
+            # 【关键】对齐 Cloudflare 的「构建好只上传」语义：前面 build stage 已本地构建
+            # 并处出 dist-eo/（薄壳+_worker.js+静态资源+无 buildCommand 的精简 edgeone.json），
+            # 这里【只上传产物】、云端不再 npm install / npm run build，不消耗构建次数。
+            # 兜底：若工作区未共享到 dist-eo（极少见的 stage 隔离），重新本地组装一次。
+            if [ ! -f dist-eo/edgeone.json ]; then
+              command -v node >/dev/null 2>&1 || { echo "✗ 缺少 dist-eo 且部署镜像无 node，无法兜底组装；请确认 build stage 已产出"; exit 1; }
+              node scripts/package-eo.mjs
+            fi
 
             edgeone makers deploy dist-eo \
               -n "$PROJECT" \
