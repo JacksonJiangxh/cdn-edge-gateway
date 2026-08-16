@@ -492,7 +492,9 @@ $:
               node scripts/package-eo.mjs
             fi
 
-            edgeone makers deploy dist-eo \
+            # deploy-eopages 封装镜像不支持「只上传产物」且会触发云端构建；
+            # 改用 npx edgeone（与 GitHub 路线一致）上传本地产物包 dist-eo/，云端不重新构建。
+            npx -y edgeone makers deploy dist-eo \
               -n "$PROJECT" \
               -t "$EO_SECRET" \
               -e "$TARGET_ENV"
