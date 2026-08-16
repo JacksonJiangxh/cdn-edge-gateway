@@ -22,15 +22,6 @@
 import { DEFAULT_DISGUISE, DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
 
 /**
- * 伪装页 Server 头指纹（默认 'cloudflare'）。
- * 与内置 STATIC_HTML（仿 Cloudflare 5xx 拦截页）语义自洽：
- * 页面声称是 Cloudflare 拦截页，响应头也必须是 cloudflare，否则「页面 CF、头 nginx」
- * 的矛盾会成为最强的「这是假 CF」指纹。
- * 此值本质是「流量序列内部量」，不作为可配项；若需变更伪装指纹，改此引擎常量即可。
- */
-const DISGUISE_SERVER_NAME = 'cloudflare';
-
-/**
  * 内置静态伪装页。
  *
  * 直接复刻上游项目 502 模板（JacksonJiangxh/JacksonJiangxh.github.io/static-pages/502.html）：
@@ -328,10 +319,10 @@ export async function renderDisguise(ctx, disguise) {
  */
 function staticDisguise(status, dg) {
   const code = Number.isInteger(status) && status >= 200 && status <= 599 ? status : 200;
-  const maxAge = dg?.cdnMaxAge ?? 86400;
-  // 服务端指纹与页面语义自洽：Server 名取自引擎常量 DISGUISE_SERVER_NAME（'cloudflare'），
-  // 与仿 CF 拦截页一致，避免「页面 CF、头 nginx」的致命指纹矛盾。
-  const serverName = DISGUISE_SERVER_NAME;
+  const maxAge = dg.cdnMaxAge;
+  // 服务端指纹与页面语义自洽：Server 名取自规则缺省 error.disguiseServer（'cloudflare'），
+  // 与仿 CF 拦截页一致，避免「页面 CF、头 nginx」的致命指纹矛盾。单一真源为 stages 缺省。
+  const serverName = DEFAULT_GLOBAL_RULES.error.disguiseServer;
   return new Response(STATIC_HTML, {
     status: code,
     headers: {
@@ -359,7 +350,7 @@ function staticDisguise(status, dg) {
  */
 async function proxyDisguise(ctx, target, dg, proxyUA) {
   // isolate 级缓存：同一 target 在 isolate 生命周期内只 fetch 一次
-  const isolateTtl = dg?.isolateTtlMs ?? 600000;
+  const isolateTtl = dg.isolateTtlMs;
   const now = Date.now();
   if (_proxyDisguiseCache && _proxyDisguiseCache.key === target &&
       (now - _proxyDisguiseCache.cachedAt) < isolateTtl) {
@@ -390,10 +381,10 @@ async function proxyDisguise(ctx, target, dg, proxyUA) {
     if (buf.byteLength > MAX_BODY) return null;
     const body = new TextDecoder().decode(buf);
     const ct = upstream.headers.get('content-type');
-    const maxAge = dg?.cdnMaxAge ?? 86400;
-    // 服务端指纹与页面语义自洽：Server 名取自引擎常量 DISGUISE_SERVER_NAME（'cloudflare'），
-    // 与仿 CF 拦截页一致，避免「页面 CF、头 nginx」的致命指纹矛盾。
-    const serverName = DISGUISE_SERVER_NAME;
+    const maxAge = dg.cdnMaxAge;
+    // 服务端指纹与页面语义自洽：Server 名取自规则缺省 error.disguiseServer（'cloudflare'），
+    // 与仿 CF 拦截页一致，避免「页面 CF、头 nginx」的致命指纹矛盾。单一真源为 stages 缺省。
+    const serverName = DEFAULT_GLOBAL_RULES.error.disguiseServer;
 
     const headers = {
       'content-type': ct || 'text/html; charset=utf-8',

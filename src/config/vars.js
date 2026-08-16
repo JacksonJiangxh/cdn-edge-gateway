@@ -435,3 +435,81 @@ export function validateVarNames(str) {
 export function hasVars(str) {
   return typeof str === 'string' && str.indexOf('${') !== -1;
 }
+
+// ============================================================================
+// 双下划线系统占位符体系（__xxx__）
+// ----------------------------------------------------------------------------
+// 与 ${var}「用户变量」完全隔离的独立体系：
+//   - 形态：__name__，全小写字母/数字/下划线，无 ${} 花括号；
+//   - 作用：引用本项目运行期内部值（边缘缓存 TTL、调试标记、命中来源等），
+//            这些值用户在配置里无法用变量表达，也不应误当成用户变量。
+//   - 隔离性：
+//       * expandVars 以 indexOf('${') 短路，对 __xxx__ 完全透明；
+//       * extractVarNames / validateVarNames 只扫 ${...}，不会误拦截 __xxx__，
+//         也无需把 __xxx__ 塞进 SCALAR_VARS 白名单（那样反而混淆两套语义）。
+//   - 渲染位置：仅在响应头阶段（applyHeaderOps）求值，不影响请求热路径。
+// ============================================================================
+
+/** 匹配 __name__（name 仅含 a-z0-9_），全局、多匹配。 */
+export const SYS_REF_RE = /__([a-z0-9_]+)__/g;
+
+/**
+ * 把字符串里的 __xxx__ 占位符展开为运行期内部值。
+ * 无下划线时直接短路返回，零开销。
+ * @param {string} str
+ * @param {object} ctx 运行期上下文（含 __globalStages / debug / cache / startTime / caps 等）
+ * @returns {string}
+ */
+export function expandSysVars(str, ctx) {
+  if (typeof str !== 'string' || str.indexOf('__') === -1) return str;
+  return str.replace(SYS_REF_RE, (m, name) => resolveSysVar(ctx, name));
+}
+
+/**
+ * 解析单个系统占位符名到运行期内部值。
+ * 未知名一律展开为空串（绝不抛错，保持响应头阶段健壮）。
+ * @param {object} ctx
+ * @param {string} name
+ * @returns {string}
+ */
+function resolveSysVar(ctx, name) {
+  const g = ctx && ctx.__globalStages;
+  const cache = g && g.cache;
+  switch (name) {
+    // ---- 边缘缓存参数（来自 DEFAULT_GLOBAL_RULES.cache）----
+    case 'edge_ttl':
+      return cache && cache.edgeTtl != null ? String(cache.edgeTtl) : '';
+    case 'browser_ttl':
+      return cache && cache.browserTtl != null ? String(cache.browserTtl) : '';
+    case 'swr':
+      return cache && cache.staleWhileRevalidate != null ? String(cache.staleWhileRevalidate) : '';
+    case 'status_ttl':
+      return cache && cache.statusTtl != null ? String(cache.statusTtl) : '';
+    // ---- 调试 / 命中标记 ----
+    case 'cache':
+      return ctx && ctx.debug && ctx.debug.cache != null ? String(ctx.debug.cache) : '';
+    case 'site_id':
+      return ctx && ctx.debug && ctx.debug.siteId != null ? String(ctx.debug.siteId) : '';
+    case 'rule_id':
+      return ctx && ctx.debug && ctx.debug.ruleId != null ? String(ctx.debug.ruleId) : '';
+    case 'origin_id':
+      return ctx && ctx.debug && ctx.debug.originId != null ? String(ctx.debug.originId) : '';
+    case 'retry_count':
+      return ctx && ctx.debug && ctx.debug.retries != null ? String(ctx.debug.retries) : '';
+    case 'edge_time': {
+      const start = ctx && ctx.startTime;
+      return start != null ? `${Date.now() - start}ms` : '';
+    }
+    case 'tried_origins':
+      return ctx && ctx.debug && Array.isArray(ctx.debug.tried)
+        ? ctx.debug.tried.join(',')
+        : '';
+    // ---- 跨平台差异（CF 双头）：仅 CF 平台展开为值，其余平台展开为空 ----
+    case 'cf_cdn_cache_control':
+      return ctx && ctx.caps && ctx.caps.platform === 'cf'
+        ? 'public, max-age=__edge_ttl__, s-maxage=__edge_ttl__, stale-while-revalidate=__swr__'
+        : '';
+    default:
+      return '';
+  }
+}

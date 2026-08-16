@@ -316,7 +316,7 @@ export const SITE_TEMPLATES = Object.freeze([
     ],
     // EO 同款模板还有 RangeOriginPull（分片回源），用于大文件断点续传时只回源缺失分片、
     // 而非整文件拉取。本项目的 CachePolicy 契约目前无该字段，运行时已天然支持 Range 透传
-    // （见 FORWARD_HEADER_WHITELIST 含 range），但「仅回源缺失分片」的优化待扩契约后落地。
+    // （见全站缺省 stages.reqHeaders.forwardWhitelist 含 range），但「仅回源缺失分片」的优化待扩契约后落地。
   },
 
   {

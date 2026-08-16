@@ -254,7 +254,7 @@
  * 客户端 IP 回源头（EO：存放客户端 IP 的头部）。
  * @typedef {Object} ClientIpHeader
  * @property {boolean} enabled
- * @property {string}  name              头部名，默认 X-Forwarded-For
+ * @property {string}  name              头部名，默认由全站缺省 DEFAULT_CLIENT_IP_HEADER.name 声明（'X-EdgeGateway-Client-IP'）
  */
 
 /**
@@ -365,14 +365,14 @@
  * @property {CachePolicy} [cache]        源站级缓存策略（规则级 cache 优先覆盖）
  * @property {boolean}  [followRedirect]  源站级回源跟随 3xx（规则级 followRedirect 优先）
  * @property {number}   [originTimeoutMs] 源站级回源超时（规则级 originTimeoutMs 优先）
- * @property {ClientIpHeader} [clientIpHeader] 源站级客户端 IP 回源头（规则级 clientIpHeader 优先）
+ * @property {ClientIpHeader} [clientIpHeader] 已废弃：源站不再承载流量序列字段，客户端 IP 回源头仅由规则层 clientIpHeader 提供（见 ClientIpHeader 说明）
  */
 
 /**
  * @typedef {Object} Failover
  * @property {boolean}  enabled
  * @property {number[]} retryOn            触发换源的状态码，默认 [500,502,503,504,522,524]
- * @property {number}   maxRetries         最多换源次数，默认 2
+ * @property {number}   maxRetries         最多换源次数；缺省按「源站数 - 1」自动推导（试遍所有 enabled 源站），不写死默认次数
  * @property {number}   timeoutMs          单次回源超时，默认 10000
  * @property {number}   [penaltySeconds]   失败即冷却窗口秒数，默认 15；0=关闭（纯内存，零 KV 读写）
  * @property {number}   [totalTimeoutMs]   整请求总时间预算，默认 0=按平台执行上限自动推导
@@ -503,14 +503,6 @@ export function isErrorStatus(code) {
   return Number.isFinite(n) && n >= 400 && n < 600;
 }
 
-/** 不应缓存的状态码 */
-export const NO_CACHE_STATUS = Object.freeze(new Set([
-  400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414,
-  415, 416, 417, 418, 421, 422, 423, 424, 425, 426, 428, 429, 431,
-  500, 501, 502, 503, 504, 505, 506, 507, 508, 510, 511,
-  520, 521, 522, 523, 524, 525, 526, 527,
-]));
-
 /**
  * 状态码「模式」的合法写法（用于校验用户输入与文档提示）。
  *
@@ -542,7 +534,7 @@ export const STATUS_PATTERN_RE = /^!?(?:[1-5]\d{2}|[1-5]xx|[1-5]\dx)$/i;
 export function matchStatusPattern(status, patterns) {
   const code = Number(status);
   if (!Number.isFinite(code)) return false;
-  // 向后兼容：旧数据可能是 Set<number>（如 NO_CACHE_STATUS 常量）
+  // 向后兼容：patterns 也可直接传 Set<number>（无需经模式解析）
   if (patterns instanceof Set) return patterns.has(code);
   if (!Array.isArray(patterns) || patterns.length === 0) return false;
 
@@ -576,32 +568,6 @@ export function matchStatusPattern(status, patterns) {
   }
   return hit && !excluded;
 }
-
-/**
- * 回源请求头白名单 —— 只有这些客户端请求头会被透传到源站。
- * 其余（Cookie、Referer、Origin、CF- 前缀、X-Forwarded- 前缀等）一律丢弃，
- * 使回源请求表现得「像一个全新的浏览器请求」。
- */
-export const FORWARD_HEADER_WHITELIST = Object.freeze(new Set([
-  'range',
-  'if-range',
-  'if-none-match',
-  'if-modified-since',
-  'accept',
-  'accept-encoding',
-  'accept-language',
-  'content-type',
-  'content-length',
-]));
-
-/** 默认伪装请求头 */
-export const DEFAULT_UA_HEADERS = Object.freeze({
-  'User-Agent':
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-  'Accept':
-    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-  'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-});
 
 /** 静态资源扩展名 */
 export const STATIC_EXTS = Object.freeze(new Set([

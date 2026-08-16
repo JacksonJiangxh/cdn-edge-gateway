@@ -12,8 +12,9 @@
  */
 
 import { getGlobalRules } from '../config/store.js';
-import { DEFAULT_GLOBAL_RULES, DEBUG_HEADER_NAMES, NO_CACHE_STATUS_LIST } from '../config/defaults.js';
-import { expandVars, pickClientIp } from '../config/vars.js';
+import { DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
+import { DEFAULT_CLIENT_IP_HEADER } from '../config/stages-defaults.js';
+import { expandVars, expandSysVars, pickClientIp } from '../config/vars.js';
 import { resolveContentType } from '../utils/mime.js';
 
 /**
@@ -49,7 +50,7 @@ async function getGlobalStage(ctx, stage) {
  *
  * 叠加顺序（后者覆盖前者）：
  *   1. 客户端请求头中命中白名单的部分
- *   2. DEFAULT_UA_HEADERS 伪装头
+ *   2. 全站缺省回源请求头 set（由规则引擎经 applyHeaderOps 注入）
  *   3. origin.extraHeaders（支持 "@secret:NAME" 从 env 取值）
  *   4. rule.reqHeaders.set / strip
  *   5. 强制剥离敏感头（兜底）
@@ -79,15 +80,12 @@ export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) 
     }
   }
 
-  // ---- 2. 兜底伪装头 ----
-  // 全站兜底默认回源请求头（DEFAULT_GLOBAL_RULES.stages.reqHeaders.set）已由
-  // pipeline ④ 合并块并入 effAction.reqHeaders，并经下方步骤 4 的 applyHeaderOps 统一注入，
-  // 此处不再从 settings/常量二次注入，避免「规则序列内 + 引擎外」两处写入同字段造成错乱。
-  // Accept-Encoding 交给运行时自行协商，不强行覆盖客户端的值；
-  // 若客户端未提供则给一个通用值
-  if (!out.has('accept-encoding')) {
-    out.set('Accept-Encoding', 'gzip, deflate, br');
-  }
+  // ---- 2. 全站缺省回源请求头（由规则引擎注入）----
+  // 全站兜底默认回源请求头（DEFAULT_GLOBAL_RULES.stages.reqHeaders.set，
+  // 含 User-Agent / Accept / Accept-Language / Accept-Encoding 等）已由
+  // pipeline ④ 合并块并入 effAction.reqHeaders，并经下方步骤 4 的 applyHeaderOps 统一注入。
+  // 此处不再做任何规则外的二次兜底/默认写入——回源请求头如何构造完全由可视化规则引擎
+  // （全站缺省 + 站点规则）声明，代码侧不持有第二默认源。
 
   // ---- 3. origin.extraHeaders（支持 secret 引用）----
   const extra = origin?.extraHeaders || {};
@@ -106,13 +104,14 @@ export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) 
   applyHeaderOps(out, ops, ctx, env);
 
   // ---- 5. 客户端 IP 回源头 ----
-  // 必须放在 strip 之后：默认头名 X-Forwarded-For 若命中用户 strip 前缀，
+  // 必须放在 strip 之后：默认头名（规则缺省 DEFAULT_CLIENT_IP_HEADER.name）若命中用户 strip 前缀，
   // 会被 applyHeaderOps 剥离；此处是「用户显式开启」的合法透出，语义上优先于剥离策略。
+  // 头名以规则/源站级 clientIpHeader.name 为准，缺失时回落到规则缺省名，不写死第二默认。
   if (clientIpHeader?.enabled) {
     // 复用 pickClientIp 统一提取（含 forwarded / cloudfront-viewer-address 解析），
     // 避免把 forwarded 整串原样透出。
     const ip = pickClientIp(ctx.request.headers);
-    if (ip) out.set(clientIpHeader.name || 'X-Forwarded-For', ip);
+    if (ip) out.set(clientIpHeader.name || DEFAULT_CLIENT_IP_HEADER.name, ip);
   }
 
   // ---- 关于 Host 头 ----
@@ -139,120 +138,27 @@ export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) 
  * @returns {Headers} 返回给客户端的响应头
  */
 export async function buildClientHeaders(ctx, originResp, policy, ops) {
-  // 错误码缓存由 statusTtl 统一表达（命中状态码 → 缓存秒数；0 = no-store）。
-  // 原 noCacheStatus 黑名单已并入 statusTtl（TTL=0 即 no-store），此处不再单独读取。
-  // 三个缓存头 TTL 回落值：优先用 policy（已含全站兜底默认 edgeTtl/browserTtl）。
-  const DEFAULT_EDGE_TTL = Number(policy?.edgeTtl) || 15552000;
-  const DEFAULT_BROWSER_TTL = Number(policy?.browserTtl) || 1800;
+  // 规则引擎绝对权威：响应头唯一真相源是全站规则 DEFAULT_GLOBAL_RULES.respHeaders
+  // （含站点规则覆盖），由下方 applyHeaderOps(ops) 一次性原样执行。
+  // 代码侧不再有任何外置的缓存头 set / delete / statusTtl 覆盖逻辑 —— 用户在
+  // 前端 ⑯「节点响应头」阶段改了缺省 = 用户自定义，代码绝不回加、绝不覆盖。
+  // 错误码 TTL（statusTtl）、origin 遵循源站等条件语义，均已由用户在规则引擎里
+  // 声明式表达，不属于本函数的职责。
   const out = new Headers(originResp.headers);
 
   // ---- 1. 删除源站的安全策略类响应头 ----
   // 这些头会阻止图片/字体被第三方页面引用，作为 CDN 必须清理。
   // 剥离列表（含 CSP/X-Frame-Options/Set-Cookie 等）统一来自全站规则 stages.respHeaders.strip，
-  // 由下方步骤 3 的 applyHeaderOps(ops) 统一执行（站点规则 strip 可在此追加/覆盖）。
+  // 由下方 applyHeaderOps(ops) 统一执行（站点规则 strip 可在此追加/覆盖）。
 
-  // ---- 2. Cache-Control / CDN-Cache-Control（分层缓存铁律）----
-  // 路径：浏览器 → 最前端 CDN(CF/EO) → 本项目(Worker/Makers) → 源站。
-  // 本项目处于「函数层」，其下发的响应头是最前端的兜底依据。
-  //
-  // 跨平台头策略（三平台通用）：
-  //   - Cache-Control       : public, max-age=<browserTtl>, immutable, s-maxage=<edgeTtl>
-  //                           （浏览器 max-age + 边缘 s-maxage 同头给出，避免任一消费方只看其一而漏判）
-  //   - CDN-Cache-Control   : public, max-age=<edgeTtl>, s-maxage=<edgeTtl>
-  //                           （RFC 9213 标准头，CF/EO/ESA 均消费；会被透传浏览器但浏览器忽略，无害）
-  // 注：immutable 只给浏览器（Cache-Control），不写进 CDN-Cache-Control（边缘不需要）。
-  //
-  // Cloudflare 专属增强：
-  //   CF 的 Workers Cache 会绕过 zone 级 Cache Rules，且 CF 额外支持专有头
-  //   Cloudflare-CDN-Cache-Control（与 CDN-Cache-Control 语义一致，但 CF 消费后
-  //   不向浏览器透传）。当平台 == 'cf' 时额外下发该头，使边缘 TTL 仅在 CF 内部可见、
-  //   彻底不泄漏给下游。该头为 CF 专有，EO/ESA 不认识，故仅 CF 下发。
-  //
-  // 核心前提：三个头均同时携带 max-age 与 s-maxage，确保各平台无论按哪个头/
-  // 哪个字段消费都能拿到正确 TTL（CF Workers Cache 按 RFC 9111 透传 Cache-Control；
-  // 标准 CDN-Cache-Control / Cloudflare-CDN-Cache-Control 供各 CDN 边缘决策）。
-  const status = originResp.status;
-  // statusTtl 支持段通配键（4xx/5xx/52x），与 noCacheStatus 语法统一：
-  // 精确码优先，未命中再按通配键查找（多个通配键命中时取最具体的，即 'x' 最少的）。
-  const statusTtl = lookupStatusTtl(policy?.statusTtl, status);
-  const isCf = ctx?.caps?.platform === 'cf';
-
-  // 剥离源站带回的一切「不缓存」信号（兜底，确保可缓存内容真被边缘缓存）
-  for (const bad of ['set-cookie', 'pragma', 'no-store', 'private']) {
-    out.delete(bad);
-  }
-  if (out.get('expires') === '0') out.delete('expires');
-
-  // 统一下发边缘缓存头。三个头（CF 时含 Cloudflare-CDN-Cache-Control）均带
-  // max-age + s-maxage，保证万无一失。swr 可选追加 stale-while-revalidate。
-  const setEdgeCacheControl = (edgeTtl, swr) => {
-    const tail = swr ? `, stale-while-revalidate=${swr}` : '';
-    const edgeVal = `public, max-age=${edgeTtl}, s-maxage=${edgeTtl}${tail}`;
-    out.set('CDN-Cache-Control', edgeVal);
-    if (isCf) out.set('Cloudflare-CDN-Cache-Control', edgeVal);
-  };
-
-  if (statusTtl !== undefined) {
-    // 状态码缓存 TTL 优先级最高：允许把 404 等错误码短时间缓存，挡住对源站的重复穿透。
-    const ttl = Number(statusTtl) || 0;
-    if (ttl <= 0) {
-      // ttl=0 的语义是「明确不要缓存这个状态码」，必须下发 no-store。
-      // 旧实现写的是 s-maxage=0，那只表示「立即过期但仍可被存储/条件复用」，
-      // 会让 CDN 保留副本并可能返回 stale 内容——与用户填 0 的意图不符。
-      out.set('Cache-Control', 'no-store');
-      out.set('CDN-Cache-Control', 'no-store');
-      if (isCf) out.set('Cloudflare-CDN-Cache-Control', 'no-store');
-    } else {
-      out.set('Cache-Control', `public, max-age=0, s-maxage=${ttl}`);
-      setEdgeCacheControl(ttl, policy?.staleWhileRevalidate);
-    }
-  } else if (NO_CACHE_STATUS_LIST.includes(status)) {
-    // 引擎铁律兜底：用户未用 statusTtl 显式配置该码、且该码属于「不应缓存」内置枚举
-    // （4xx/5xx 等错误码，见 contracts.js 的 NO_CACHE_STATUS）时，强制下发 no-store。
-    // 与 platform/cache.js 的 isCacheable 第 5 步兜底层级一致，保证「响应头下发」与
-    // 「是否落盘」两处判定对错误码的行为统一。
-    out.set('Cache-Control', 'no-store');
-    out.set('CDN-Cache-Control', 'no-store');
-    if (isCf) out.set('Cloudflare-CDN-Cache-Control', 'no-store');
-  } else if (policy?.enabled && policy.mode !== 'origin') {
-    // mode === 'origin' 表示遵循源站缓存策略，此时完全不改写缓存头
-    // TTL 取配置值；若为 0 则回落到分层铁律默认值（边缘半年 / 浏览器 30 分钟）
-    const edgeTtl = Number(policy.edgeTtl) || DEFAULT_EDGE_TTL;
-    const browserTtlRaw = Number(policy.browserTtl);
-    const browserTtl =
-      browserTtlRaw === 0 ? DEFAULT_BROWSER_TTL : browserTtlRaw;
-    // browserTtl < 0 约定为「不下发 max-age，由源站/浏览器自行决定」
-    out.set(
-      'Cache-Control',
-      browserTtl < 0
-        ? `public, s-maxage=${edgeTtl}`
-        : `public, max-age=${browserTtl}, immutable, s-maxage=${edgeTtl}`
-    );
-    setEdgeCacheControl(edgeTtl, policy?.staleWhileRevalidate);
-  }
-
-  // ---- 3. 规则级 respHeaders ----
+  // ---- 2/3. 规则级 respHeaders（唯一写入入口）----
+  // 调试头 / 品牌头 / 缓存控制头 / 不缓存信号剥离，统一在此由全站规则
+  // （stages.respHeaders）的 set/strip 声明式下发；头名与值均可在前端 ⑯「节点响应头」
+  // 阶段自由配置、关闭，代码零干预。常规缓存头模板如下（用户可改）：
+  //   Cache-Control            : public, max-age=__browser_ttl__, s-maxage=__edge_ttl__, stale-while-revalidate=__swr__, immutable
+  //   CDN-Cache-Control        : public, max-age=__edge_ttl__, s-maxage=__edge_ttl__, stale-while-revalidate=__swr__
+  //   Cloudflare-CDN-Cache-Control : 仅 CF 平台展开（__cf_cdn_cache_control__）
   applyHeaderOps(out, ops, ctx, null);
-
-  // ---- 4. 调试头 ----
-  // 调试头已下沉为「全站规则 + 引擎常量」，不再作为可配 settings：
-  //   - 头名统一取自 DEBUG_HEADER_NAMES（默认值见下方常量，与旧 settings.debug 行为一致）；
-  //   - 默认始终开启；若想关闭，在站点规则 stages.respHeaders.strip 中加入对应头（type:'exact'）即可
-  //     （如 strip:[{type:'exact',value:'x-cache'},{type:'exact',value:'x-rule-id'},...]）。
-  // 调试字段的「值」仍来自 ctx.debug（运行时注入的 ruleId/cache/originId/retries）。
-  {
-    const d = ctx.debug || {};
-    const names = DEBUG_HEADER_NAMES;
-    setIfPresent(out, names.cache, d.cache);
-    // 仅下发源站内部 id（X-Origin-Id），用于标识「本次回源选中的上游源」调试信息。
-    // 注意：绝不下发 X-Origin-Addr —— 其值为 origin.addr:port（完整域名/IP+端口），
-    // 暴露给浏览器会直接泄露源站地址，成为攻击者直连源站绕过 CDN 的入口。
-    // 已有 X-Origin-Id 足以表达「去了哪个上游源」，无需暴露完整地址。
-    setIfPresent(out, names.originId, d.originId);
-    setIfPresent(out, names.ruleId, d.ruleId);
-    setIfPresent(out, names.retryCount, d.retries != null ? String(d.retries) : undefined);
-    setIfPresent(out, names.edgeTime, `${Date.now() - ctx.startTime}ms`);
-  }
 
   // ---- 4.5 内容类型纠正（网关作为中间人的责任）----
   // 项目本质是边缘网关：代替用户去上游源站（CNB / Git raw 等）拉取资源再回传。
@@ -313,7 +219,10 @@ function applyHeaderOps(headers, ops, ctx, env) {
       }
       // 2) 动态变量展开：${client_ip} / ${http_x_forwarded_for} 等运行时求值。
       //    静态值（不含 ${）零开销原样透传；头值仍受 Headers 约束（禁 CR/LF）。
-      const finalValue = expandVars(maybeSecret, ctx, { label: `header:${key}` });
+      let finalValue = expandVars(maybeSecret, ctx, { label: `header:${key}` });
+      // 3) 双下划线系统占位符展开：__edge_ttl__ / __cache__ 等项目内部值。
+      //    与 ${} 用户变量完全隔离、独立求值；无 __ 时零开销。
+      finalValue = expandSysVars(finalValue, ctx);
       headers.set(key, finalValue);
     }
   }
@@ -380,53 +289,6 @@ function resolveSecret(rawValue, env) {
 }
 
 /**
- * 在「状态码 → TTL」映射里查出某状态码对应的 TTL。
- *
- * 键支持与 noCacheStatus 相同的写法：精确码（`404`）与段通配（`4xx` / `52x`）。
- * 匹配优先级：精确码 > 十位段（52x） > 百位段（5xx）——即通配位越少越具体、优先级越高，
- * 这样用户可以写「5xx 缓存 5 秒，但 503 不缓存」这类自然规则。
- *
- * @param {Record<string, any>|undefined|null} map 状态码→TTL 映射
- * @param {number} status HTTP 状态码
- * @returns {number|undefined} 命中的 TTL；未命中返回 undefined
- */
-function lookupStatusTtl(map, status) {
-  if (!map || typeof map !== 'object') return undefined;
-  const s = String(status);
-  // 1) 精确码优先（用户显式值，含 ! 例外键之外的任何精确码）
-  if (map[s] !== undefined) return map[s];
-  // 2) 段通配：按「通配位数量」升序选最具体的一条；`!` 前缀键为「例外」，
-  //    表示命中该码时不受任何段通配 no-store 约束（走常规缓存，返回 undefined）。
-  let best;
-  let bestWildcards = 99;
-  let excluded = false;
-  for (const key of Object.keys(map)) {
-    const k = String(key).trim().toLowerCase();
-    const negate = k.charCodeAt(0) === 33; /* '!' */
-    const base = negate ? k.slice(1) : k;
-    if (base.length !== 3) continue;
-    let ok = true;
-    let wildcards = 0;
-    for (let i = 0; i < 3; i++) {
-      const bc = base.charCodeAt(i);
-      if (bc === 120 /* 'x' */) wildcards++;
-      // 非数字非 'x'
-      else if (bc < 48 || bc > 57) { ok = false; break; }
-      else if (bc !== s.charCodeAt(i)) { ok = false; break; }
-    }
-    if (!ok) continue;
-    if (negate) excluded = true;
-    else if (wildcards < bestWildcards) {
-      bestWildcards = wildcards;
-      best = map[key];
-    }
-  }
-  // 3) 被 `!` 例外命中 → 排除段通配的 no-store，走常规缓存（用默认 TTL）
-  if (excluded) return undefined;
-  return best;
-}
-
-/**
  * 把「修改请求头」阶段的 strip 配置规范化为可高效判定的形态。
  *
  * 统一语法为 `{type, value}`，type ∈ prefix | exact | regex：
@@ -487,20 +349,6 @@ function stripForbidden(headers, rules) {
     }
   }
   for (const key of toDelete) headers.delete(key);
-}
-
-/**
- * 仅在值存在时设置响应头，避免出现 "X-Cache: undefined"。
- *
- * @param {Headers} headers 响应头
- * @param {string} name 头名
- * @param {string} [value] 头值
- * @returns {void}
- */
-function setIfPresent(headers, name, value) {
-  if (value !== undefined && value !== null && value !== '') {
-    headers.set(name, String(value));
-  }
 }
 
 /**

@@ -23,7 +23,7 @@
  */
 
 import { deepUnfreeze, deepClone } from './factory.js';
-import { DEFAULT_HOST_HEADER, FORWARD_HEADER_WHITELIST_LIST } from './global.js';
+import { DEFAULT_HOST_HEADER } from './global.js';
 
 // ----------------------------------------------------------------------------
 // 缓存策略
@@ -226,14 +226,22 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
       'Accept-Encoding': 'gzip, deflate, br',
     }),
-    // 删除统一走 strip 语法（此处默认无额外剥离；全站兜底剥离见下方 strip 字段）。
-    strip: Object.freeze([]),
     // 单轨化：以下三项原在 settings.reqHeaders（隐藏双轨），现并入本阶段默认 action，
     // 使「回源请求头如何构造」的全部配置都在「修改请求头」阶段一处可视、可改。
     //
     // forwardWhitelist：客户端请求头透传白名单。只有列出的头会被带到源站，
     // 其余（Cookie / Referer / Origin / CF- 前缀等）一律丢弃。
-    forwardWhitelist: Object.freeze([...FORWARD_HEADER_WHITELIST_LIST]),
+    forwardWhitelist: Object.freeze([
+      'range',
+      'if-range',
+      'if-none-match',
+      'if-modified-since',
+      'accept',
+      'accept-encoding',
+      'accept-language',
+      'content-type',
+      'content-length',
+    ]),
     // strip：白名单之外的「额外剥离规则」，统一语法 {type, value}：
     //   - prefix：按头名前缀剥离（如 cf- 剥离所有 cf-* 头）
     //   - exact ：按头名精确剥离
@@ -287,11 +295,22 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
     blockBody: 'Forbidden',
     // 拦截响应的 Cache-Control（拦截结果不该被缓存）
     blockCacheControl: 'no-store',
-    // 5xx 系列错误文案
+    // 伪装页 Server 头指纹（默认 'cloudflare'），与内置 STATIC_HTML 仿 Cloudflare 5xx
+    // 拦截页语义自洽：页面声称 CF、响应头也必须是 CF，否则「页面 CF、头 nginx」的矛盾
+    // 会成为最强「这是假 CF」指纹。交由规则缺省单一声明，可视化可在规则层覆盖。
+    disguiseServer: 'cloudflare',
+    // 5xx 系列错误文案（规则缺省文案源）
     messages: Object.freeze({
       internal: 'Internal Server Error',
       noOrigin: 'No Origin',
       configError: 'Config Error',
+    }),
+    // 上游语义键 → messages 文案键 的映射（规则缺省驱动，消除代码侧写死键表）。
+    // errorResponse(title,...) 传入的 title 字面量即此处的键，命中后取 messages[key] 文案。
+    messageMap: Object.freeze({
+      'Internal Server Error': 'internal',
+      'No Origin': 'noOrigin',
+      'Config Error': 'configError',
     }),
   }),
   // ① 匹配站点：纯 host/path 等维度匹配，匹配阶段不再包含任何协议配置
@@ -341,12 +360,33 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
     // 品牌名统一引用「单一真相源」：代码常量 PRODUCT_NAME（经 vars.js 的 ${product_name} 变量）。
     // 注意：Server / Via 不再经由 settings.respHeaders.serverName/viaName 中转，
     // 而是直接在此 stages 里以 ${product_name} 表达（用户认可的「全局规则里直接写」方式）。
-    // 调试响应头（X-Cache / X-Origin-Id / X-Rule-Id / X-Retry-Count / X-Edge-Time）不在 stages
-    // 显式列出，而由 headers.js 按引擎常量 DEBUG_HEADER_NAMES 默认下发；如需关闭，
-    // 在站点规则 stages.respHeaders.strip 中加入对应头名（type:'exact'）即可。
+    // 调试 / 可观测响应头与边缘缓存控制头，统一在此 stages 显式列出（前端 ⑯「节点响应头」
+    // 阶段可自由查看、修改、关闭）——已下沉为规则声明式条目，不再由 headers.js 硬注入。
+    // 关联取值采用双下划线系统占位符 __xxx__（与 ${} 用户变量隔离）：
+    //   __cache__ / __origin_id__ / __rule_id__ / __retry_count__ / __edge_time__ /
+    //   __site_id__ / __tried_origins__  为调试标记；
+    //   __edge_ttl__ / __browser_ttl__ / __swr__  为 cache 段边缘缓存参数；
+    //   __cf_cdn_cache_control__  为跨平台差异（仅 CF 展开）。
+    // 如需关闭某头：在站点规则 stages.respHeaders.strip 中加入对应头名（type:'exact'）即可。
     set: Object.freeze({
       server: '${product_name}',
       via: '1.1 ${product_name}',
+      // —— 调试 / 可观测响应头 ——
+      'X-Cache': '__cache__',              // 命中来源：HIT / MISS / BYPASS / STALE（由 pipeline 标记）
+      'X-Origin-Id': '__origin_id__',      // 命中的源站 id（回源链路定位）
+      'X-Rule-Id': '__rule_id__',          // 命中的全站/站点规则 id
+      'X-Retry-Count': '__retry_count__',  // 本次请求回源失败重试次数
+      'X-Edge-Time': '__edge_time__',      // 边缘处理耗时（毫秒，便于定位慢链路）
+      'X-Site-Id': '__site_id__',          // 命中站点 id
+      'X-Tried-Origins': '__tried_origins__', // 实际尝试过的源站清单（逗号分隔）
+      // —— 边缘缓存控制头（固定部分 + 关联取值，全部可自定义）——
+      // 缓存 TTL 来自 cache 段的 edgeTtl/browserTtl/staleWhileRevalidate，
+      // 通过 __edge_ttl__ / __browser_ttl__ / __swr__ 关联引用。
+      'Cache-Control': 'public, max-age=__browser_ttl__, s-maxage=__edge_ttl__, stale-while-revalidate=__swr__, immutable',
+      'CDN-Cache-Control': 'public, max-age=__edge_ttl__, s-maxage=__edge_ttl__, stale-while-revalidate=__swr__',
+      // 跨平台差异在占位符层表达：仅 CF 平台展开 Cloudflare-CDN-Cache-Control，
+      // 其余平台（EO/ESA）该头展开为空，不会写入响应（避免平台特判散落）。
+      'Cloudflare-CDN-Cache-Control': '__cf_cdn_cache_control__',
     }),
     // 删除统一走 strip 语法（精确删除即 type:'exact'）。
     // 以下为全站通用兜底：仅剥离【实测 CNB 与 GitHub 共有、且对所有源站都该剥】的头；
@@ -363,6 +403,12 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
       Object.freeze({ type: 'exact', value: 'x-frame-options' }),
       // 通用安全
       Object.freeze({ type: 'exact', value: 'set-cookie' }),
+      // 不缓存信号（详见 scripts/notes/16-*.md 审计）：源站可能下发的「禁止缓存」指令，
+      // 默认强制剥离，避免破坏边缘缓存策略。
+      Object.freeze({ type: 'exact', value: 'pragma' }),      // 旧式 no-cache 信号
+      Object.freeze({ type: 'prefix', value: 'no-store' }),   // 不缓存指令（含 Cache-Control: no-store 等）
+      Object.freeze({ type: 'exact', value: 'private' }),     // 私有缓存指令（避免被共享边缘缓存）
+      Object.freeze({ type: 'exact', value: 'expires' }),     // 旧式过期头，交由 Cache-Control 控制
       // 上游常回 X-Content-Type-Options: nosniff（全部 5 个 URL 都有！这是 360 不渲染主因）。
       // 作为 CDN/网关，下发给浏览器的 Content-Type 由本项目 fixContentType 控制并信任，
       // 无需上游 nosniff 约束；部分内核较严的浏览器（如 360）在 nosniff 下会因任何 MIME

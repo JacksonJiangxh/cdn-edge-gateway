@@ -34,23 +34,10 @@ import { selectOrigin, primeChainWeights } from './strategy.js';
 import { isTripped, recordFailure, recordSuccess, penalize, isPenalized } from './circuit.js';
 import { buildOriginUrl, resolveHostHeader, mergeRewrite, mergeHeaderOps } from '../proxy/rewrite.js';
 import { buildOriginHeaders } from '../proxy/headers.js';
+import { DEFAULT_CLIENT_IP_HEADER } from '../config/stages-defaults.js';
 import { fetchOrigin } from '../proxy/engines/fetchEngine.js';
 import { fetchOrigin as r2FetchOrigin } from '../proxy/engines/r2Engine.js';
 import { fetchRepoOrigin } from '../proxy/repoEngine.js';
-
-// 重试时为了避免把整请求体物化进内存，超过该上限的 body 直接关闭重试（流式透传）。
-const FALLBACK_MAX_RETRY_BODY = 5 * 1024 * 1024;
-
-// 池级 failover 是唯一换源真相源（全站/站点不承载 failover）。
-// 本局部兜底仅用于「历史存量池缺字段」的容错，不作业务默认。
-const LOCAL_FALLBACK = Object.freeze({
-  maxRetries: 2,
-  timeoutMs: 10000,
-  penaltySeconds: 15,
-  totalTimeoutMs: 0,
-  speculativeMs: 500,
-  maxRetryBodyBytes: FALLBACK_MAX_RETRY_BODY,
-});
 
 /** 平台安全余量（毫秒）：留出响应序列化 / 缓存写入的空间，避免撞平台执行上限 */
 const SAFETY_RESERVE = Object.freeze({
@@ -112,7 +99,6 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
   const singleOrigin = enabledOrigins.length <= 1;
   const enabled = !singleOrigin && failover.enabled !== false;
   // 池级 failover 是唯一换源真相源（全站/站点不承载 failover）。
-  // 运行时硬兜底 LOCAL_FALLBACK 仅用于「历史存量池缺字段」的容错，不作业务默认。
   const rawRetryOn = Array.isArray(failover.retryOn) && failover.retryOn.length > 0
     ? failover.retryOn
     : [ERROR_STATUS_RANGE];
@@ -122,14 +108,20 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
   const retryOnErrorRange =
     rawRetryOn.includes(ERROR_STATUS_RANGE) || rawRetryOn.includes('*') || rawRetryOn.includes('all');
   const retryOn = retryOnErrorRange ? null : new Set(rawRetryOn);
-  const maxRetries = enabled ? (Number.isFinite(failover.maxRetries) ? failover.maxRetries : LOCAL_FALLBACK.maxRetries) : 0;
-  const poolTimeout = Number(failover.timeoutMs) > 0 ? Number(failover.timeoutMs) : LOCAL_FALLBACK.timeoutMs;
-  const penaltySeconds = Number(failover.penaltySeconds) > 0 ? Number(failover.penaltySeconds) : LOCAL_FALLBACK.penaltySeconds;
-  const totalTimeoutMs = Number(failover.totalTimeoutMs) > 0 ? Number(failover.totalTimeoutMs) : LOCAL_FALLBACK.totalTimeoutMs;
-  const speculativeMs = Number(failover.speculativeMs) > 0 ? Number(failover.speculativeMs) : LOCAL_FALLBACK.speculativeMs;
-  const MAX_RETRY_BODY = Number(failover.maxRetryBodyBytes) > 0
-    ? Number(failover.maxRetryBodyBytes)
-    : LOCAL_FALLBACK.maxRetryBodyBytes;
+  // maxRetries：优先用源站池显式配置；缺失时按「源站数 - 1」自动推导（试遍所有 enabled 源站），
+  // 与文件头声明的真实模型一致，不使用任何硬编码默认次数。
+  const maxRetries = enabled
+    ? (Number.isFinite(failover.maxRetries)
+        ? failover.maxRetries
+        : Math.max(enabledOrigins.length - 1, 0))
+    : 0;
+  // 换源阈值真相源唯一收敛到池级归一化结果（normFailover 的 POOL_BASE 中性基线已保证字段必存在）：
+  // 全站/站点层不承载 failover（源站池是唯一换源真相源）。故此处直接读池级值，不再有任何代码侧二级兜底。
+  const poolTimeout = Number(failover.timeoutMs) || 0;
+  const penaltySeconds = Number(failover.penaltySeconds) || 0;
+  const totalTimeoutMs = Number(failover.totalTimeoutMs) || 0;
+  const speculativeMs = Number(failover.speculativeMs) || 0;
+  const MAX_RETRY_BODY = Number(failover.maxRetryBodyBytes) || 0;
 
   // 预先把「已熔断」的源站并入排除列表（异步 KV，selectOrigin 同步依赖）。
   const excludeIds = await collectUnavailableIds(ctx, pool, penaltySeconds);
@@ -191,7 +183,7 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
     // （rule.action）提供。这里只使用规则层值，origin 参数传 undefined 表示无源站级覆盖。
     const mergedRewrite = mergeRewrite(undefined, ra.rewrite);
     const mergedReqHeaders = mergeHeaderOps(undefined, ra.reqHeaders);
-    const mergedClientIpHeader = mergeClientIpHeader(undefined, ruleOrigin.clientIpHeader);
+    const mergedClientIpHeader = mergeClientIpHeader(ruleOrigin.clientIpHeader);
 
     const ruleTimeout = Number(ruleOrigin.originTimeoutMs) || 0;
     // 单次尝试超时：受剩余预算约束（最后一次用尽剩余预算），至少 500ms
@@ -492,14 +484,13 @@ async function collectUnavailableIds(ctx, pool, penaltySeconds) {
 }
 
 /**
- * 合并 ClientIpHeader：源站级打底，规则级优先覆盖。
- * @param {Object} [originCip] 源站级 clientIpHeader
+ * 合并 ClientIpHeader：规则层是唯一可配置来源（全站缺省打底，站点规则覆盖）。
+ * 源站级 clientIpHeader 已废弃（origin 不再承载流量序列字段），故此处仅接收规则级值。
  * @param {Object} [ruleCip] 规则级 clientIpHeader
  * @returns {Object} 合并后的 clientIpHeader
  */
-function mergeClientIpHeader(originCip, ruleCip) {
-  const hasRule = ruleCip && typeof ruleCip.enabled === 'boolean';
-  if (hasRule) return { enabled: ruleCip.enabled, name: ruleCip.name || 'X-Forwarded-For' };
-  if (originCip && typeof originCip.enabled === 'boolean') return { enabled: originCip.enabled, name: originCip.name || 'X-Forwarded-For' };
-  return { enabled: false, name: 'X-Forwarded-For' };
+function mergeClientIpHeader(ruleCip) {
+  const defName = DEFAULT_CLIENT_IP_HEADER.name; // 全站缺省名：'X-EdgeGateway-Client-IP'
+  if (ruleCip && typeof ruleCip.enabled === 'boolean') return { enabled: ruleCip.enabled, name: ruleCip.name || defName };
+  return { enabled: false, name: defName };
 }

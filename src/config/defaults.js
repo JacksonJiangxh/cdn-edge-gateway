@@ -29,15 +29,14 @@ import { PRODUCT_NAME } from './global.js';
 setProductName(PRODUCT_NAME);
 
 // —— 系统 / 管理面级 ——
+// 注：DEBUG_HEADER_NAMES 已下沉为全站规则 stages.respHeaders.set（调试头模板），
+// 由 applyHeaderOps 统一下发，不再经此处导出（见 global.js 注释与 proxy/headers.js）。
 export {
   PRODUCT_NAME,
-  DEBUG_HEADER_NAMES,
   DEFAULT_HOST_HEADER,
   DEFAULT_SITE_HOST_HEADER,
   DEFAULT_GLOBAL,
   DEFAULT_DISGUISE,
-  NO_CACHE_STATUS_LIST,
-  FORWARD_HEADER_WHITELIST_LIST,
   cloneGlobal,
 } from './global.js';
 

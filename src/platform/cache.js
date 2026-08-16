@@ -20,8 +20,6 @@
  * ============================================================================
  */
 
-import { NO_CACHE_STATUS_LIST } from '../config/defaults.js';
-import { matchStatusPattern } from '../contracts.js';
 import { detectCaps } from './caps.js';
 
 /**
@@ -336,13 +334,9 @@ export function resetCacheStats() {
  * @param {Request} request 客户端请求
  * @param {Response} response 源站响应
  * @param {import('../contracts.js').CachePolicy} policy 缓存策略
- * @param {ReadonlyArray<string|number>|Set<number>} [noCacheStatus] 不缓存状态码模式列表（兼容旧数据），
- *   支持 `4xx`/`5xx`/`52x` 段通配与 `!418` 例外（来自缓存阶段的 stages.cache.noCacheStatus，用户可改）。
- *   缺省时回落到引擎内置枚举 NO_CACHE_STATUS_LIST。新逻辑统一由 statusTtl 表达（TTL=0 即 no-store），
- *   此处 noCacheStatus 仅作向后兼容保留。
  * @returns {boolean} 是否可缓存
  */
-export function isCacheable(request, response, policy, noCacheStatus) {
+export function isCacheable(request, response, policy) {
   // 1. 策略开关
   if (!policy || policy.enabled !== true) return false;
   if (!request || !response) return false;
@@ -362,26 +356,20 @@ export function isCacheable(request, response, policy, noCacheStatus) {
 
   // 4. 错误码缓存 TTL（statusTtl，唯一真相源）：先查用户显式配置。
   //    - 命中且 TTL=0 → no-store（既不写边缘缓存，也下发 no-store 头）；
-  //    - 命中且 TTL>0 → 用户明确要缓存，直接放行（覆盖内置兜底枚举）；
-  //    - 未命中 → 回落到下方「不缓存状态码」兜底（含引擎铁律 NO_CACHE_STATUS_LIST）。
+  //    - 命中且 TTL>0 → 用户明确要缓存，直接放行；
+  //    - 未命中 → 不再拦截，完全由规则 statusTtl（含 stages 缺省）与响应头护栏决定。
   //    键支持精确码（404）与段通配（4xx/5xx/52x），`!` 前缀为范围例外（命中即排除段通配 no-store）；
   //    精确码优先于段通配。该判定在「写缓存」阶段即拦截，等价于原 noCacheStatus 黑名单。
+  //    注：规则未声明对应状态码时，引擎不做任何内置黑名单兜底，是否写缓存完全交还规则。
   const ttl = lookupStatusTtl(policy?.statusTtl, status);
   // `!` 例外：排除段通配 no-store，走常规缓存
   if (ttl === STATUS_TTL_EXCLUDED) return true;
   if (ttl !== undefined) return ttl > 0;
 
-  // 5. 不缓存状态码兜底（兼容旧数据 noCacheStatus + 引擎铁律 NO_CACHE_STATUS_LIST）：
-  // 用户未用 statusTtl 显式配置该码时生效。空列表表示「不做状态码黑名单过滤」，因此用
-  // `!= null && length` 判断而非 `||`，避免用户「清空列表」被静默回落成内置枚举。
-  const patterns = (Array.isArray(noCacheStatus) && noCacheStatus.length) || noCacheStatus instanceof Set
-    ? noCacheStatus
-    : (noCacheStatus === undefined || noCacheStatus === null ? NO_CACHE_STATUS_LIST : null);
-  if (patterns && matchStatusPattern(status, patterns)) return false;
-  // 6. 206 不在黑名单里但同样不可缓存
+  // 5. 206 不在 statusTtl 里但同样不可缓存
   if (status === 206) return false;
 
-  // 5 & 7. 响应头检查
+  // 6. 响应头检查
   try {
     const h = response.headers;
     if (h) {

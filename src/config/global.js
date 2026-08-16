@@ -6,7 +6,7 @@
  *   - 产品品牌名（注入 Server / Via 响应头）
  *   - 管理面（密码、面板域名、统计、全局限速、配置缓存 TTL）
  *   - 伪装页策略（disguise）
- *   - 引擎级常量（调试头名、不应缓存状态码全集、透传白名单全集）
+ *   - 引擎级常量（调试头名、不应缓存状态码全集）
  *
  * 依赖方向：仅依赖上层 contracts.js 与底层 factory.js，可被 stages-defaults.js
  * / site.js 安全 import，不会形成循环依赖。
@@ -14,7 +14,7 @@
  */
 
 import {
-  CONFIG_VERSION, NO_CACHE_STATUS, FORWARD_HEADER_WHITELIST,
+  CONFIG_VERSION,
 } from '../contracts.js';
 import { deepUnfreeze } from './factory.js';
 
@@ -25,16 +25,16 @@ import { deepUnfreeze } from './factory.js';
 export const PRODUCT_NAME = 'EdgeGateway';
 
 /**
- * 调试响应头默认头名（引擎常量，下沉自旧 settings.debug.headers）。
- * 默认始终下发；如需关闭，在站点规则 stages.respHeaders.strip 中加入对应头（type:'exact'）即可。
+ * 调试响应头头名（已下沉为全站规则 stages.respHeaders.set 模板，由 applyHeaderOps 下发）。
+ * 保留此注释作为语义契约参考：默认调试头名如下，如需关闭某头，
+ * 在站点规则 stages.respHeaders.strip 中加入对应头（type:'exact'）即可。
+ *   X-Origin-Id  → 回源选中的上游源 id
+ *   X-Cache      → 命中来源 HIT / MISS / BYPASS / STALE
+ *   X-Rule-Id    → 命中的规则 id
+ *   X-Retry-Count→ 回源重试次数
+ *   X-Edge-Time  → 边缘处理耗时（ms）
+ * 原 DEBUG_HEADER_NAMES 常量已移除导出，不再由引擎外代码写死。
  */
-export const DEBUG_HEADER_NAMES = Object.freeze({
-  originId: 'X-Origin-Id',
-  cache: 'X-Cache',
-  ruleId: 'X-Rule-Id',
-  retryCount: 'X-Retry-Count',
-  edgeTime: 'X-Edge-Time',
-});
 
 /**
  * 默认 Host 头处理方式：inherit = 沿用 fetch 的默认行为（Host 取源站域名）。
@@ -86,23 +86,6 @@ export const DEFAULT_GLOBAL = Object.freeze({
  * @type {Readonly<import('../contracts.js').Disguise>}
  */
 export const DEFAULT_DISGUISE = DEFAULT_GLOBAL.disguise;
-
-/**
- * 不应缓存的状态码枚举全集（源自 contracts.js 的 NO_CACHE_STATUS）。
- * 作为「引擎铁律」兜底：当用户未用 statusTtl 显式配置某状态码时（statusTtl 完全未命中），
- * isCacheable 回落到该枚举决定写缓存阶段是否拦截。已用 statusTtl 显式配置（含 TTL=0
- * 的 no-store 与 `!KEY` 例外）的码优先于此枚举。原 noCacheStatus 黑名单已并入 statusTtl
- * （TTL=0 = no-store），其向后兼容转换见 schema.normGlobalOnlySubFields。
- * @type {readonly number[]}
- */
-export const NO_CACHE_STATUS_LIST = Object.freeze([...NO_CACHE_STATUS]);
-
-/**
- * 回源请求头透传白名单（源自 contracts.js 的 FORWARD_HEADER_WHITELIST）。
- * 作为 stages.reqHeaders.forwardWhitelist 的默认填充值。
- * @type {readonly string[]}
- */
-export const FORWARD_HEADER_WHITELIST_LIST = Object.freeze([...FORWARD_HEADER_WHITELIST]);
 
 /**
  * 生成一份可写的全局配置默认值。

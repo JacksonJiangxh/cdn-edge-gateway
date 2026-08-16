@@ -20,12 +20,12 @@
  */
 
 import { matchSite, matchRuleByStage } from './matcher.js';
-import { buildClientHeaders, getBrandHeaders } from './headers.js';
+import { buildClientHeaders, getBrandHeaders, applyHeaderOps } from './headers.js';
 import { buildCacheKey, shouldBypassCache } from './cachekey.js';
 import { buildOriginUrl, resolveHostHeader, mergeRewrite, mergeHeaderOps, mergeStageHeaderOps } from './rewrite.js';
 import { getPool, getGlobal, getGlobalRules } from '../config/store.js';
 import { renderDisguise } from './disguise.js';
-import { DEBUG_HEADER_NAMES, DEFAULT_GLOBAL_RULES, deepClone } from '../config/defaults.js';
+import { DEFAULT_GLOBAL_RULES, deepClone } from '../config/defaults.js';
 import { STAGE_ORDER } from '../config/stages.js';
 import { cacheMatch, cachePut, isCacheable } from '../platform/cache.js';
 import { checkSecurity } from '../security/guard.js';
@@ -358,11 +358,14 @@ async function runPipeline(ctx) {
       const stale = await cacheMatch(ctx, cacheKey);
       if (stale) {
         ctx.debug.cache = 'STALE';
-        // stale 分支只用 policy 构造客户端头（mergedRespHeaders 在下方步骤 9 才计算，
-        // 此处不依赖它，避免时序耦合；stale 响应本身已含源站级响应头）。
-        // 注意：X-Cache 头名由引擎常量 DEBUG_HEADER_NAMES 决定（下沉自旧 settings.debug），
-        // buildClientHeaders 已按该常量名写出 STALE，此处不再硬编码覆盖。
-        const headers = await buildClientHeaders(ctx, stale, policy, undefined);
+        // stale 分支用 policy 构造客户端头；调试头 / 品牌头 / 缓存头统一由全站规则
+        // respHeaders 引擎下发（与正常/错误响应路径同源，保证 X-Cache=STALE 等可观测头一致）。
+        // mergedRespHeaders 在下方步骤 9 才计算，此处不依赖站点规则覆盖，
+        // 仅用全站默认规则 respHeaders，避免时序耦合。
+        const staleRespHeaders =
+          (ctx.__globalStages && ctx.__globalStages.respHeaders) ||
+          DEFAULT_GLOBAL_RULES.respHeaders;
+        const headers = await buildClientHeaders(ctx, stale, policy, staleRespHeaders);
         recordSafely(ctx, { status: stale.status, cacheHit: 'STALE' });
         return new Response(stale.body, {
           status: stale.status,
@@ -612,35 +615,26 @@ function recordSafely(ctx, entry) {
 function errorResponse(status, title, detail, ctx) {
   const headers = new Headers({
     'Content-Type': 'text/plain; charset=utf-8',
-    'Cache-Control': 'no-store',
   });
 
-  if (ctx?.debug) {
-    // 调试头头名取自引擎常量 DEBUG_HEADER_NAMES（下沉自旧 settings.debug，默认始终开启）。
-    const names = DEBUG_HEADER_NAMES;
-    if (ctx.debug.siteId) headers.set('X-Site-Id', ctx.debug.siteId);
-    if (ctx.debug.ruleId) headers.set(names.ruleId, ctx.debug.ruleId);
-    if (Array.isArray(ctx.debug.tried) && ctx.debug.tried.length) {
-      headers.set('X-Tried-Origins', ctx.debug.tried.join(','));
-    }
-    if (ctx.startTime) headers.set(names.edgeTime, `${Date.now() - ctx.startTime}ms`);
-  }
-  // 错误响应同样注入品牌头，避免泄漏上游平台身份。
-  // 品牌头统一来自全站规则 stages.respHeaders.set（缺规则时回退内置默认），不再引擎外写死。
-  const brand = getBrandHeaders(ctx, undefined);
-  if (brand.Server !== undefined) headers.set('Server', brand.Server);
-  if (brand.Via !== undefined) headers.set('Via', brand.Via);
+  // 调试头 / 品牌头（server / via）/ 缓存头，统一复用全站规则 respHeaders 引擎，
+  // 与正常响应路径行为一致（头名与值均可在前端 ⑯「节点响应头」阶段配置，不再硬编码）。
+  // 规则引擎为绝对权威：错误响应的 no-store / 短时缓存等缓存策略由用户在规则里声明式
+  // 表达，代码不再有任何外置覆盖。用户此处改了缺省 = 用户自定义，代码绝不回加。
+  const respHeaders =
+    (ctx && ctx.__globalStages && ctx.__globalStages.respHeaders) ||
+    DEFAULT_GLOBAL_RULES.respHeaders;
+  applyHeaderOps(headers, respHeaders, ctx, null);
 
   // 错误标题优先使用「错误处理」阶段全站默认里的语义文案（用户可在管理面调整），
   // 未命中语义键时回退到调用方传入的字面量。
   const ge = ctx.__globalStages && ctx.__globalStages.error;
   const messages = (ge && ge.messages) || DEFAULT_GLOBAL_RULES.error.messages;
-  const MSG_MAP = {
-    'Internal Server Error': messages.internal,
-    'No Origin': messages.noOrigin,
-    'Config Error': messages.configError,
-  };
-  const outTitle = MSG_MAP[title] || title;
+  // 语义键→文案键 的映射由规则缺省 error.messageMap 驱动（单一真源），
+  // 命中后取 messages[key] 文案，未命中则回退到调用方传入的字面量 title。
+  const messageMap = (ge && ge.messageMap) || DEFAULT_GLOBAL_RULES.error.messageMap;
+  const key = messageMap[title];
+  const outTitle = (key && messages[key]) || title;
 
   return new Response(`${outTitle}\n\n${detail}\n`, { status, headers });
 }
