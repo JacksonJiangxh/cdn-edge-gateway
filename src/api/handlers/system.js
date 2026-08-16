@@ -278,7 +278,8 @@ function buildLimitations(ctx) {
   if (!caps.hasD1) {
     list.push({
       key: 'd1',
-      message: '当前平台未绑定 D1，统计只能使用 KV 驱动',
+      message:
+        '当前平台未绑定 D1：统计落盘只支持 D1，无 D1 时统计功能不可用（不会回退 KV 写入）。如需统计请绑定 D1，或将 statsDriver 设为 none。',
     });
   }
   if (!caps.hasKV) {

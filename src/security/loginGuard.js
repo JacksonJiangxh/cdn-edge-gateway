@@ -7,15 +7,16 @@
  *   2. 恒定响应延迟，抹平「用户名/密码是否正确」的时序差异
  *   3. 三平台统一的客户端 IP 提取
  *
- * 可用性设计（重要）：
- *   KV 不可用（未绑定 / 超配额 / 网络抖动）时，一律**降级为放行**并记录警告。
- *   理由：登录防护属于「附加安全层」，真正的第一道防线是密码本身。
- *   如果因为 KV 挂掉就锁死所有人，等于把一个可用性故障放大成完全的拒绝服务，
- *   而攻击者本来就能通过打爆 KV 来触发这种「fail-closed」的自我 DoS。
+ * 存储策略（2026-08 修订）：纯 isolate 内存，零 KV 读写。
+ *   设计约束：只有用户通过控制台修改配置才允许写 KV，运行期其余一律只读。
+ *   因此登录失败计数改为内存维护，单实例有效、不跨 isolate 共享。
+ *
+ * 可用性设计：内存计数永不失败，始终可用；无 KV 依赖。
+ *   说明：跨实例不共享意味着同一 IP 在不同 isolate 上各自计数，但由于 CF/EO
+ *   会强制覆写真实客户端 IP，同一来访者通常落在同区域实例，单实例优先见顶，
+ *   对暴力破解仍有实际阻拦效果。
  * ============================================================================
  */
-
-import { getKV } from '../platform/kv.js';
 
 // ============================================================================
 // 常量
@@ -24,14 +25,14 @@ import { getKV } from '../platform/kv.js';
 /** 允许的最大连续失败次数，达到即锁定。 */
 const MAX_FAILURES = 5;
 
-/** 锁定 / 计数窗口时长（秒）。 */
+/** 锁定 / 计数窗口时长（秒），仅用于内存记录到期清理。 */
 const LOCK_TTL_SEC = 900;
 
 /** 恒定响应最小耗时（毫秒），用于抹平时序差异。 */
 const CONSTANT_DELAY_MS = 500;
 
-/** KV 键前缀，契约规定为 `lock:{ip}`。 */
-const LOCK_KEY_PREFIX = 'lock:';
+/** 内存记录 kv：key = ip，value = { n, until }，到达 LOCK_TTL_SEC 后随访问清理。 */
+const _memLock = new Map();
 
 // ============================================================================
 // 客户端 IP 提取
@@ -111,55 +112,22 @@ function sanitizeIp(raw) {
 // ============================================================================
 
 /**
- * 构造锁定键。
+ * 读取当前失败记录（纯内存，零 KV）。
+ * 存储格式为 `{ n: 失败次数, until: 锁定到期时间戳(ms) }`。
+ * 过期记录（until < now）自动清理并返回清零。
  * @param {string} ip 客户端 IP
- * @returns {string} KV key
+ * @returns {{n:number, until:number}} 失败记录
  */
-function lockKey(ip) {
-  return `${LOCK_KEY_PREFIX}${ip || 'unknown'}`;
-}
-
-/**
- * 统一的降级告警输出。KV 不可用时只记录，不影响主流程。
- * @param {string} action 触发降级的动作名
- * @param {any} [err] 可选错误对象
- * @returns {void}
- */
-function warnDegraded(action, err) {
-  try {
-    // 只输出到运行时日志，不会进入 HTTP 响应，因此不存在信息泄露
-    console.warn(`[loginGuard] KV 不可用，降级放行：${action}`, err ? String(err && err.message || err) : '');
-  } catch {
-    /* ignore */
-  }
-}
-
-/**
- * 读取当前失败记录。
- * 存储格式为 JSON：`{ n: 失败次数, until: 锁定到期时间戳(ms) }`。
- * 兼容纯数字的旧格式。
- * @param {any} kv KV 实例
- * @param {string} ip 客户端 IP
- * @returns {Promise<{n:number, until:number}>} 失败记录
- */
-async function readRecord(kv, ip) {
-  const raw = await kv.get(lockKey(ip));
-  if (raw == null) return { n: 0, until: 0 };
-
-  if (typeof raw === 'object') {
-    return { n: Number(raw.n) || 0, until: Number(raw.until) || 0 };
-  }
-  const text = String(raw).trim();
-  if (/^\d+$/.test(text)) {
-    return { n: parseInt(text, 10), until: 0 };
-  }
-  try {
-    const obj = JSON.parse(text);
-    return { n: Number(obj.n) || 0, until: Number(obj.until) || 0 };
-  } catch {
+function readRecord(ip) {
+  const rec = _memLock.get(ip);
+  if (!rec) return { n: 0, until: 0 };
+  if (rec.until <= Date.now()) {
+    _memLock.delete(ip);
     return { n: 0, until: 0 };
   }
+  return { n: Number(rec.n) || 0, until: Number(rec.until) || 0 };
 }
+
 
 // ============================================================================
 // 对外接口
@@ -180,78 +148,44 @@ async function readRecord(kv, ip) {
  * if (!gate.allowed) return fail('RATE_LIMITED', `请 ${gate.retryAfter}s 后重试`, 429);
  */
 export async function checkLoginAllowed(ctx, ip) {
-  try {
-    const kv = getKV(ctx && ctx.env);
-    if (!kv) {
-      warnDegraded('checkLoginAllowed: 无 KV 绑定');
-      return { allowed: true, retryAfter: 0, failures: 0, degraded: true };
-    }
-
-    const rec = await readRecord(kv, ip);
-    if (rec.n < MAX_FAILURES) {
-      return { allowed: true, retryAfter: 0, failures: rec.n };
-    }
-
-    // 已达阈值：计算剩余锁定时间
-    const now = Date.now();
-    let remain = rec.until > now ? Math.ceil((rec.until - now) / 1000) : 0;
-    // until 缺失（旧格式）时按整窗口兜底，避免返回 0 导致前端误判为已解锁
-    if (remain <= 0) remain = LOCK_TTL_SEC;
-
-    return { allowed: false, retryAfter: remain, failures: rec.n };
-  } catch (err) {
-    warnDegraded('checkLoginAllowed', err);
-    return { allowed: true, retryAfter: 0, failures: 0, degraded: true };
+  // 纯内存判定：跨 isolate 不共享，单实例有效。
+  const rec = readRecord(ip);
+  if (rec.n < MAX_FAILURES) {
+    return { allowed: true, retryAfter: 0, failures: rec.n };
   }
+
+  // 已达阈值：计算剩余锁定时间
+  const now = Date.now();
+  let remain = rec.until > now ? Math.ceil((rec.until - now) / 1000) : 0;
+  // until 缺失时按整窗口兜底，避免返回 0 导致前端误判为已解锁
+  if (remain <= 0) remain = LOCK_TTL_SEC;
+
+  return { allowed: false, retryAfter: remain, failures: rec.n };
 }
 
 /**
- * 记录一次登录失败：计数 +1，并刷新 TTL 为 900 秒。
- *
- * 注意这是 read-modify-write，KV 最终一致性下高并发可能少计几次；
- * 对于「阻挡暴力破解」这个目标，少计几次完全可以接受 —— 攻击者
- * 依然会在极短时间内触顶阈值。
- *
+ * 记录一次登录失败：内存计数 +1，并刷新锁定到期时间为 900 秒后。
+ * 纯内存操作，无 KV 读写。
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
  * @param {string} ip 客户端 IP
- * @returns {Promise<number>} 更新后的失败次数；降级时返回 0
+ * @returns {Promise<number>} 更新后的失败次数
  */
 export async function recordLoginFailure(ctx, ip) {
-  try {
-    const kv = getKV(ctx && ctx.env);
-    if (!kv) {
-      warnDegraded('recordLoginFailure: 无 KV 绑定');
-      return 0;
-    }
-
-    const rec = await readRecord(kv, ip);
-    const next = rec.n + 1;
-    const until = Date.now() + LOCK_TTL_SEC * 1000;
-
-    await kv.put(lockKey(ip), JSON.stringify({ n: next, until }), {
-      expirationTtl: LOCK_TTL_SEC,
-    });
-    return next;
-  } catch (err) {
-    warnDegraded('recordLoginFailure', err);
-    return 0;
-  }
+  const rec = readRecord(ip);
+  const next = rec.n + 1;
+  const until = Date.now() + LOCK_TTL_SEC * 1000;
+  _memLock.set(ip, { n: next, until });
+  return next;
 }
 
 /**
- * 登录成功后清除该 IP 的失败计数。
+ * 登录成功后清除该 IP 的失败计数（内存，零 KV）。
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
  * @param {string} ip 客户端 IP
  * @returns {Promise<void>}
  */
 export async function recordLoginSuccess(ctx, ip) {
-  try {
-    const kv = getKV(ctx && ctx.env);
-    if (!kv) return;
-    await kv.delete(lockKey(ip));
-  } catch (err) {
-    warnDegraded('recordLoginSuccess', err);
-  }
+  _memLock.delete(ip);
 }
 
 /**

@@ -93,7 +93,7 @@
  * @property {string}  passwordSalt       盐（base64）
  * @property {number}  tokenTtl           JWT 有效期（秒），默认 7200
  * @property {boolean} statsEnabled       是否开启统计
- * @property {'kv'|'d1'|'none'} statsDriver
+ * @property {'d1'|'none'} statsDriver
  * @property {number}  configCacheTtl     配置内存缓存 TTL（秒），默认 30
  * @property {number}  globalRateLimit    全局请求频率限制（req/s），0 表示不限制
  * @property {Disguise} disguise          未匹配站点时的伪装页策略

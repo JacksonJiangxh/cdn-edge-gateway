@@ -68,7 +68,7 @@ export const DEFAULT_GLOBAL = Object.freeze({
   passwordSalt: '',
   tokenTtl: 7200,
   statsEnabled: true,
-  statsDriver: 'kv',
+  statsDriver: 'd1',
   configCacheTtl: 60,
   /** 全局请求频率限制（req/s），0 表示不限制 */
   globalRateLimit: 0,

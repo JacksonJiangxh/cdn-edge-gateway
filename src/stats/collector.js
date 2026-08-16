@@ -2,10 +2,12 @@
  * ============================================================================
  * stats/collector.js —— 内存聚合式访问统计
  * ----------------------------------------------------------------------------
- * 【核心约束：绝不能每请求写一次 KV/D1】
- * Cloudflare KV 免费版每天仅 1000 次写入，一个中等流量站点几分钟就能打爆；
- * D1 免费版每日写入上限 100,000 行（远高于 KV），但同样需要节流。
- * 因此统计必须先在 isolate 内存里聚合，达到阈值后才批量落盘一次。
+ * 【核心约束：统计落盘只允许 D1，绝不复用 KV】
+ * 产品约束：KV 仅用于「控制台改配置」这一写路径，运行期所有统计写入都走 D1。
+ * D1 免费版每日写入上限 100,000 行（远高于 KV 的 1000），因此统计先在 isolate
+ * 内存里聚合，达到阈值（默认 500 条 / 5 分钟）后才批量落盘一次。
+ * 若平台无 D1 绑定，统计功能**不可用**——聚合数据落盘时直接丢弃（最多丢一个
+ * flush 周期的量），绝不回退 KV，以保证「KV 零写入」的硬约束。
  *
  * 落盘触发条件（满足其一即可）：
  *   - 自上次 flush 起累计条数 >= 500
@@ -137,7 +139,7 @@ onGlobalChange((next, prev) => {
   const prevEnabled = prev?.statsEnabled !== false;
   if (nextDriver !== prevDriver || nextEnabled !== prevEnabled) {
     console.log(
-      `[stats] 运行时节统计引擎切换: ${prevDriver ?? 'kv'} → ${nextDriver ?? 'kv'}, enabled=${nextEnabled}`
+      `[stats] 运行时节统计引擎切换: ${prevDriver ?? 'd1'} → ${nextDriver ?? 'd1'}, enabled=${nextEnabled}`
     );
     resetCollector();
   }
@@ -479,7 +481,9 @@ export async function flush(ctx, force = false) {
         return;
       }
 
-      const driverName = (cfg && cfg.statsDriver) || 'kv';
+      // 统计落盘只允许 D1：'kv' 已废弃（旧配置残留视为 d1），'none' 表示关闭。
+      let driverName = (cfg && cfg.statsDriver) || 'd1';
+      if (driverName === 'kv') driverName = 'd1'; // 旧值兼容：KV 不再承载统计
       if (driverName === 'none') {
         takeSnapshot();
         return;
@@ -493,7 +497,7 @@ export async function flush(ctx, force = false) {
 
       try {
         if (driverName === 'd1') {
-          // 用户已明确选择 D1：写入失败【绝不】降级到 KV。
+          // 统计只允许 D1：写入失败【绝不】降级到 KV。
           // 历史 bug：D1 瞬时不可用（冷启动 / env 绑定未注入 / ctx.env 透传缺失）
           // 时会回落 KV，导致 KV 被 hourly 分段污染，且 D1 恢复后无法对账。
           // 策略：先重试一次覆盖瞬时抖动；重试仍失败则丢弃本次聚合（最多落盘延迟
@@ -512,10 +516,8 @@ export async function flush(ctx, force = false) {
             );
             // 视为已落盘，避免无限重试堆积内存
           }
-        } else {
-          const kv = await import('./kvDriver.js');
-          await kv.writeStats(ctx, records);
         }
+        // 除 'd1' 与 'none' 外无任何其他分支：统计落盘的唯一存储是 D1。
       } catch (err) {
         // 落盘失败：把数据放回内存，下次再试（最多重复几个周期后自然被丢弃）
         restore(snapshot);
@@ -559,10 +561,11 @@ export async function getStatsHealth(ctx) {
   for (const [host, b] of buckets) hosts.push(toRecord(host, b));
 
   let d1Available = false;
-  let driver = 'kv';
+  let driver = 'd1';
   try {
     const cfg = await getGlobal(ctx);
     if (cfg && cfg.statsDriver) driver = cfg.statsDriver;
+    if (driver === 'kv') driver = 'd1'; // 旧值兼容
     if (driver === 'd1') {
       const d1 = await import('./d1Driver.js');
       d1Available = typeof d1.isAvailable === 'function' ? d1.isAvailable(ctx) : false;

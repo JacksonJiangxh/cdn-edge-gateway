@@ -1,29 +1,16 @@
 /**
  * ============================================================================
- * stats/kvDriver.js —— KV 统计驱动
+ * stats/kvDriver.js —— KV 统计驱动【已弃用】
  * ----------------------------------------------------------------------------
- * 键格式（契约规定）：`stat:{host}:{yyyymmddhh}:{shard}`，shard ∈ [0, 7]
+ * 历史原因：统计曾落盘 KV。现产品硬约束：KV 仅用于「控制台改配置」这一写路径，
+ * 运行期所有统计写入都走 D1（见 d1Driver.js / collector.js）。
  *
- * 【为什么必须分片】
- * KV 没有原子自增，累加只能靠 read-modify-write。多个 isolate 同时对同一个 key
- * 做 RMW 时，后写的会完整覆盖先写的，造成大量计数丢失。
- * 把同一小时的数据随机散列到 8 个分片上，可以把并发冲突概率降到约 1/8，
- * 读取时把 8 个分片相加还原总量。
- *
- * 【最终一致性带来的损失是可接受的】
- * 即便分片后，同一分片仍可能被两个 isolate 并发 RMW 而丢失一次增量；
- * 加之 KV 全球复制有秒级延迟，读到的基值可能是旧的。
- * 本项目的统计用途是「看趋势和量级」，不是计费或对账，
- * 因此我们明确接受这种量级在 1% 以下的计数偏差，换取零额外成本与零架构复杂度。
- * 若需要精确计数，应改用 D1 驱动（有事务）或 Durable Objects。
- *
- * 【TTL】
- * 所有统计条目 TTL = 7 天，到期自动过期。避免 KV 命名空间无限膨胀
- * （KV 免费版有 1GB 存储上限，且 list 操作会随 key 数量线性变慢）。
+ * 因此本文件的写入函数 writeStats 已降级为 no-op（绝不向 KV 写任何统计条目），
+ * 查询函数也不再被 stats/index.js 门面引用。保留文件仅为兼容旧部署中可能残留的
+ * 历史 stat:* 键的读取，新版本应一律使用 D1 驱动。
  * ============================================================================
  */
 
-import { getKV } from '../platform/kv.js';
 import { hourKey } from '../utils/hourKey.js';
 
 /** 分片数量。契约规定 0-7。 */
@@ -175,47 +162,16 @@ function num(v) {
 /**
  * 批量写入统计记录（由 collector.flush 调用）。
  *
- * 每个 host 随机挑一个分片做 read-modify-write。一次 flush 对每个 host
- * 只产生 1 次 KV 读 + 1 次 KV 写，配合 collector 的 100 条/30 秒聚合阈值，
- * 单站点每天的 KV 写入量约为 `86400/30 = 2880` 次上限，
- * 实际低流量站点远低于此；高流量站点则由 100 条阈值主导，同样可控。
+ * 【已弃用】统计落盘只走 D1，本函数不再向 KV 写入任何统计条目，
+ * 直接返回 false 表示「未写入」，由 collector 视为已落盘（丢弃该批聚合），
+ * 以保证 KV 零写入的硬约束。如需持久化统计，请使用 d1Driver.writeStats。
  *
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
  * @param {Object[]} records collector 产出的扁平统计记录数组
- * @returns {Promise<boolean>} 是否写入成功（KV 不可用返回 false）
+ * @returns {Promise<boolean>} 始终 false（不写 KV）
  */
-export async function writeStats(ctx, records) {
-  const kv = getKV(ctx && ctx.env);
-  if (!kv) return false;
-  if (!Array.isArray(records) || records.length === 0) return true;
-
-  const hour = hourKey();
-  const tasks = [];
-
-  for (const rec of records) {
-    const host = normHost(rec && rec.host);
-    // 随机分片：把并发 RMW 冲突摊薄到 1/8
-    const shard = Math.floor(Math.random() * SHARD_COUNT);
-    const key = shardKey(host, hour, shard);
-
-    tasks.push(
-      (async () => {
-        try {
-          const prev = await kv.get(key, 'json');
-          const merged = addInto(prev ? { ...emptyAgg(), ...normalizeStored(prev) } : emptyAgg(), rec);
-          merged.host = host;
-          merged.hour = hour;
-          merged.updatedAt = Date.now();
-          await kv.put(key, JSON.stringify(merged), { expirationTtl: STAT_TTL_SEC });
-        } catch {
-          // 单个 host 写失败不影响其他 host
-        }
-      })()
-    );
-  }
-
-  await Promise.all(tasks);
-  return true;
+export async function writeStats(_ctx, _records) {
+  return false;
 }
 
 /**

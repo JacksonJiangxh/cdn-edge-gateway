@@ -1080,21 +1080,32 @@ export async function ensureGlobalRulesSeeded(ctx) {
   if (_seedPromise) return _seedPromise;
   _seedPromise = (async () => {
     const data = await readJson(ctx, K_GLOBAL_RULES);
-    // 缺失判定：完全空值，或 stages 为空对象（key 存在但被清空残留空结构）。
-    const missing = !data
-      || !(data.stages && typeof data.stages === 'object'
-        && Object.keys(data.stages).length > 0);
-    if (missing) {
+    const normalized = _normalizeGlobalRulesInMemory(data);
+
+    // 触发一次性落盘的判定：
+    // 1. KV 中完全缺失或 stages 为空对象；
+    // 2. 旧数组格式 { rules: [...] }；
+    // 3. 仍带已废弃的 settings 段；
+    // 4. 缺失某些阶段 key（升级补齐）。
+    // 这些只在 isolate 冷启动时检测一次并落盘，之后所有请求只读不写。
+    const hasOldArray = data && Array.isArray(data.rules);
+    const hasLegacySettings = !!(data && data.settings && typeof data.settings === 'object');
+    const hasEmptyStages = !data || !(data.stages && typeof data.stages === 'object'
+      && Object.keys(data.stages).length > 0);
+    const base = cloneGlobalRules();
+    const missingStages = data && data.stages && typeof data.stages === 'object'
+      && ALL_GLOBAL_STAGE_KEYS.some((stage) => data.stages[stage] === undefined);
+
+    if (hasOldArray || hasLegacySettings || hasEmptyStages || missingStages) {
       // 关键：经由统一写入入口 putGlobalRules 落盘，与人工在管理面编辑走同一
       // validateGlobalRulesStages 校验 + 落盘 + invalidateMemCache + bumpVersion 逻辑，
       // 禁止直接裸写 KV（满足「程序模拟人工编辑、与人工逐一设置完全等价」要求）。
-      await putGlobalRules(ctx, cloneGlobalRules());
+      await putGlobalRules(ctx, normalized);
     }
   })().catch((err) => {
-    console.error('[store] 全站规则冷启动播种失败（忽略，由读取路径兜底）:', err?.message);
+    console.error('[store] 全站规则冷启动播种/迁移失败（忽略，由读取路径兜底）:', err?.message);
   }).finally(() => {
-    // 失败/成功都只试一次：失败也不清 _seedPromise，避免异常态下每个请求重试打 KV；
-    // 真正的兜底由 getGlobalRules 的惰性三分支承担。
+    // 失败/成功都只试一次：失败也不清 _seedPromise，避免异常态下每个请求重试打 KV。
   });
   return _seedPromise;
 }
@@ -1228,60 +1239,45 @@ export async function getGlobalRules(ctx) {
 
   const data = await readJson(ctx, K_GLOBAL_RULES);
 
-  /** 落盘 + 失效内存缓存 + bump 版本（失败只告警，不影响返回值） */
-  const persist = async (stages, why) => {
-    try {
-      await writeJson(ctx, K_GLOBAL_RULES, { stages });
-      invalidateMemCache();
-      await bumpVersion(ctx);
-    } catch (err) {
-      console.error(`[store] 全站规则${why}落盘失败（忽略，仍返回内存值）:`, err?.message);
-    }
-  };
+  // 关键修正：getGlobalRules 处于每个数据面请求的热路径，绝不能在这里写 KV。
+  // 旧的「读时迁移/补默认」逻辑会在 KV 为空/旧格式时让每个请求都触发 put，
+  // 几分钟就能打爆 Cloudflare KV 免费版 1000 次/天的写入上限。
+  // 以下只做纯内存规范化并返回；播种与迁移统一交给 ensureGlobalRulesSeeded
+  //（isolate 冷启动一次性）和管理面写入入口处理。
+  const stages = _normalizeGlobalRulesInMemory(data);
+  return { stages: deepClone(stages) };
+}
 
-  // 旧结构 A：{ rules: [...] } —— 数组时代的规则，迁移为 stages 映射后写回
+/**
+ * 把 KV 中读到的任意历史形态全站规则，在内存里规范化成标准 stages 映射。
+ * 纯函数，不读写 KV，可被 getGlobalRules 热路径安全调用。
+ * @param {any} data readJson(K_GLOBAL_RULES) 返回值
+ * @returns {Record<string, any>} 规范化后的 stages
+ */
+function _normalizeGlobalRulesInMemory(data) {
+  // 旧结构 A：{ rules: [...] } —— 数组时代的规则，迁移为 stages 映射
   if (data && Array.isArray(data.rules)) {
-    const stages = foldLegacySettingsIntoStages(migrateGlobalRulesFromArray(data), data.settings);
-    await persist(stages, '旧数组结构迁移');
-    return { stages: deepClone(stages) };
+    return foldLegacySettingsIntoStages(migrateGlobalRulesFromArray(data), data.settings);
   }
 
   // 新结构：{ stages: {...} }（旧数据可能还带一个已废弃的 settings 段）
   if (data && data.stages && typeof data.stages === 'object') {
-    // 实质为空（stages 是空对象 {}，常见于「KV 被清空后残留一个空结构」或
-    // putGlobalRules 收到空 stages 写入）时，不返回空值、改为补落盘内置默认，
-    // 避免「全站规则 key 存在但所有阶段值空」的永久态。
+    // 实质为空时回退到内置默认
     if (Object.keys(data.stages).length === 0) {
-      const stages = cloneGlobalRules();
-      await persist(stages, '空结构补默认');
-      return { stages: deepClone(stages) };
+      return cloneGlobalRules();
     }
 
     // 单轨化迁移：先把老 settings 折进 stages（幂等；无 settings 时为恒等变换）
     const folded = foldLegacySettingsIntoStages(data.stages, data.settings);
 
-    // 逐阶段合并补全：内置默认铺底、用户已有值覆盖。
-    // 仅当 stages 缺失个别阶段 key 时补全，并且只在「确有新增」时写回 + bumpVersion（幂等），
-    // 避免每次读取都写 KV。这也是升级后自动补齐 match/security/error 三个新阶段的路径。
+    // 逐阶段合并补全：内置默认铺底、用户已有值覆盖
     const base = cloneGlobalRules();
     const merged = {};
-    let added = false;
     for (const stage of ALL_GLOBAL_STAGE_KEYS) {
-      if (folded[stage] !== undefined) {
-        merged[stage] = deepClone(folded[stage]);
-      } else {
-        merged[stage] = deepClone(base[stage]);
-        added = true;
-      }
+      merged[stage] = folded[stage] !== undefined ? deepClone(folded[stage]) : deepClone(base[stage]);
     }
-    // 老数据带 settings 段时，即使阶段齐全也要写回一次以物理删除 settings（完成单轨化）
-    const hadLegacySettings = !!(data.settings && typeof data.settings === 'object');
-    if (added || hadLegacySettings) {
-      await persist(merged, hadLegacySettings ? 'settings 单轨化迁移' : '缺失阶段补全');
-    }
-    // 兼容旧数据残留的 noCacheStatus（已并入 statusTtl：TTL=0 = no-store）。
-    // 运行时已被合并后不再读取 noCacheStatus，故在此把其元素并入 statusTtl，确保行为不因合并而静默失效。
-    // 仅做兼容转换，不裁剪其他字段（如 security.uaBlacklist 等由各自阶段自行处理）。
+
+    // 兼容旧数据残留的 noCacheStatus（已并入 statusTtl：TTL=0 = no-store）
     const cacheStage = merged.cache;
     if (cacheStage && Array.isArray(cacheStage.noCacheStatus) && cacheStage.noCacheStatus.length) {
       const ttls = {};
@@ -1291,13 +1287,11 @@ export async function getGlobalRules(ctx) {
       }
       cacheStage.statusTtl = Object.assign({}, ttls, cacheStage.statusTtl || {});
     }
-    return { stages: deepClone(merged) };
+    return merged;
   }
 
-  // 空值：落盘内置默认并返回（幂等由调用方并发容忍，失败不影响返回）
-  const stages = cloneGlobalRules();
-  await persist(stages, '默认');
-  return { stages: deepClone(stages) };
+  // 空值/异常：返回内置默认
+  return cloneGlobalRules();
 }
 
 /**

@@ -1,33 +1,26 @@
 /**
  * ============================================================================
- * security/ratelimit.js —— 按需 KV 标记式限流（极低写入量）
+ * security/ratelimit.js —— 纯 isolate 内存限流（零 KV 读写）
  * ----------------------------------------------------------------------------
- * 【核心策略：纯内存计数 + 仅触发时写 KV 标记】
+ * 【核心策略：isolate 内存计数，不跨实例共享，彻底零 KV 写入】
  *
- * Cloudflare Workers / EdgeOne Pages 免费版 KV 每天仅 1000 次写入。
- * 旧策略每 WRITE_BACK_STEP=5 次请求写一次 KV，600 RPM 的 IP 会产
- * 生 ~120 次写入/分钟，一天轻松超配额。
+ * 设计约束（2026-08 修订）：只有用户通过控制台修改配置才允许写 KV，
+ * 所有 isolate 启动/运行期间必须保持只读。因此限流标记式的 KV 同步被移除，
+ * 改为单实例内存计数。
  *
- * 新策略：
+ * 行为：
  *   1. 每个 isolate 在内存中独立计数（零 KV 开销）
- *   2. 只有当本地计数器超过阈值 → 才写一条 KV 标记（rl:host:ip:minute = "1"）
- *   3. 其他 isolate 通过定期（30s）读取 KV 发现标记 → 参与联合拦截
- *   4. 标记 TTL = 120 秒，窗口过后自动过期
- *
- * 效果：
- *   - 触发限流前：0 KV 写入，0 KV 读取（本地未超阈值）
- *   - 触发限流后：1 KV 写入 + 每 30s 一次 KV 读取（仅针对嫌疑 IP）
- *   - 一个 IP 从正常到被拦截，全集群最多产生 1 次 KV 写入
+ *   2. 本地计数器超过阈值 → 本 isolate 直接拦截（不再写 KV 广播给其它 isolate）
+ *   3. 计数随分钟窗口自动回收
  *
  * 代价：跨 isolate 计数精度下降。如果 600 RPM 的流量被 20 个 isolate 均分，
  * 每个只看到 30 req/min，不会触发。这是可接受的取舍——真正攻击会
  * 集中在少数 PoP，单 isolate 必然见顶。
  *
- * 可用性：KV 不可用一律按本地计数判定（fail-safe，不限流胜于误拦）。
+ * 可用性：内存计数永不失败，纯本地判定（fail-safe，不限流胜于误拦）。
  * ============================================================================
  */
 
-import { getKV } from '../platform/kv.js';
 import {
   registerDomain,
   allocBytes,
@@ -41,25 +34,6 @@ import { DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
 // ============================================================================
 // 常量
 // ============================================================================
-
-/** KV 键前缀。完整形态：`rl:{host}:{ip}:{minute}` */
-const RL_PREFIX = 'rl:';
-
-/**
- * 全站「安全校验」阶段的限流参数读取。
- *
- * 单轨化：这些参数原先藏在与 stages 并列的 settings.security 段里（前端不可见），
- * 现在是「安全校验」阶段的全站默认动作（stages.security），用户可在
- * 「全站通用规则 · 安全校验」里可视化调整，改完即生效。
- *
- * 模块级无 ctx 的工具函数（rlEntryCap 等）使用静态内置默认；
- * 热路径 checkRateLimit（有 ctx）优先使用运行时值。
- */
-function secSettings(ctx) {
-  const s = ctx && ctx.__globalStages && ctx.__globalStages.security;
-  if (s && typeof s === 'object') return s;
-  return DEFAULT_GLOBAL_RULES.security;
-}
 
 /** 内存表最大条目数（兜底最大值），超出则整体清理，防止内存无限增长导致 isolate OOM。 */
 const MEM_MAX_ENTRIES = DEFAULT_GLOBAL_RULES.security.memMaxEntries;
@@ -139,14 +113,13 @@ registerDomain('ratelimit', {
 // ============================================================================
 
 /**
- * isolate 内的限流状态表。
+ * isolate 内的限流状态表（纯内存，不跨实例共享）。
  * key: `${host}:${ip}:${minute}`
  * value: {
  *   local:      本 isolate 本窗口累计请求数
  *   tripped:    本 isolate 是否已判定该 (host,ip) 需要拦截
- *   remoteAt:   上次从 KV 读取标记的时间戳（ms），用于冷却
  * }
- * @type {Map<string, {local:number, tripped:boolean, remoteAt:number}>}
+ * @type {Map<string, {local:number, tripped:boolean}>}
  */
 const memCounters = new Map();
 
@@ -206,16 +179,6 @@ function normIp(ip) {
   return String(ip || 'unknown').replace(/[^0-9a-fA-F.:]/g, '').slice(0, 45).toLowerCase() || 'unknown';
 }
 
-/**
- * 解析 KV 标记：非空且非 "0" 即为已标记。
- * @param {any} raw KV 返回值
- * @returns {boolean}
- */
-function parseFlag(raw) {
-  if (raw == null || raw === '' || raw === '0') return false;
-  return true;
-}
-
 // ============================================================================
 // 对外接口
 // ============================================================================
@@ -244,21 +207,16 @@ export async function checkRateLimit(ctx, host, ip, rpm) {
     return { limited: false, count: 0, rpm: 0, retryAfter: 0 };
   }
 
-  const sec = secSettings(ctx);
-  const RL_TTL_SEC = sec.rlTtlSec || 120;
-  const REMOTE_SYNC_INTERVAL_MS = sec.remoteSyncIntervalMs || 30000;
-
   const minute = currentMinute();
   sweep(minute);
 
   const h = normHost(host);
   const i = normIp(ip);
   const memKey = `${h}:${i}:${minute}`;
-  const kvKey = `${RL_PREFIX}${memKey}`;
 
   let slot = memCounters.get(memKey);
   if (!slot) {
-    slot = { local: 0, tripped: false, remoteAt: 0 };
+    slot = { local: 0, tripped: false };
     memCounters.set(memKey, slot);
     // 新槽记账：memBudget 据此掌握占用并触发水位回收
     allocBytes('ratelimit', slot);
@@ -273,56 +231,13 @@ export async function checkRateLimit(ctx, host, ip, rpm) {
     return { limited: true, count: limit + 1, rpm: limit, retryAfter };
   }
 
-  const kv = getKV(ctx && ctx.env);
-  if (!kv) {
-    // KV 不可用：退化为纯 isolate 内计数
-    return {
-      limited: slot.local > limit,
-      count: slot.local,
-      rpm: limit,
-      retryAfter,
-    };
-  }
-
-  try {
-    const now = Date.now();
-
-    // ---- 本地未超阈值 ----
-    // 纯内存计数。仅定期查一次 KV，看其他 isolate 是否已标记本 IP。
-    if (slot.local <= limit) {
-      if (slot.remoteAt === 0 || now - slot.remoteAt >= REMOTE_SYNC_INTERVAL_MS) {
-        const raw = await kv.get(kvKey);
-        slot.remoteAt = now;
-        if (parseFlag(raw)) {
-          slot.tripped = true;
-          return { limited: true, count: limit + 1, rpm: limit, retryAfter };
-        }
-      }
-      return { limited: false, count: slot.local, rpm: limit, retryAfter };
-    }
-
-    // ---- 本地超阈值 ----
-    // 先读 KV 确认：如果其他 isolate 已标记 → 复用标记，拦
-    // 如果还没有标记 → 本 isolate 是第一个发现的 → 写入 KV 标记
-    const raw = await kv.get(kvKey);
-    if (parseFlag(raw)) {
-      slot.tripped = true;
-      return { limited: true, count: limit + 1, rpm: limit, retryAfter };
-    }
-    // 首次触发：写入 KV 标记，通知其他 isolate
-    await kv.put(kvKey, '1', { expirationTtl: RL_TTL_SEC });
+  // 纯 isolate 内存判定：本地计数超过阈值即拦截，不写 KV、不跨实例广播。
+  if (slot.local > limit) {
     slot.tripped = true;
-    slot.remoteAt = now;
-    return { limited: true, count: limit + 1, rpm: limit, retryAfter };
-  } catch {
-    // KV 读写异常 → 按本地计数判定，不限流胜于误拦
-    return {
-      limited: slot.local > limit,
-      count: slot.local,
-      rpm: limit,
-      retryAfter,
-    };
+    return { limited: true, count: slot.local, rpm: limit, retryAfter };
   }
+
+  return { limited: false, count: slot.local, rpm: limit, retryAfter };
 }
 
 // ============================================================================

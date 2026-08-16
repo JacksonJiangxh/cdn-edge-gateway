@@ -2,19 +2,12 @@
  * ============================================================================
  * stats/index.js —— 统计查询门面（Facade）
  * ----------------------------------------------------------------------------
- * 让管理面 API 无需关心底层是 KV 还是 D1：
- *   - 按 `GlobalConfig.statsDriver` 分发到 kvDriver / d1Driver
- *   - driver = 'none'、驱动不可用、或任何异常 → 一律返回**零值结构**，绝不抛错
- *     （统计挂掉不能让管理面白屏）
+ * 让管理面 API 无需关心底层存储：
+ *   - 当前统计存储**只允许 D1**（产品硬约束：KV 仅用于控制台改配置）
+ *   - 按 `GlobalConfig.statsDriver` 解析；旧值 'kv' 视为 'd1'；'none' / 无 D1 绑定
+ *     / 任何异常 → 一律返回**零值结构**，绝不抛错（统计挂掉不能让管理面白屏）
  *
- * 【KV 驱动下的子请求预算】
- * Workers 单个请求最多 50 个 subrequest（免费版），KV 读取也计入。
- * kvDriver.queryStats(host, hours) 的成本 = hours × 8 次读，
- * 所以概览接口在 KV 驱动下：
- *   1. 限制并发批次（CONCURRENCY = 10，但对 KV 驱动实际按 host 串行成本更高）
- *   2. **限制 host 数量**（MAX_HOSTS_KV），超出部分直接不查，避免爆预算
- *   3. 概览默认把 hours 收敛到较小值来控制读次数
- * D1 驱动没有这个限制，一条 SQL 就能聚合所有 host。
+ * D1 驱动一条 SQL 即可聚合任意 host 与时间区间，没有子请求预算限制。
  * ============================================================================
  */
 
@@ -24,14 +17,8 @@ import { hourKey } from '../utils/hourKey.js';
 /** 并发上限：一批最多同时发起多少个驱动查询。 */
 const CONCURRENCY = 10;
 
-/** KV 驱动下概览最多查询的 host 数（子请求预算保护）。 */
-const MAX_HOSTS_KV = 6;
-
 /** topHosts 返回条数。 */
 const TOP_N = 10;
-
-/** 概览接口在 KV 驱动下允许的最大回溯小时数。 */
-const MAX_OVERVIEW_HOURS_KV = 24;
 
 // ============================================================================
 // 零值结构
@@ -126,34 +113,26 @@ async function runBatched(tasks, limit) {
 /**
  * 解析当前应使用的驱动模块。
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
- * @returns {Promise<{name:'kv'|'d1'|'none', mod:Object|null}>} 驱动信息
+ * @returns {Promise<{name:'d1'|'none', mod:Object|null}>} 驱动信息
  */
 async function resolveDriver(ctx) {
-  let name = 'kv';
+  let name = 'd1';
   try {
     const cfg = await getGlobal(ctx);
     if (cfg && cfg.statsEnabled === false) return { name: 'none', mod: null };
     if (cfg && cfg.statsDriver) name = cfg.statsDriver;
+    if (name === 'kv') name = 'd1'; // 旧值兼容：统计落盘只走 D1
   } catch {
-    name = 'kv';
+    name = 'd1';
   }
 
   if (name === 'none') return { name: 'none', mod: null };
 
+  // 统计只允许 D1：D1 驱动各查询函数在 db 为 null 时已返回零值结构（不抛错），
+  // 因此即使无 D1 绑定，也走 D1 驱动——最多返回「无数据」，绝不回退 KV。
   try {
-    if (name === 'd1') {
-      const mod = await import('./d1Driver.js');
-      // D1 模式：彻底与 KV 解耦，【绝不】回落 KV。
-      // 历史逻辑会在 D1 瞬时不可用时回落 KV 查询，导致管理面偶尔读到 KV 中
-      // 历史残留的 hourly 脏分段（见 collector.js 写入路径误降级 bug）。
-      // 现在 D1 驱动各查询函数在 db 为 null 时已返回零值结构（不会抛错），
-      // 因此即使 D1 绑定缺失，也让查询继续走 D1 驱动——最多返回「无数据」，
-      // 而不会污染/误读 KV。保持存储单一来源。
-      return { name: 'd1', mod };
-    }
-    // name === 'kv'：CF 与 EdgeOne 均为真实 KV，行为一致。
-    const mod = await import('./kvDriver.js');
-    return { name: 'kv', mod };
+    const mod = await import('./d1Driver.js');
+    return { name: 'd1', mod };
   } catch {
     return { name: 'none', mod: null };
   }
@@ -221,23 +200,18 @@ export async function queryOverview(ctx, hosts, hours = 24) {
     const list = Array.isArray(hosts) ? hosts.filter((h) => typeof h === 'string' && h) : [];
     if (list.length === 0) return result;
 
-    const { name, mod } = await resolveDriver(ctx);
+    const { mod } = await resolveDriver(ctx);
     if (!mod || typeof mod.queryStats !== 'function') return result;
 
-    // isolate 级缓存：管理面反复刷新概览时避免重复轰炸 KV/D1
-    let h = Math.max(1, Math.floor(Number(hours) || 24));
-    if (name === 'kv') h = Math.min(h, MAX_OVERVIEW_HOURS_KV);
-    const cacheKey = `${list.slice(0, MAX_HOSTS_KV).sort().join(',')}:${h}`;
+    // isolate 级缓存：管理面反复刷新概览时避免重复轰炸 D1
+    const h = Math.max(1, Math.floor(Number(hours) || 24));
+    const cacheKey = `${list.slice(0, 64).sort().join(',')}:${h}`;
     const now = Date.now();
     if (_overviewCache.key === cacheKey && (now - _overviewCache.at) < STATS_QUERY_CACHE_TTL_MS) {
       return _overviewCache.data;
     }
 
-    // KV 驱动：读取次数 = host 数 × hours × 8 分片，必须双重收敛
-    let targets = list;
-    if (name === 'kv') {
-      targets = list.slice(0, MAX_HOSTS_KV);
-    }
+    const targets = list;
 
     const tasks = targets.map((host) => async () => {
       const raw = await mod.queryStats(ctx, host, h);

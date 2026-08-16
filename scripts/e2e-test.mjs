@@ -181,6 +181,11 @@ async function runHttpFlow(mod, platform, mockKV, mockAssets, useAssets) {
     JWT_SECRET,
     CDN_KV: mockKV,
   };
+  // Cloudflare 平台原生支持 D1：注入最小 D1 mock（prepare 函数满足 caps 探测），
+  // 使默认 statsDriver='d1' 在 e2e 中可被校验通过（统计落盘只走 D1）。
+  if (platform === 'cf') {
+    baseEnv.DB = { prepare: () => ({ bind: () => ({ all: async () => ({ results: [] }) }) }) };
+  }
   if (useAssets) baseEnv.ASSETS = mockAssets;
 
   const env = { ...baseEnv };

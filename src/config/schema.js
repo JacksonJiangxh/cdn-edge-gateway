@@ -1726,7 +1726,7 @@ export function validateGlobal(input, caps, current) {
     passwordSalt: str(input.passwordSalt, '', 512),
     tokenTtl,
     statsEnabled: bool(input.statsEnabled, d.statsEnabled),
-    statsDriver: enumOf(input.statsDriver, ['kv', 'd1', 'none'], d.statsDriver),
+    statsDriver: enumOf(input.statsDriver, ['d1', 'none'], d.statsDriver),
     configCacheTtl,
     globalRateLimit,
     disguise: normDisguise(input.disguise),
@@ -1753,7 +1753,7 @@ export function checkGlobalCaps(value, caps) {
   if (caps.hasD1 === false && value.statsDriver === 'd1') {
     errors.push(
       `统计驱动设为 d1，但当前平台（${caps.platform || 'unknown'}）不支持 D1；` +
-        `请改用 'kv' 或 'none'`
+        `统计落盘只支持 D1，无 D1 时请改为 'none'（统计功能不可用）`
     );
   }
   return errors;

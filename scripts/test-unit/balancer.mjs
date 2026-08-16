@@ -74,28 +74,24 @@ testA('circuit: 累计失败达阈值则熔断（内存计数即时生效）', a
   a.equal(await isTripped(ctx, 'p-trip', 'o-trip'), true, '计数>=3 熔断（L1 即时）');
 });
 
-testA('circuit: recordFailure 单次写入使计数+1', async (a) => {
+testA('circuit: recordFailure 单次失败使内存计数+1（不足阈值不熔断）', async (a) => {
   const ctx = mkCtxFor();
-  const kv = createMockKV();
-  ctx.env = { CDN_KV: kv };
-  const key = encodeKey(`hc:${'p-rf'}:${'o-rf'}`);
+  // 纯 isolate 内存：每次 recordFailure 内存计数+1，但 <3 不熔断
   await recordFailure(ctx, 'p-rf', 'o-rf');
-  // 等后台 waitUntil 落盘（写合并：窗口内多次失败合并为一次 KV 读改写）
-  await new Promise((r) => setTimeout(r, 10));
-  a.equal(await kv.get(key), '1', '首次失败计数=1');
+  a.equal(await isTripped(ctx, 'p-rf', 'o-rf'), false, '1 次失败不熔断（计数=1）');
+  await recordFailure(ctx, 'p-rf', 'o-rf');
+  a.equal(await isTripped(ctx, 'p-rf', 'o-rf'), false, '2 次失败不熔断（计数=2）');
 });
 
 testA('circuit: recordSuccess 清空计数（恢复）', async (a) => {
   const ctx = mkCtxFor();
-  ctx.env = { CDN_KV: createMockKV() };
   // 先累计到熔断（内存即时）
   await recordFailure(ctx, 'p-rec', 'o-rec');
   await recordFailure(ctx, 'p-rec', 'o-rec');
   await recordFailure(ctx, 'p-rec', 'o-rec');
   a.equal(await isTripped(ctx, 'p-rec', 'o-rec'), true, '先置为熔断');
   await recordSuccess(ctx, 'p-rec', 'o-rec');
-  await new Promise((r) => setTimeout(r, 10));
-  a.equal(await isTripped(ctx, 'p-rec', 'o-rec'), false, '成功后恢复（内存清 + KV delete）');
+  a.equal(await isTripped(ctx, 'p-rec', 'o-rec'), false, '成功后恢复（内存清，纯内存无 KV）');
 });
 
 testA('circuit: 未失败不熔断', async (a) => {
