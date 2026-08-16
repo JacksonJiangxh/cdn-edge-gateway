@@ -14,7 +14,8 @@
 import { getGlobalRules } from '../config/store.js';
 import { DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
 import { DEFAULT_CLIENT_IP_HEADER } from '../config/stages-defaults.js';
-import { expandVars, expandSysVars, pickClientIp } from '../config/vars.js';
+import { expandVars, expandSysVars } from '../config/vars.js';
+import { pickClientIp } from '../utils/clientIp.js';
 import { resolveContentType } from '../utils/mime.js';
 
 /**
@@ -206,7 +207,7 @@ export async function buildClientHeaders(ctx, originResp, policy, ops) {
  * @param {Object} [env] 环境变量
  * @returns {void}
  */
-function applyHeaderOps(headers, ops, ctx, env) {
+export function applyHeaderOps(headers, ops, ctx, env) {
   if (!ops) return;
 
   if (ops.set && typeof ops.set === 'object') {

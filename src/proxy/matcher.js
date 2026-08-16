@@ -12,11 +12,11 @@
 
 import { getSite } from '../config/store.js';
 import { TARGETS_NEED_KEY, DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
-import { pickClientIp } from '../config/vars.js';
+import { pickClientIp } from '../utils/clientIp.js';
 
 /**
  * ISO 国家码 → 大区映射（常用即可，未知返回 ''）。
- * 内联于此以避免反向 import vars.js（vars → matcher 已是单向依赖，反向会循环）。
+ * 内联于此（与 config 无关，仅 matcher 自用）。
  */
 const CONTINENT_MAP = Object.freeze({
   // 北美
