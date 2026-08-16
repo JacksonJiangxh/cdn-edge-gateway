@@ -151,6 +151,36 @@ function pickRawBinding(env) {
 }
 
 /**
+ * 从运行时【全局变量】上探测原始 KV 绑定。
+ *
+ * 为什么要这个：EdgeOne Makers 的 KV 与 Cloudflare 不同——它不是通过 context.env
+ * 注入，而是【绑定时自定义名的运行时全局变量】（官方范式：`await my_kv.get('key')`）。
+ * 因此 EO 上 `env.CDN_KV` 恒为 undefined，`pickRawBinding(env)` 永远拿不到。
+ * 本项目在 EO 控制台绑定的 KV 变量名是 CDN_KV（见 wrangler.toml / edgeone.json 注释），
+ * 绑定后该名字会作为【全局变量】注入 Edge Function 运行时，故这里从 globalThis
+ * 按 BINDING_NAMES 逐名探测，把 EO KV 统一包装成 KVLike。与 CF 的 env 绑定、ESA 的
+ * globalThis.EdgeKV 一起，三平台各自可用的访问方式都被覆盖。
+ *
+ * 安全性：仅探测「同名且有 get/put 方法」的对象，绝不会误用其它全局；探测不到就
+ * 返回 null，由上层优雅降级（配了 REDIS_URL 则走 Redis，否则完全无持久化）。
+ *
+ * @returns {any|null} 原始全局 KV 绑定或 null
+ */
+function pickGlobalBinding() {
+  let g;
+  try {
+    g = globalThis || (typeof global !== 'undefined' ? global : null);
+  } catch {
+    return null;
+  }
+  if (!g) return null;
+  for (const name of BINDING_NAMES) {
+    if (looksLikeKV(g[name])) return g[name];
+  }
+  return null;
+}
+
+/**
  * 归一化 list 返回的单个 key 条目。
  * CF 用 `name`，EdgeOne 用 `key`，这里统一成 `name`。
  * @param {any} item 原始条目（可能是字符串或对象）
@@ -584,6 +614,12 @@ function isEsaPlatform(env) {
 export function getKV(env) {
   const raw = pickRawBinding(env);
   if (raw) return wrap(raw);
+
+  // EdgeOne Makers：KV 是【全局变量】而非 env 绑定（官方范式 `await my_kv.get()`）。
+  // EO 控制台把 namespace 绑成变量名 CDN_KV（本项目约定）后，该名字作为全局注入
+  // Edge Function 运行时，故从 globalThis 探测并包装，与 CF 的 env 绑定统一成 KVLike。
+  const globalRaw = pickGlobalBinding();
+  if (globalRaw) return wrap(globalRaw);
 
   // 阿里云 ESA：EdgeKV 收费无免费额度，统一禁用，直接走 REDIS_URL（步骤 3）。
   // 不在此创建 EdgeKV 适配器，避免误用收费资源。

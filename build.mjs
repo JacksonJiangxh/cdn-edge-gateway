@@ -385,6 +385,25 @@ async function buildPublic(frontendJs, css) {
   await writeFile(join(assetDir, 'app.js'), safeJs, 'utf8');
 
   console.log('  ✓ dist/public/index.html + assets/app.{css,js} 已生成（资源路径固定，与 ADMIN_PATH 解耦）');
+
+  // EdgeOne Makers 专用静态根 dist/eo-public/：
+  // 刻意【不】输出 index.html，只放 assets/（与 scripts/package-eo.mjs 的排除策略一致）。
+  // 原因：EO 静态托管层在 Edge Function 之前运行，且【没有 Cloudflare 那种
+  // html_handling="none" 等价物】。若 EO 静态根含 index.html，它会直接挂到站点根 `/`，
+  // 导致「访问域名根即可看到管理面登录页、绕过 core/app.js 的 adminPath 校验门」，
+  // 或在改造后静态层找不到文件而直接 404（worker 根本不执行）。
+  // 因此 EO 静态根只允许放「与 adminPath 解耦的固定 /assets/*」，管理面根 HTML 一律
+  // 由 worker 在 /{adminPath} 运行时动态返回（renderAdminPage → 内联 ui.gen.js）。
+  // 这样根 `/`（及任意非 adminPath 路径）在 EO 静态层无文件 → 落到 [[default]].js
+  // → app.js 走 renderDisguise 伪装页；正确的 /{adminPath} 才进管理面，adminPath 语义
+  // 与 CF 完全一致。CF Workers 不受影响（其 ASSETS 绑定仍指向 dist/public，且
+  // html_handling="none" 不接管路由）。
+  const EO_PUBLIC = join(ROOT, 'dist', 'eo-public');
+  const eoAssetDir = join(EO_PUBLIC, 'assets');
+  await mkdir(eoAssetDir, { recursive: true });
+  await writeFile(join(eoAssetDir, 'app.css'), css, 'utf8');
+  await writeFile(join(eoAssetDir, 'app.js'), safeJs, 'utf8');
+  console.log('  ✓ dist/eo-public/assets/app.{css,js} 已生成（EO 专用静态根，刻意不含 index.html）');
 }
 
 // ---------------------------------------------------------------------------
