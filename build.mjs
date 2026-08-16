@@ -22,7 +22,12 @@
  *      （用产物跑通登录/鉴权/后台 + Node 沙箱执行前端 JS 验证 window.API），
  *      拦住「构建成功但产物不可用」及「登录后进不去后台」这类运行时问题。
  *
- * 用法：node build.mjs [--no-minify] [--skip-verify] [--watch]
+ * 用法：node build.mjs [--no-minify] [--skip-verify] [--testcheck] [--watch]
+ *
+ * 测试环节（专项语法校验 + 产物自检 + 单元/端到端/前端整链测试）默认【不执行】，
+ * 仅当显式传入 --testcheck 时才运行；普通 npm run build 只做纯构建（esbuild 打包），
+ * 不含任何校验/测试，构建更快、更适合本地迭代/纯构建场景。
+ * 注：--skip-verify 仅在 --testcheck 场景下生效，用于调试时跳过产物自检。
  * ============================================================================
  */
 
@@ -47,9 +52,14 @@ const args = process.argv.slice(2);
 // 默认开启压缩构建（产物体积小、启动快，远离 Cloudflare 免费版 1MB 上限）。
 const MINIFY = args.includes('--no-minify') ? false : true;
 const WATCH = args.includes('--watch');
-// 自检默认开启；--skip-verify 仅用于本地特殊调试场景。
+// 测试环节默认【不执行】。仅当显式传入 --testcheck 时才运行全部测试
+// （产物自检 + 后端单测 + e2e + 前端 jsdom/Playwright 整链），把测试变成
+// 可主动触发的质检，而非每次构建的必经环节；普通 npm run build 只做构建与
+// 专项语法校验，更快、更适合本地迭代/纯构建。
+// --skip-verify 仅在 --testcheck 场景下生效，用于本地调试跳过产物自检。
 // 关键护栏：CI 环境（process.env.CI 为真）下忽略 --skip-verify，强制跑全部测试，
-// 杜绝「绕过测试带病部署」。本地调试可用 --skip-verify 加速，但部署链路不应使用。
+// 杜绝「绕过测试带病部署」。
+const TESTCHECK = args.includes('--testcheck');
 const SKIP_VERIFY = args.includes('--skip-verify') && !process.env.CI;
 // 烘焙配置（方案 A：静态部署 / 不依赖 KV）。--bake <file> 接收一份「系统设置 → 导出配置」
 // 下载的 JSON 镜像（结构见 buildConfigMirror 的 payload），将其转写为
@@ -780,8 +790,9 @@ async function main() {
 
   // 步骤 4：打包 worker
   await buildWorker();
-  await syntaxChecks(inlineHtml, frontendJs);
-  if (!SKIP_VERIFY) {
+  if (TESTCHECK && !SKIP_VERIFY) {
+    // 专项语法校验（标签闭合 / 脚本解析 / 括号配对）—— 归入测试环节，默认跳过。
+    await syntaxChecks(inlineHtml, frontendJs);
     // 产物自检：文件完整性 / 入口导出可用 / 平台口径一致性（失败直接 throw）
     await verify();
     // 单元层：后端核心模块（matcher/rewrite/cachekey/balancer/auth/keyCodec/config）
@@ -802,6 +813,8 @@ async function main() {
       runFrontendBrowserTest,
       { allowSkip: !!process.env.ALLOW_SKIP_BROWSER_TEST }
     );
+  } else if (!TESTCHECK) {
+    console.log('  · 已跳过测试环节（语法校验 / 产物自检 / 单元 / e2e / 前端整链）。如需运行，请加 --testcheck');
   }
 
   console.log(`\n构建完成，耗时 ${Date.now() - t0}ms`);
