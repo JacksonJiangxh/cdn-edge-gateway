@@ -106,6 +106,7 @@ export const DEFAULT_ORIGIN = Object.freeze({
   enabled: true,
   order: 0,
   weight: 1,
+  name: '',
   engine: 'fetch',
   scheme: 'https',
   addr: '',

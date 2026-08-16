@@ -333,6 +333,7 @@
  * @property {boolean} enabled
  * @property {number}  order              chain 策略排序，升序
  * @property {number}  weight             weighted 策略权重
+ * @property {string}  [name]             源站展示名称（纯展示标签，给人区分用；r2/cnb 等 addr 为空时必须填，否则列表显示「未命名源站」）
  * @property {'fetch'|'r2'|'cnb'|'github'} engine  fetch=默认公网回源（CF/EO/ESA 均支持，可自定义 Host 头）；r2 仅 CF 可用，回源到 R2 桶绑定（不走公网）；cnb=CNB 仓库 raw 引擎（回源 api.cnb.cool，token 站点级加密落盘）；github=GitHub 仓库 raw 引擎（回源 raw.githubusercontent.com，token 站点级加密落盘）。socket 不再是可选值。
  * @property {'http'|'https'} scheme
  * @property {string}  addr               域名或 IP（engine='r2' 时可留空）

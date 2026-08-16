@@ -127,6 +127,63 @@ testA('validatePool: cnb 缺 repoUser 拒绝', (a) => {
   a.equal(res.ok, false, 'cnb 缺 repoUser 拒绝');
 });
 
+// ===== origin.name 展示字段全链路保留（修复 r2/cnb 编辑回显丢失）=====
+testA('validatePool: fetch 源站 name 被保留', (a) => {
+  const res = validatePool({
+    kind: 'single',
+    origins: [{ engine: 'fetch', scheme: 'https', addr: '1.2.3.4', port: 443, name: '主站' }],
+  });
+  a.equal(res.ok, true, '合法');
+  a.equal(res.value.origins[0].name, '主站', 'fetch 源站 name 保留');
+});
+
+testA('validatePool: r2 源站 name 被保留', (a) => {
+  const res = validatePool({
+    kind: 'single',
+    origins: [{ engine: 'r2', r2Binding: 'CDN_R2_IMG', name: '图片桶' }],
+  });
+  a.equal(res.ok, true, '合法');
+  a.equal(res.value.origins[0].name, '图片桶', 'r2 源站 name 保留');
+});
+
+testA('validatePool: cnb 源站 name 被保留', (a) => {
+  const res = validatePool({
+    kind: 'pool',
+    strategy: 'chain',
+    origins: [
+      { engine: 'cnb', repoUser: 'jacksonjxh', repoName: 'static-resources', name: '静态资源' },
+      { engine: 'r2', r2Binding: 'CDN_R2', name: '备份桶' },
+    ],
+  });
+  a.equal(res.ok, true, '合法');
+  a.equal(res.value.origins[0].name, '静态资源', 'cnb 源站 name 保留');
+  a.equal(res.value.origins[1].name, '备份桶', 'pool 第二个 r2 源站 name 也保留');
+});
+
+testA('validatePool: name 缺失回落空串（向后兼容）', (a) => {
+  const res = validatePool({
+    kind: 'single',
+    origins: [{ engine: 'fetch', addr: '1.1.1.1', port: 443 }],
+  });
+  a.equal(res.ok, true, '合法');
+  a.equal(res.value.origins[0].name, '', '无 name 时回落空串');
+});
+
+testA('validatePool: name 非字符串/过长被裁剪', (a) => {
+  const long = 'x'.repeat(200);
+  const res = validatePool({
+    kind: 'pool',
+    strategy: 'chain',
+    origins: [
+      { id: 'o0', engine: 'fetch', addr: '1.1.1.1', port: 443, name: 123 },
+      { id: 'o1', engine: 'fetch', addr: '2.2.2.2', port: 443, name: long },
+    ],
+  });
+  a.equal(res.ok, true, '合法');
+  a.equal(res.value.origins[0].name, '', '非字符串 name 回落空串');
+  a.equal(res.value.origins[1].name.length, 64, '过长 name 裁剪到 64');
+});
+
 // ===== glob-wildcard 并入 =====
 testA('validateHost: 合法域名通过', (a) => {
   a.equal(validateHost('a.test').ok, true, 'a.test 通过');
