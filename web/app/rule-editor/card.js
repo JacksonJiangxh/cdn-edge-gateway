@@ -4,7 +4,7 @@ import { $, el } from '../../dom.js';
 import { field, select, selectWithGroups, varHintBar } from '../util.js';
 import { conditionsEditor, normalizeMatchForEditor } from './conditions.js';
 import { cacheEditor, headerEditor, rewriteEditor } from './ops.js';
-import { stringListEditor, stripRuleEditor } from './status.js';
+import { stringListEditor } from './status.js';
 import { STAGE_OPS } from '../../_stage.gen.js';
 export   function section(title, desc, children) {
     const body = el('div', { class: 'section-body' }, children);
@@ -95,7 +95,7 @@ export
     // 新建规则的 action 默认「不缓存」（enabled:false）——此前误默认 enabled:true，
     // 导致在 ⑯「改写响应头」等受限抽屉新建的纯头操作规则，保存后也带着 enabled:true
     // 而被 ⑪「Cache Rules」误判命中、越界出现在缓存阶段。仅在用户确实配置了缓存时才挂缓存。
-    rule = rule || { id: '', priority: 0, enabled: true, match: { conditions: [] }, action: { poolId: '', rewrite: { type: 'none' }, cache: { enabled: false }, reqHeaders: { set: {}, remove: [] }, respHeaders: { set: {}, remove: [] } } };
+    rule = rule || { id: '', priority: 0, enabled: true, match: { conditions: [] }, action: { poolId: '', rewrite: { type: 'none' }, cache: { enabled: false }, reqHeaders: { set: {}, strip: [] }, respHeaders: { set: {}, strip: [] } } };
     const en = el('input', { type: 'checkbox', checked: rule.enabled !== false });
     // 规则名与备注：纯展示用，不影响匹配。模板生成的规则预填了它们，
     // 手动加的规则也建议写上，否则几个月后没人记得这条规则是干嘛的。
@@ -248,30 +248,29 @@ export
       reqHeaders(a) {
         const rh = a.reqHeaders || {};
         const ed = headerEditor(rh);
-        // 全站专属：透传白名单 + 额外剥离规则。
-        // 这两项决定「客户端的哪些请求头会被带到源站」，是整站级的隐私/伪装基线，
+        // 全站专属：透传白名单。
+        // 决定「客户端的哪些请求头会被带到源站」，是整站级的隐私/伪装基线，
         // 不能按 URL 差异化，故只在全站通用规则里出现。
+        // 注：删除请求头（strip：精确/前缀/正则）已并入 headerEditor 的删除区，
+        // 不再单独有「额外剥离」板块——精确删除与额外剥离语义等价，统一在此入口。
         const wlEd = globalScope ? stringListEditor(rh.forwardWhitelist, {
           label: '允许透传到源站的客户端请求头（一行一个）：',
           placeholder: 'accept-language',
           tag: '(透传)',
           hint: '只有列在这里的客户端请求头才会被带到源站，其余（Cookie、Referer、Origin 等）一律丢弃。清空则表示一个都不透传（最严格）。',
         }) : null;
-        const stripEd = globalScope ? stripRuleEditor(rh.strip) : null;
         const extra = globalScope ? [
           el('hr', { class: 'sep' }),
           el('div', { class: 'kv-label' }, '—— 以下为全站默认专属（不随单条规则变化）——'),
           wlEd.root,
-          stripEd.root,
         ] : [];
         // 注意：汇总 read() 用 Object.assign(action, r()) 合并各 op，
-        // 必须返回嵌套结构 { reqHeaders: {set, remove} }（与其它 op 一致），
-        // 不能返回扁平 {set, remove}——否则会被挂到 action 顶层，后端 schema 不识别而丢失。
+        // 必须返回嵌套结构 { reqHeaders: {set, strip} }（与其它 op 一致），
+        // 不能返回扁平 {set, strip}——否则会被挂到 action 顶层，后端 schema 不识别而丢失。
         return opNode('reqHeaders', '回源请求头', '转发到源站前修改', [ed.root, ...extra], () => {
           const v = ed.read();
           if (globalScope) {
             v.forwardWhitelist = wlEd.read();
-            v.strip = stripEd.read();
           }
           return { reqHeaders: v };
         });

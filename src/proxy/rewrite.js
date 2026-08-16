@@ -50,7 +50,7 @@ export function mergeRewrite(originRewrite, ruleRewrite) {
 
 /**
  * 合并 HeaderOps：源站级打底，规则级覆盖。
- * set 字段做浅合并（规则级覆盖同名字段），remove 数组做合并去重。
+ * set 字段做浅合并（规则级覆盖同名字段），strip 数组做合并去重。
  *
  * @param {Object} [originOps] 源站级 HeaderOps
  * @param {Object} [ruleOps] 规则级 HeaderOps
@@ -58,26 +58,26 @@ export function mergeRewrite(originRewrite, ruleRewrite) {
  */
 export function mergeHeaderOps(originOps, ruleOps) {
   const set = { ...(originOps?.set || {}), ...(ruleOps?.set || {}) };
-  const removeSet = new Set([
-    ...(Array.isArray(originOps?.remove) ? originOps.remove : []),
-    ...(Array.isArray(ruleOps?.remove) ? ruleOps.remove : []),
-  ]);
-  return { set, remove: Array.from(removeSet) };
+  const strip = [
+    ...(Array.isArray(originOps?.strip) ? originOps.strip : []),
+    ...(Array.isArray(ruleOps?.strip) ? ruleOps.strip : []),
+  ];
+  return { set, strip };
 }
 
 /**
  * 合并「全站兜底 → 站点命中规则」的 HeaderOps（逐阶段先全站后站点模型专用）。
  *
- * 与 mergeHeaderOps（源站 ops + 规则 ops，规则 remove 只透传）不同：本函数里
- * 站点 remove 必须在「合并阶段」就从并集后的 set 中剔除全站被点名删除的 key。
- * 原因：下游 buildClientHeaders 的 applyHeaderOps 是「先 remove 后 set」一次性注入，
- * 全站 set 里的 key 正是通过这次 set 才进入响应头，remove 在 set 之前执行删不到它。
- * 因此「站点 remove 删全站 set 的 key」只能在合并阶段执行，下游 remove 只负责删
- * 源站/上游自带的同名头。
+ * 与 mergeHeaderOps（源站 ops + 规则 ops，站点 strip 只透传）不同：本函数里
+ * 站点 strip 中的 exact 项必须在「合并阶段」就从并集后的 set 中剔除全站被点名删除的 key。
+ * 原因：下游 buildClientHeaders 的 applyHeaderOps 是「先 set 后 strip」一次性注入，
+ * 全站 set 里的 key 正是通过这次 set 才进入响应头，strip 在 set 之后执行删不到它。
+ * 因此「站点 strip(exact) 删全站 set 的 key」只能在合并阶段执行，下游 strip 只负责删
+ * 源站/上游自带的同名头（prefix/regex 同理作用于合并后的全量头）。
  *
  * set：浅合并（全站打底，站点覆盖同名 key，全站其余 key 保留，不整段替换）。
- * set 删除：遍历站点 remove 列表，从并集后的 set 中 delete 对应 key。
- * remove：全站.remove ∪ 站点.remove（保留删源站/上游自带头的能力）。
+ * set 删除：遍历站点 strip 中的 exact 项，从并集后的 set 中 delete 对应 key。
+ * strip：全站.strip ∪ 站点.strip（保留删源站/上游自带头的能力，支持 exact/prefix/regex）。
  *
  * @param {Object} [globalOps] 全站兜底 HeaderOps
  * @param {Object} [siteOps] 站点命中规则该阶段的 HeaderOps
@@ -85,16 +85,21 @@ export function mergeHeaderOps(originOps, ruleOps) {
  */
 export function mergeStageHeaderOps(globalOps, siteOps) {
   const set = { ...(globalOps?.set || {}), ...(siteOps?.set || {}) };
-  // 站点 remove 必须在合并期即从 set 中删除全站被点名 key
-  const siteRemove = Array.isArray(siteOps?.remove) ? siteOps.remove : [];
-  for (const name of siteRemove) {
-    if (Object.prototype.hasOwnProperty.call(set, name)) delete set[name];
+  // 站点 strip 中的 exact 项代表「精确删除某头」，必须在合并期即从 set 中剔除全站点名 key；
+  // 原因：下游 applyHeaderOps 是「先 set 后 strip」一次性注入，全站 set 里的 key 正是通过
+  // 这次 set 才进入响应头，strip 在 set 之后执行删不到它。故精确删除必须在合并阶段执行，
+  // 下游 strip 只负责删源站/上游自带的同名头（prefix/regex 同理作用于合并后的全量头）。
+  const siteStrip = Array.isArray(siteOps?.strip) ? siteOps.strip : [];
+  for (const rule of siteStrip) {
+    if (rule && rule.type === 'exact' && Object.prototype.hasOwnProperty.call(set, rule.value)) {
+      delete set[rule.value];
+    }
   }
-  const removeSet = new Set([
-    ...(Array.isArray(globalOps?.remove) ? globalOps.remove : []),
-    ...siteRemove,
-  ]);
-  return { set, remove: Array.from(removeSet) };
+  const strip = [
+    ...(Array.isArray(globalOps?.strip) ? globalOps.strip : []),
+    ...siteStrip,
+  ];
+  return { set, strip };
 }
 export function applyRewrite(pathname, rewrite, ctx) {
   const type = rewrite?.type || 'none';

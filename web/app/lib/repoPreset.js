@@ -7,7 +7,7 @@
 //   动作对象：action 为「阶段子对象」扁平结构——
 //             rewrite:{ type:'regex', regexFrom, regexTo, preserveQuery }
 //             hostHeader:{ mode:'custom', custom }（指向仓库 raw API 上游 host）
-//             reqHeaders:{ set, remove } / respHeaders:{ set, remove }。
+//             reqHeaders:{ set, strip } / respHeaders:{ set, strip }。
 //
 // 产物是「站点规则数组形态」的对象（rewrite / respHeaders / 可选 reqHeaders），
 // 由调用方（sites.js 的新建保存流程）并入「站点模板规则」后统一写进流量序列。
@@ -31,13 +31,23 @@ export function repoUpstreamHost(engine, isPrivate) {
 }
 
 /**
- * 各引擎回源响应里「仓库特有、需在边缘剥离」的响应头清单。
+ * 各引擎回源响应里「仓库特有、需在边缘剥离」的响应头清单（统一 strip 语法）。
  * @param {string} engine
- * @returns {string[]}
+ * @returns {Array<{type:'exact',value:string}>}
  */
 function respRemoveHeaders(engine) {
-  if (engine === 'cnb') return ['x-cnb-request-id', 'x-cnb-region', 'x-gitlab-*`', 'gitlab-lb'];
-  if (engine === 'github') return ['x-github-request-id', 'x-github-cache', 'x-ratelimit-limit', 'x-ratelimit-remaining'];
+  if (engine === 'cnb') return [
+    { type: 'exact', value: 'x-cnb-request-id' },
+    { type: 'exact', value: 'x-cnb-region' },
+    { type: 'exact', value: 'x-gitlab-*`' },
+    { type: 'exact', value: 'gitlab-lb' },
+  ];
+  if (engine === 'github') return [
+    { type: 'exact', value: 'x-github-request-id' },
+    { type: 'exact', value: 'x-github-cache' },
+    { type: 'exact', value: 'x-ratelimit-limit' },
+    { type: 'exact', value: 'x-ratelimit-remaining' },
+  ];
   return [];
 }
 
@@ -108,7 +118,7 @@ export function buildRepoPresetRules(engine, opts = {}) {
     priority: 10,
     match,
     action: {
-      respHeaders: { set: {}, remove: respRemoveHeaders(engine) },
+      respHeaders: { set: {}, strip: respRemoveHeaders(engine) },
     },
   };
 
@@ -123,7 +133,7 @@ export function buildRepoPresetRules(engine, opts = {}) {
       priority: 10,
       match,
       action: {
-        reqHeaders: { set: { Authorization: '__REPO_ENGINE_INJECT__' }, remove: [] },
+        reqHeaders: { set: { Authorization: '__REPO_ENGINE_INJECT__' }, strip: [] },
       },
     };
   }

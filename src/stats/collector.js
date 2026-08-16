@@ -186,6 +186,13 @@ let lastFlushAt = Date.now();
 let flushing = false;
 
 /**
+ * D1 模式下写入失败的累计次数（用于观测 D1 绑定抖动频率）。
+ * 仅计数，不做任何 KV 降级（避免污染 KV）。
+ * @type {number}
+ */
+let d1FallbackCount = 0;
+
+/**
  * 创建空聚合桶。
  * @returns {Bucket} 新桶
  */
@@ -486,12 +493,24 @@ export async function flush(ctx, force = false) {
 
       try {
         if (driverName === 'd1') {
+          // 用户已明确选择 D1：写入失败【绝不】降级到 KV。
+          // 历史 bug：D1 瞬时不可用（冷启动 / env 绑定未注入 / ctx.env 透传缺失）
+          // 时会回落 KV，导致 KV 被 hourly 分段污染，且 D1 恢复后无法对账。
+          // 策略：先重试一次覆盖瞬时抖动；重试仍失败则丢弃本次聚合（最多落盘延迟
+          // 一个 flush 周期），保持存储单一来源，绝不污染 KV。
           const d1 = await import('./d1Driver.js');
-          const written = await d1.writeStats(ctx, records);
+          let written = await d1.writeStats(ctx, records);
           if (!written) {
-            // D1 不可用（例如跑在 EdgeOne 上）→ 自动降级到 KV
-            const kv = await import('./kvDriver.js');
-            await kv.writeStats(ctx, records);
+            // 第一次失败：重试一次（d1.writeStats 内部会重新探测 D1 绑定）
+            written = await d1.writeStats(ctx, records);
+          }
+          if (!written) {
+            d1FallbackCount++;
+            console.warn(
+              `[stats] D1 写入失败且重试后仍失败（存储= d1，未降级 KV）。` +
+                `将丢弃本次聚合，hosts=${records.length}，累计丢弃 ${d1FallbackCount} 次。`
+            );
+            // 视为已落盘，避免无限重试堆积内存
           }
         } else {
           const kv = await import('./kvDriver.js');
@@ -524,6 +543,42 @@ export function snapshotStats() {
   const hosts = [];
   for (const [host, b] of buckets) hosts.push(toRecord(host, b));
   return { pending: pendingCount, lastFlushAt, hosts };
+}
+
+/**
+ * 返回统计聚合器的健康/观测状态，供管理后台展示。
+ * 重点暴露 D1 模式下的写入失败计数（d1FallbackCount），让运维能在后台
+ * 直接看到 D1 绑定抖动频率，而不必翻运行日志。
+ *
+ * @param {import('../contracts.js').Ctx} [ctx] 请求上下文（用于探测 D1 绑定）
+ * @returns {Promise<{pending:number, lastFlushAt:number, hosts:Object[],
+ *   d1FallbackCount:number, driver:string, d1Available:boolean}>}
+ */
+export async function getStatsHealth(ctx) {
+  const hosts = [];
+  for (const [host, b] of buckets) hosts.push(toRecord(host, b));
+
+  let d1Available = false;
+  let driver = 'kv';
+  try {
+    const cfg = await getGlobal(ctx);
+    if (cfg && cfg.statsDriver) driver = cfg.statsDriver;
+    if (driver === 'd1') {
+      const d1 = await import('./d1Driver.js');
+      d1Available = typeof d1.isAvailable === 'function' ? d1.isAvailable(ctx) : false;
+    }
+  } catch {
+    /* 探测失败不影响返回其他字段 */
+  }
+
+  return {
+    pending: pendingCount,
+    lastFlushAt,
+    hosts,
+    d1FallbackCount,
+    driver,
+    d1Available,
+  };
 }
 
 /**

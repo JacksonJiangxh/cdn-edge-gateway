@@ -143,13 +143,12 @@ async function resolveDriver(ctx) {
   try {
     if (name === 'd1') {
       const mod = await import('./d1Driver.js');
-      // D1 不可用（如运行在 EdgeOne，该平台无 D1）时回落到 KV 驱动。
-      // KV 驱动采用「isolate 内存聚合 + 分片键落盘」，写入频次与请求量解耦，
-      // 因此在最终一致、无原子自增的 KV 上依然安全（分片键互不覆盖）。
-      if (typeof mod.isAvailable === 'function' && !mod.isAvailable(ctx)) {
-        const kv = await import('./kvDriver.js');
-        return { name: 'kv', mod: kv };
-      }
+      // D1 模式：彻底与 KV 解耦，【绝不】回落 KV。
+      // 历史逻辑会在 D1 瞬时不可用时回落 KV 查询，导致管理面偶尔读到 KV 中
+      // 历史残留的 hourly 脏分段（见 collector.js 写入路径误降级 bug）。
+      // 现在 D1 驱动各查询函数在 db 为 null 时已返回零值结构（不会抛错），
+      // 因此即使 D1 绑定缺失，也让查询继续走 D1 驱动——最多返回「无数据」，
+      // 而不会污染/误读 KV。保持存储单一来源。
       return { name: 'd1', mod };
     }
     // name === 'kv'：CF 与 EdgeOne 均为真实 KV，行为一致。
@@ -405,4 +404,4 @@ export async function clearStats(ctx, host) {
   }
 }
 
-export { record, flush, snapshotStats } from './collector.js';
+export { record, flush, snapshotStats, getStatsHealth } from './collector.js';

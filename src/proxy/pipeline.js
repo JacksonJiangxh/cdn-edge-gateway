@@ -25,7 +25,7 @@ import { buildCacheKey, shouldBypassCache } from './cachekey.js';
 import { buildOriginUrl, resolveHostHeader, mergeRewrite, mergeHeaderOps, mergeStageHeaderOps } from './rewrite.js';
 import { getPool, getGlobal, getGlobalRules } from '../config/store.js';
 import { renderDisguise } from './disguise.js';
-import { DEBUG_HEADER_NAMES, DEFAULT_FAILOVER, DEFAULT_GLOBAL_RULES, deepClone } from '../config/defaults.js';
+import { DEBUG_HEADER_NAMES, DEFAULT_GLOBAL_RULES, deepClone } from '../config/defaults.js';
 import { STAGE_ORDER } from '../config/stages.js';
 import { cacheMatch, cachePut, isCacheable } from '../platform/cache.js';
 import { checkSecurity } from '../security/guard.js';
@@ -162,7 +162,7 @@ async function runPipeline(ctx) {
   // 选出的对象写入 ctx.origin，作为后续规则引擎的「origin 维度」：
   //   ori1 AND 规则引擎 / ori2 AND 规则引擎 … 的分支即由此产生（一次请求只落在一个 origin 上）。
   // 规则引擎若想「按源站分流」可直接用 origin 条件匹配；
-  // 规则 action 仍可用 poolId/inlineOrigins 覆盖本次选中的源站（见 ④）。
+  // 规则 action 仍可用 poolId 引用源站实体覆盖本次选中的源站（见 ④）。
   const defaultPool = await buildSitePool(ctx, site);
   if (!defaultPool) {
     return errorResponse(500, 'Config Error', `Site "${site.host}" has no usable origin (poolId="${site.poolId || ''}")`, ctx);
@@ -206,11 +206,11 @@ async function runPipeline(ctx) {
         const siteStageObj = sr.action[k];
         if (!siteStageObj || typeof siteStageObj !== 'object') continue;
         if (stage === 'reqHeaders' || stage === 'respHeaders') {
-          // HeaderOps 段：整段并集（set 站点覆盖全站同名 key、全站其余保留；站点 remove 在合并期即从 set 剔除全站被点名 key）
+          // HeaderOps 段：整段并集（set 站点覆盖全站同名 key、全站其余保留；
+          // 站点 strip 中的 exact 项在合并期即从 set 剔除全站被点名 key）
           const merged = mergeStageHeaderOps(eff, siteStageObj);
           eff.set = merged.set;
-          eff.remove = merged.remove;
-          if (siteStageObj.strip !== undefined) eff.strip = siteStageObj.strip;
+          eff.strip = merged.strip;
           if (siteStageObj.forwardWhitelist !== undefined) eff.forwardWhitelist = siteStageObj.forwardWhitelist;
         } else {
           // 标量段（rewrite/redirect/terminate/origin/cache 等）：整段逐字段覆盖（含子对象整段覆盖），
@@ -230,7 +230,7 @@ async function runPipeline(ctx) {
     // 这样下游（buildClientHeaders 读 effAction.cache、mergeRewrite 读 effAction.rewrite、
     // applyTerminalActions 读 effAction.terminate / effAction.redirect 等）按统一「阶段名 → 整段」路径取值，
     // 不会出现「标量段被展开到 effAction 顶层、而消费代码又整段读取」的错位。
-    // 注：HeaderOps 段（reqHeaders/respHeaders）同样是整段 {set, remove} 存放，与此一致。
+    // 注：HeaderOps 段（reqHeaders/respHeaders）同样是整段 {set, strip} 存放，与此一致。
     effAction[stage] = eff;
   }
   const rule = { action: effAction, _source: ctx.debug.ruleId ? 'site' : 'global' };
@@ -258,26 +258,16 @@ async function runPipeline(ctx) {
   let pool = defaultPool;
   let poolSource = 'site-default';
 
-  if (Array.isArray(ra.inlineOrigins) && ra.inlineOrigins.length > 0) {
-    // 规则级内联源站（规则里直接填写回源域名，写到 action.inlineOrigins）
-    pool = {
-      id: `__rule_inline_${site.host}`,
-      strategy: 'chain',
-      origins: ra.inlineOrigins,
-      failover: defaultPool.failover || DEFAULT_FAILOVER,
-    };
-    poolSource = 'rule-inline';
-  } else {
-    const poolId = ra.poolId;
-    if (poolId) {
-      pool = await getPool(ctx, poolId);
-      poolSource = `pool:${poolId}`;
-      if (!pool || !Array.isArray(pool.origins) || pool.origins.length === 0) {
-        return errorResponse(502, 'Config Error', `Origin "${poolId}" is empty or missing`, ctx);
-      }
+  // 规则只能引用已存在的源站实体（poolId：single 或 pool 均可），不支持规则内联多源站。
+  const poolId = ra.poolId;
+  if (poolId) {
+    pool = await getPool(ctx, poolId);
+    poolSource = `pool:${poolId}`;
+    if (!pool || !Array.isArray(pool.origins) || pool.origins.length === 0) {
+      return errorResponse(502, 'Config Error', `Origin "${poolId}" is empty or missing`, ctx);
     }
-    // 规则未指定 poolId/inlineOrigins → 沿用③的 defaultPool + primaryOrigin
   }
+  // 规则未指定 poolId → 沿用③的 defaultPool + primaryOrigin
 
   // 若规则重新指定了源站池，需要再选一次（此时 ctx.origin 同步更新，
   // 供后续回源/缓存按「实际选中的源站」生效）
@@ -446,7 +436,7 @@ function applyTerminalActions(ctx, rule) {
   const a = rule?.action;
   if (!a) return null;
 
-  // 品牌响应头：统一从全站规则 stages.respHeaders.set 取得（支持站点规则 remove 覆盖）。
+  // 品牌响应头：统一从全站规则 stages.respHeaders.set 取得（支持站点规则 strip 覆盖）。
   const brand = getBrandHeaders(ctx, rule);
 
   // 终止型动作按阶段整段取值（单轨化后 effAction 以 stage 为键整段存放）。

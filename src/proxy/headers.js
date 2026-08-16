@@ -51,12 +51,12 @@ async function getGlobalStage(ctx, stage) {
  *   1. 客户端请求头中命中白名单的部分
  *   2. DEFAULT_UA_HEADERS 伪装头
  *   3. origin.extraHeaders（支持 "@secret:NAME" 从 env 取值）
- *   4. rule.reqHeaders.set / remove
+ *   4. rule.reqHeaders.set / strip
  *   5. 强制剥离敏感头（兜底）
  *
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
  * @param {Object} origin 选中的源站
- * @param {Object} [ops] 规则中的 reqHeaders，形如 { set:{}, remove:[] }
+ * @param {Object} [ops] 规则中的 reqHeaders，形如 { set:{}, strip:[] }
  * @param {Object} [env] 环境变量，用于解析 "@secret:NAME"
  * @param {Object} [clientIpHeader] 客户端 IP 回源头配置 { enabled, name }
  * @returns {Headers} 回源请求头
@@ -68,9 +68,7 @@ export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) 
   // 因此这里以 ops 为准：站点未设则回落全站 getGlobalStage 的值，站点设了则与全站合并/覆盖。
   const gRh = await getGlobalStage(ctx, 'reqHeaders');
   const opsForward = ops && Array.isArray(ops.forwardWhitelist) ? ops.forwardWhitelist : gRh.forwardWhitelist;
-  const opsStrip = ops && Array.isArray(ops.strip) ? ops.strip : gRh.strip;
   const forwardWhitelist = new Set((opsForward || []).map((h) => String(h).toLowerCase()));
-  const stripRules = normalizeStripRules(opsStrip);
   const out = new Headers();
 
   // ---- 1. 白名单透传 ----
@@ -104,15 +102,12 @@ export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) 
   }
 
   // ---- 4. 规则级 reqHeaders ----
+  // 含 set 注入 + strip（精确/前缀/正则）删除，统一由 applyHeaderOps 处理。
   applyHeaderOps(out, ops, ctx, env);
 
-  // ---- 5. 兜底剥离敏感头 ----
-  stripForbidden(out, stripRules);
-
-  // ---- 6. 客户端 IP 回源头 ----
-  // 必须放在 stripForbidden 之后：默认头名 X-Forwarded-For 命中禁用前缀，
-  // 若放在之前会被无条件剥离。此处是「用户显式开启」的合法透出，
-  // 语义上优先于兜底策略。
+  // ---- 5. 客户端 IP 回源头 ----
+  // 必须放在 strip 之后：默认头名 X-Forwarded-For 若命中用户 strip 前缀，
+  // 会被 applyHeaderOps 剥离；此处是「用户显式开启」的合法透出，语义上优先于剥离策略。
   if (clientIpHeader?.enabled) {
     // 复用 pickClientIp 统一提取（含 forwarded / cloudfront-viewer-address 解析），
     // 避免把 forwarded 整串原样透出。
@@ -140,7 +135,7 @@ export async function buildOriginHeaders(ctx, origin, ops, env, clientIpHeader) 
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
  * @param {Response} originResp 源站响应（或缓存命中的响应）
  * @param {Object} [policy] 缓存策略 CachePolicy
- * @param {Object} [ops] 规则中的 respHeaders，形如 { set:{}, remove:[] }
+ * @param {Object} [ops] 规则中的 respHeaders，形如 { set:{}, strip:[] }
  * @returns {Headers} 返回给客户端的响应头
  */
 export async function buildClientHeaders(ctx, originResp, policy, ops) {
@@ -153,9 +148,8 @@ export async function buildClientHeaders(ctx, originResp, policy, ops) {
 
   // ---- 1. 删除源站的安全策略类响应头 ----
   // 这些头会阻止图片/字体被第三方页面引用，作为 CDN 必须清理。
-  // 剥离列表（含 CSP/X-Frame-Options/Set-Cookie 等）统一来自全站规则 stages.respHeaders.remove，
-  // 由下方步骤 3 的 applyHeaderOps(ops) 统一执行（站点规则 remove 可在此追加/覆盖），
-  // 不再由 settings.respHeaders.stripDefaults 在引擎外二次剥离，避免两处处理同字段。
+  // 剥离列表（含 CSP/X-Frame-Options/Set-Cookie 等）统一来自全站规则 stages.respHeaders.strip，
+  // 由下方步骤 3 的 applyHeaderOps(ops) 统一执行（站点规则 strip 可在此追加/覆盖）。
 
   // ---- 2. Cache-Control / CDN-Cache-Control（分层缓存铁律）----
   // 路径：浏览器 → 最前端 CDN(CF/EO) → 本项目(Worker/Makers) → 源站。
@@ -243,8 +237,8 @@ export async function buildClientHeaders(ctx, originResp, policy, ops) {
   // ---- 4. 调试头 ----
   // 调试头已下沉为「全站规则 + 引擎常量」，不再作为可配 settings：
   //   - 头名统一取自 DEBUG_HEADER_NAMES（默认值见下方常量，与旧 settings.debug 行为一致）；
-  //   - 默认始终开启；若想关闭，在站点规则 stages.respHeaders.remove 中移除对应头即可
-  //     （如 remove:['x-cache','x-rule-id','x-origin-id','x-retry-count','x-edge-time']）。
+  //   - 默认始终开启；若想关闭，在站点规则 stages.respHeaders.strip 中加入对应头（type:'exact'）即可
+  //     （如 strip:[{type:'exact',value:'x-cache'},{type:'exact',value:'x-rule-id'},...]）。
   // 调试字段的「值」仍来自 ctx.debug（运行时注入的 ruleId/cache/originId/retries）。
   {
     const d = ctx.debug || {};
@@ -289,31 +283,25 @@ export async function buildClientHeaders(ctx, originResp, policy, ops) {
   // ---- 5. 品牌响应头（Server/Via）----
   // 不再于引擎外从 settings 写死注入。品牌头已作为全站规则 stages.respHeaders.set 的
   // server/via 项，由上方步骤 3 的 applyHeaderOps(ops) 统一经 ${product_name} 展开注入，
-  // 站点规则 respHeaders.remove:['server','via'] 也能在此真正生效（单一真相源）。
+  // 站点规则 respHeaders.strip:[{type:'exact',value:'server'},{type:'exact',value:'via'}] 也能在此真正生效（单一真相源）。
 
   return out;
 }
 
 /**
- * 应用 HeaderOps（set / remove）。
+ * 应用 HeaderOps（set / strip）。
  *
- * remove 先于 set 执行，这样「先删后加」的配置语义更符合直觉。
+ * strip 先于 set 执行，这样「先删后加」的配置语义更符合直觉。
  * set 的值同样支持 "@secret:NAME" 引用（仅在提供 env 时生效）。
  *
  * @param {Headers} headers 待修改的头集合
- * @param {Object} [ops] { set:{}, remove:[] }
+ * @param {Object} [ops] { set:{}, strip:[] }
  * @param {import('../contracts.js').Ctx} [ctx] 上下文，用于记录 debug
  * @param {Object} [env] 环境变量
  * @returns {void}
  */
 function applyHeaderOps(headers, ops, ctx, env) {
   if (!ops) return;
-
-  if (Array.isArray(ops.remove)) {
-    for (const name of ops.remove) {
-      if (name) headers.delete(String(name));
-    }
-  }
 
   if (ops.set && typeof ops.set === 'object') {
     for (const [key, rawValue] of Object.entries(ops.set)) {
@@ -329,6 +317,12 @@ function applyHeaderOps(headers, ops, ctx, env) {
       headers.set(key, finalValue);
     }
   }
+
+  // 删除统一走 strip（{type,value} 语法：exact / prefix / regex）。
+  // 不再有 remove 字段：精确删除即 type:'exact'，与「额外剥离」完全等价，合并为单一入口。
+  if (Array.isArray(ops.strip) && ops.strip.length) {
+    stripForbidden(headers, normalizeStripRules(ops.strip));
+  }
 }
 
 /**
@@ -336,8 +330,8 @@ function applyHeaderOps(headers, ops, ctx, env) {
  *
  * 品牌头已作为「流量序列默认操作」的一部分收纳进全站规则 stages.respHeaders.set，
  * 此处统一从此处取得，避免引擎外另写死一份造成两处处理同字段的错乱。
- * 尊重站点规则 remove：若合并后的规则动作 respHeaders.set 中已无 server/via
- * （被站点 remove 删除），则返回的对象不含该键，调用方据此不注入。
+ * 尊重站点规则 strip：若合并后的规则动作 respHeaders.set 中已无 server/via
+ * （被站点 strip 删除），则返回的对象不含该键，调用方据此不注入。
  *
  * 取值优先级：
  *   1. 合并后的规则动作 rule.action.respHeaders.set.server|via（支持 ${product_name} 展开）

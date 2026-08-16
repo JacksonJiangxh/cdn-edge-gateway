@@ -207,8 +207,6 @@
  *
  * @typedef {Object} RuleAction
  * @property {string}   [poolId]          覆盖站点默认上游，引用 OriginPool.id（single 或 pool 均可）。空=沿用站点默认
- * @property {Origin[]} [inlineOrigins]   规则级内联源站（规则命中时直接回源，优先级高于 poolId）。
- *                                        仅规则级保留内联；站点级内联已废弃
  * @property {Rewrite}  rewrite           回源 URL 重写
  * @property {CachePolicy} cache          缓存配置
  * @property {HeaderOps} reqHeaders       回源请求头修改
@@ -298,7 +296,7 @@
 /**
  * @typedef {Object} HeaderOps
  * @property {Record<string,string>} set  设置/覆盖
- * @property {string[]}              remove 删除（小写名）
+ * @property {Array<{type:'prefix'|'exact'|'regex', value:string}>} strip 删除（前缀/精确/正则）
  */
 
 /**
@@ -490,8 +488,20 @@ export const ERROR_CODES = Object.freeze({
   STORAGE_UNAVAILABLE: 'STORAGE_UNAVAILABLE',
 });
 
-/** 默认触发换源的状态码 */
-export const DEFAULT_RETRY_ON = Object.freeze([500, 502, 503, 504, 522, 524]);
+/**
+ * 源站池「换源错误码范围」特标：表示所有错误响应都换源（status>=400 即 4xx/5xx，
+ * 含 522/524 等源站/网关类错误）。200/3xx 正常响应（成功或重定向跟随）不算失败、不换源。
+ *
+ * 这是全站默认、单源站兜底、源站池缺省三处统一引用的唯一常量，避免散写字面量造成不一致。
+ * 运行时（balancer/failover.js）识别该特标后按 isErrorStatus(code) 判定。
+ */
+export const ERROR_STATUS_RANGE = '4xx5xx';
+
+/** 判定某 HTTP 状态码是否为「错误响应」（应参与换源 / 不应缓存等错误码语义）。4xx/5xx 为错误，2xx/3xx 为正常。 */
+export function isErrorStatus(code) {
+  const n = Number(code);
+  return Number.isFinite(n) && n >= 400 && n < 600;
+}
 
 /** 不应缓存的状态码 */
 export const NO_CACHE_STATUS = Object.freeze(new Set([
@@ -592,40 +602,6 @@ export const DEFAULT_UA_HEADERS = Object.freeze({
     'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
   'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
 });
-
-/** 默认删除的响应头 */
-export const DEFAULT_STRIP_RESP_HEADERS = Object.freeze([
-  'cross-origin-resource-policy',
-  'cross-origin-embedder-policy',
-  'content-security-policy',
-  'content-security-policy-report-only',
-  'x-frame-options',
-  'set-cookie',
-  // 上游常回 X-Content-Type-Options: nosniff（如 CNB raw）。作为 CDN/网关，下发的
-  // Content-Type 由本项目 fixContentType 控制并信任，无需上游 nosniff 约束；部分严格内核
-  // 浏览器（如 360）在 nosniff 下会因任何 MIME 边角问题拒绝渲染图片（Chrome/Edge 有嗅探兜底）。
-  'x-content-type-options',
-  // 上游源站专有 / 内部实现头：对客户浏览器无意义，且泄露上游拓扑，默认剥离。
-  'access-control-allow-credentials',
-  'access-control-expose-headers',
-  'x-ratelimit-limit',
-  'x-ratelimit-remaining',
-  'x-ratelimit-reset',
-  'x-repo-commit',
-  'traceparent',
-  'x-trace-id',
-  'x-github-request-id',
-  'x-github-edge-region',
-  'x-fastly-request-id',
-  'x-served-by',
-  'x-timer',
-  'x-cache-hits',
-  'source-age',
-  'via',
-  'x-xss-protection',
-  'strict-transport-security',
-  'referrer-policy',
-]);
 
 /** 静态资源扩展名 */
 export const STATIC_EXTS = Object.freeze(new Set([

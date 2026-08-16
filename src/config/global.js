@@ -26,7 +26,7 @@ export const PRODUCT_NAME = 'EdgeGateway';
 
 /**
  * 调试响应头默认头名（引擎常量，下沉自旧 settings.debug.headers）。
- * 默认始终下发；如需关闭，在站点规则 stages.respHeaders.remove 中移除对应头名即可。
+ * 默认始终下发；如需关闭，在站点规则 stages.respHeaders.strip 中加入对应头（type:'exact'）即可。
  */
 export const DEBUG_HEADER_NAMES = Object.freeze({
   originId: 'X-Origin-Id',

@@ -1134,22 +1134,10 @@ function foldLegacySettingsIntoStages(stages, legacySettings) {
     }
   };
 
-  // settings.respHeaders.stripDefaults → stages.respHeaders.remove（去重合并）
-  if (s.respHeaders && typeof s.respHeaders === 'object') {
-    mergeHeaderList(stage('respHeaders'), 'remove', s.respHeaders.stripDefaults);
-  }
-
-  // settings.reqHeaders.{forwardWhitelist,stripPrefixes,stripExact} → stages.reqHeaders
+  // settings.reqHeaders.forwardWhitelist → stages.reqHeaders
   if (s.reqHeaders && typeof s.reqHeaders === 'object') {
     const rh = stage('reqHeaders');
     fill(rh, 'forwardWhitelist', s.reqHeaders.forwardWhitelist);
-    // 旧的 stripPrefixes / stripExact 两个列表合并成统一 {type,value} 语法
-    if (rh.strip === undefined) {
-      const strip = [];
-      for (const p of s.reqHeaders.stripPrefixes || []) strip.push({ type: 'prefix', value: String(p) });
-      for (const e of s.reqHeaders.stripExact || []) strip.push({ type: 'exact', value: String(e) });
-      if (strip.length) rh.strip = strip;
-    }
     // proxyUserAgent 已删除：反代统一复用 stages.reqHeaders.set['User-Agent']，不再单独配置。
   }
 
@@ -1176,14 +1164,8 @@ function foldLegacySettingsIntoStages(stages, legacySettings) {
     }
   }
 
-  // settings.origin.* → stages.origin.failover（消除与池级 failover 的双份真相源）
-  if (s.origin && typeof s.origin === 'object') {
-    const o = stage('origin');
-    const fo = (o.failover && typeof o.failover === 'object') ? o.failover : (o.failover = {});
-    for (const k of ['retryOn', 'maxRetries', 'timeoutMs', 'maxRetryBodyBytes', 'penaltySeconds', 'totalTimeoutMs', 'speculativeMs']) {
-      fill(fo, k, s.origin[k]);
-    }
-  }
+  // 全站层不承载 failover（回退重试仅源站池所有，见 contracts Failover）。
+  // settings.origin.* 旧字段不再迁移进 stages，避免制造第二份真相源。
 
   // settings.security.* → stages.security（signedUrlParam / signedUrlTtl 已废弃，不迁移）
   if (s.security && typeof s.security === 'object') {

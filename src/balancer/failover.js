@@ -13,11 +13,23 @@
  *   6. 冷却软恢复：冷却到期低权重试水，连续成功恢复满权重（见 circuit.js）
  *
  * 换源触发条件（两类）：
- *   1. 响应状态码命中 failover.retryOn（默认 5xx / 522 / 524）
+ *   1. 响应状态码命中 failover.retryOn：
+ *      · 普通数字数组 → 仅这些码换源；
+ *      · ['4xx5xx'] / ['*'] / ['all']（池级缺省）→ 所有错误码（status>=400，含 4xx/5xx 及 522/524 等）换源；
+ *        注意 200/3xx 为正常响应（成功或重定向跟随），【绝不】算失败，不触发换源；
+ *      · 池级为空 → 回落全站默认（4xx/5xx 错误码）。
  *   2. fetch 抛异常（DNS 失败、连接被拒、TLS 错误、超时）
  *      —— 这一类【无论 retryOn 如何配置都必须换源】
+ *
+ * 池级「自成体系」：源站池 failover 缺省为 retryOn=['4xx5xx'] + maxRetries=源站数-1，
+ * 即任何错误响应都换源、且试遍所有 enabled 源站，不被全站默认截断。
+ *
+ * 单一源站（enabled 源站数 ≤ 1）：无可回退地址，failover 强制关闭（只回源一次）。
+ * 配置层 normFailover 对单源站直接返回 null，运行时亦对单源站强制 enabled=false，
+ * 避免 fail-open 把同一个挂掉的源站连打多遍、徒增延迟。
  */
 
+import { ERROR_STATUS_RANGE, isErrorStatus } from '../contracts.js';
 import { selectOrigin, primeChainWeights } from './strategy.js';
 import { isTripped, recordFailure, recordSuccess, penalize, isPenalized } from './circuit.js';
 import { buildOriginUrl, resolveHostHeader, mergeRewrite, mergeHeaderOps } from '../proxy/rewrite.js';
@@ -25,10 +37,20 @@ import { buildOriginHeaders } from '../proxy/headers.js';
 import { fetchOrigin } from '../proxy/engines/fetchEngine.js';
 import { fetchOrigin as r2FetchOrigin } from '../proxy/engines/r2Engine.js';
 import { fetchRepoOrigin } from '../proxy/repoEngine.js';
-import { DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
 
 // 重试时为了避免把整请求体物化进内存，超过该上限的 body 直接关闭重试（流式透传）。
 const FALLBACK_MAX_RETRY_BODY = 5 * 1024 * 1024;
+
+// 池级 failover 是唯一换源真相源（全站/站点不承载 failover）。
+// 本局部兜底仅用于「历史存量池缺字段」的容错，不作业务默认。
+const LOCAL_FALLBACK = Object.freeze({
+  maxRetries: 2,
+  timeoutMs: 10000,
+  penaltySeconds: 15,
+  totalTimeoutMs: 0,
+  speculativeMs: 500,
+  maxRetryBodyBytes: FALLBACK_MAX_RETRY_BODY,
+});
 
 /** 平台安全余量（毫秒）：留出响应序列化 / 缓存写入的空间，避免撞平台执行上限 */
 const SAFETY_RESERVE = Object.freeze({
@@ -83,23 +105,31 @@ function isSpeculable(ctx, bodyBuf) {
  * @returns {Promise<Response>} 源站响应；全部失败时返回 502（或触发 serve-stale 兜底）
  */
 export async function requestWithFailover(ctx, pool, rule, hostHeader) {
-  const gOrigin = (ctx.__globalStages && ctx.__globalStages.origin) || DEFAULT_GLOBAL_RULES.origin;
-  const fb = (gOrigin && gOrigin.failover) || DEFAULT_GLOBAL_RULES.origin.failover;
   const failover = pool?.failover || {};
-  const enabled = failover.enabled !== false;
-  const retryOn = new Set(
-    Array.isArray(failover.retryOn) && failover.retryOn.length > 0
-      ? failover.retryOn
-      : (fb.retryOn || [])
-  );
-  const maxRetries = enabled ? (Number.isFinite(failover.maxRetries) ? failover.maxRetries : (fb.maxRetries ?? 2)) : 0;
-  const poolTimeout = Number(failover.timeoutMs) > 0 ? Number(failover.timeoutMs) : (fb.timeoutMs || 10000);
-  const penaltySeconds = Number(failover.penaltySeconds) > 0 ? Number(failover.penaltySeconds) : (fb.penaltySeconds ?? 15);
-  const totalTimeoutMs = Number(failover.totalTimeoutMs) > 0 ? Number(failover.totalTimeoutMs) : (fb.totalTimeoutMs ?? 0);
-  const speculativeMs = Number(failover.speculativeMs) > 0 ? Number(failover.speculativeMs) : (fb.speculativeMs ?? 500);
+  // 单一源站（无第二个地址可回退）：重试 / 换源无意义，强制关闭 failover，只打一次。
+  // 否则 fail-open 会把同一个挂掉的源站连打 maxRetries 遍，只有害处没有收益。
+  const enabledOrigins = (pool?.origins || []).filter((o) => o && o.enabled !== false);
+  const singleOrigin = enabledOrigins.length <= 1;
+  const enabled = !singleOrigin && failover.enabled !== false;
+  // 池级 failover 是唯一换源真相源（全站/站点不承载 failover）。
+  // 运行时硬兜底 LOCAL_FALLBACK 仅用于「历史存量池缺字段」的容错，不作业务默认。
+  const rawRetryOn = Array.isArray(failover.retryOn) && failover.retryOn.length > 0
+    ? failover.retryOn
+    : [ERROR_STATUS_RANGE];
+  // 错误码范围特标（ERROR_STATUS_RANGE='4xx5xx'）或旧别名 '*'/'all' → 所有错误响应换源（status>=400，即 4xx/5xx，含 522/524 等）；
+  // 注意 200/3xx 正常响应（成功或重定向跟随）绝不算失败，不触发换源。
+  // 显式数字数组 → 仅这些码换源。
+  const retryOnErrorRange =
+    rawRetryOn.includes(ERROR_STATUS_RANGE) || rawRetryOn.includes('*') || rawRetryOn.includes('all');
+  const retryOn = retryOnErrorRange ? null : new Set(rawRetryOn);
+  const maxRetries = enabled ? (Number.isFinite(failover.maxRetries) ? failover.maxRetries : LOCAL_FALLBACK.maxRetries) : 0;
+  const poolTimeout = Number(failover.timeoutMs) > 0 ? Number(failover.timeoutMs) : LOCAL_FALLBACK.timeoutMs;
+  const penaltySeconds = Number(failover.penaltySeconds) > 0 ? Number(failover.penaltySeconds) : LOCAL_FALLBACK.penaltySeconds;
+  const totalTimeoutMs = Number(failover.totalTimeoutMs) > 0 ? Number(failover.totalTimeoutMs) : LOCAL_FALLBACK.totalTimeoutMs;
+  const speculativeMs = Number(failover.speculativeMs) > 0 ? Number(failover.speculativeMs) : LOCAL_FALLBACK.speculativeMs;
   const MAX_RETRY_BODY = Number(failover.maxRetryBodyBytes) > 0
     ? Number(failover.maxRetryBodyBytes)
-    : (fb.maxRetryBodyBytes || FALLBACK_MAX_RETRY_BODY);
+    : LOCAL_FALLBACK.maxRetryBodyBytes;
 
   // 预先把「已熔断」的源站并入排除列表（异步 KV，selectOrigin 同步依赖）。
   const excludeIds = await collectUnavailableIds(ctx, pool, penaltySeconds);
@@ -214,7 +244,8 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
         hostHeader: originHostHeader,
       });
 
-      if (enabled && retryOn.has(resp.status)) {
+      // 换源判据：启用 且 (指定全错误码范围且为错误响应，或命中显式码清单)
+      if (enabled && ((retryOnErrorRange && isErrorStatus(resp.status)) || retryOn.has(resp.status))) {
         noteOriginFailure(ctx, pool, origin, penaltySeconds, resp);
         await resp.body?.cancel().catch(() => {});
         lastResponse = {

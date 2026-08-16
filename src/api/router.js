@@ -91,6 +91,7 @@ const ROUTES = Object.freeze([
   // ---------- stats ----------
   { method: 'GET', path: '/stats/overview', handler: (ctx) => statsH.overview(ctx) },
   { method: 'GET', path: /^\/stats\/host\/(.+)$/, paramName: 'host', handler: (ctx, g, host) => statsH.byHost(ctx, host) },
+  { method: 'GET', path: '/stats/status', handler: (ctx) => statsH.status(ctx) },
 
   // ---------- system ----------
   { method: 'GET', path: '/system/info', handler: (ctx, g) => systemH.info(ctx, g) },

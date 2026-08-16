@@ -637,19 +637,20 @@ export async function runFrontendDomTest() {
     const T = window.__TEST__;
     assert(!!T, '测试钩子 window.__TEST__ 已挂载（__ENABLE_TEST_HOOK__=true）', 'app.js 未导出 __TEST__');
     if (T) {
-      // respHeaders：用户真实场景——只填删除项，不填修改项（你遇到的 bug）
-      const resp = T.getOp('respHeaders')({ respHeaders: { set: {}, remove: ['cache-control'] } }).read();
+      // respHeaders：用户真实场景——只填删除项（精确），不填修改项。
+      // 删除统一走 strip 语法（{type,value}），不再有 remove 字段；精确删除即 type:'exact'。
+      const resp = T.getOp('respHeaders')({ respHeaders: { set: {}, strip: [{ type: 'exact', value: 'cache-control' }] } }).read();
       assert(
-        'respHeaders' in resp && Array.isArray(resp.respHeaders.remove) && resp.respHeaders.remove[0] === 'cache-control' && !('remove' in resp),
-        'respHeaders.read() 返回 {respHeaders:{remove:["cache-control"]}}（删除项不丢，不再扁平挂顶层）',
+        'respHeaders' in resp && Array.isArray(resp.respHeaders.strip) && resp.respHeaders.strip[0].type === 'exact' && resp.respHeaders.strip[0].value === 'cache-control' && !('remove' in resp),
+        'respHeaders.read() 返回 {respHeaders:{strip:[{type:"exact",value:"cache-control"}]}}（删除项不丢，不再扁平挂顶层）',
         JSON.stringify(resp)
       );
 
-      // reqHeaders：修改 + 删除并存
-      const req = T.getOp('reqHeaders')({ reqHeaders: { set: { 'X-A': '1' }, remove: ['X-B'] } }).read();
+      // reqHeaders：修改 + 删除（前缀）并存
+      const req = T.getOp('reqHeaders')({ reqHeaders: { set: { 'X-A': '1' }, strip: [{ type: 'prefix', value: 'x-b' }] } }).read();
       assert(
-        'reqHeaders' in req && req.reqHeaders.set['X-A'] === '1' && req.reqHeaders.remove[0] === 'X-B',
-        'reqHeaders.read() 返回 {reqHeaders:{set,remove}}（增+删都不丢）',
+        'reqHeaders' in req && req.reqHeaders.set['X-A'] === '1' && req.reqHeaders.strip[0].type === 'prefix' && req.reqHeaders.strip[0].value === 'x-b',
+        'reqHeaders.read() 返回 {reqHeaders:{set,strip}}（增+删都不丢）',
         JSON.stringify(req)
       );
 
@@ -670,11 +671,11 @@ export async function runFrontendDomTest() {
       );
 
       // 回归对照：确认嵌套字段确实在 action.<op> 下，而非被挂到 action 顶层
-      // （此处断言 resp 顶层绝不出现扁平 set/remove，否则 Object.assign 会丢字段）
-      const flatCheck = T.getOp('respHeaders')({ respHeaders: { set: { a: '1' }, remove: ['b'] } }).read();
+      // （此处断言 resp 顶层绝不出现扁平 set/strip，否则 Object.assign 会丢字段）
+      const flatCheck = T.getOp('respHeaders')({ respHeaders: { set: { a: '1' }, strip: [{ type: 'exact', value: 'b' }] } }).read();
       assert(
-        !('set' in flatCheck) && !('remove' in flatCheck),
-        'respHeaders.read() 不再返回扁平 {set,remove}（扁平会被后端 normRule 丢弃）',
+        !('set' in flatCheck) && !('remove' in flatCheck) && !('strip' in flatCheck),
+        'respHeaders.read() 不再返回扁平 {set,strip}（扁平会被后端 normRule 丢弃）',
         JSON.stringify(flatCheck)
       );
     }

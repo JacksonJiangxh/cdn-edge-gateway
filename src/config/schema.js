@@ -22,7 +22,6 @@ import {
   DEFAULT_REWRITE,
   DEFAULT_HEADER_OPS,
   DEFAULT_ORIGIN,
-  DEFAULT_FAILOVER,
   DEFAULT_HOST_HEADER,
   DEFAULT_SITE_HOST_HEADER,
   DEFAULT_RATE_LIMIT,
@@ -64,7 +63,7 @@ export const STAGE_OP_FIELDS = {
   cache: 'cache',
   hostHeader: 'hostHeader',
   originConn: ['engine', 'scheme', 'port'],
-  targetPool: ['poolId', 'inlineOrigins'],
+  targetPool: ['poolId'],
   // 回源级配置：同属 Origin 阶段（与 hostHeader/originConn/targetPool 一样由 allowedOps 约束），
   // 不是「全局字段」——它们只在回源阶段（构造回源请求头 / 回源跟随重定向 / 回源超时）消费。
   clientIp: 'clientIpHeader',
@@ -118,7 +117,7 @@ function buildActionByStage(a, normed, stage) {
   }
   return out;
 }
-import { DEFAULT_RETRY_ON, CONFIG_VERSION, STATUS_PATTERN_RE } from '../contracts.js';
+import { CONFIG_VERSION, STATUS_PATTERN_RE, ERROR_STATUS_RANGE } from '../contracts.js';
 // node:crypto 在 build.mjs 的 EXTERNAL_MODULES 中（CF/EO nodejs_compat 与 Node 均提供），
 // 用于 webcrypto.getRandomValues 兜底；edge worker 中优先用 globalThis.crypto（WebCrypto）。
 import { webcrypto as nodeWebcrypto } from 'node:crypto';
@@ -405,22 +404,50 @@ function normHeaderMap(input, label) {
   return { value: out, errors };
 }
 
-/** 规范化 HeaderOps */
+/** 规范化 HeaderOps —— 删除统一走 strip({type,value}) 语法，不再有 remove 字段 */
 function normHeaderOps(input, label) {
   const errors = [];
   if (!isObj(input)) return { value: deepClone(DEFAULT_HEADER_OPS), errors };
   const setRes = normHeaderMap(input.set, `${label}.set`);
   errors.push(...setRes.errors);
-  const remove = strArr(input.remove, LIMITS.HEADERS_MAX, 128)
-    .map((s) => s.toLowerCase())
-    .filter((s) => {
-      if (!isValidHeaderName(s)) {
-        errors.push(`${label}.remove 中存在非法头名: ${s}`);
-        return false;
+  const strip = normStripList(input.strip, `${label}.strip`, errors);
+  return { value: { set: setRes.value, strip }, errors };
+}
+
+/**
+ * 规范化「删除请求头 / 响应头」规则列表为统一的 {type, value} 语法。
+ * type ∈ prefix | exact | regex；纯字符串写法视为 exact。
+ * 与全站规则 stages 的 strip 共用同一套语法与校验口径。
+ * @param {any} input
+ * @param {string} label
+ * @param {string[]} errors
+ * @returns {Array<{type:string,value:string}>}
+ */
+function normStripList(input, label, errors, fallbackDef) {
+  const def = Array.isArray(fallbackDef) ? fallbackDef : (DEFAULT_HEADER_OPS.strip || []);
+  const src = Array.isArray(input) ? input : (input === undefined ? def : []);
+  const out = [];
+  for (const item of src) {
+    if (out.length >= LIMITS.HEADERS_MAX) break;
+    // 兼容纯字符串写法：视为 exact
+    const obj = isObj(item) ? item : { type: 'exact', value: item };
+    const type = enumOf(obj.type, ['prefix', 'exact', 'regex'], 'exact');
+    let value = str(obj.value, '', 256).toLowerCase();
+    if (!value) continue;
+    if (type === 'regex') {
+      const r = validateRegex(value, 'header');
+      if (!r.ok) {
+        errors.push(`${label} 中存在非法正则: ${value}`);
+        continue;
       }
-      return true;
-    });
-  return { value: { set: setRes.value, remove }, errors };
+      value = r.value;
+    } else if (type === 'exact' && !isValidHeaderName(value)) {
+      errors.push(`${label}(exact) 中存在非法头名: ${value}`);
+      continue;
+    }
+    out.push({ type, value });
+  }
+  return out;
 }
 
 // ----------------------------------------------------------------------------
@@ -804,7 +831,7 @@ export function normRule(input, idx) {
         followRedirect: bool(a.followRedirect, false),
         originTimeoutMs: int(a.originTimeoutMs, 0, 0, 120000),
         engine: aEngine, scheme: aScheme, port: aPort,
-        poolId: str(a.poolId, '', 64), inlineOrigins: normRuleInlineOrigins(a.inlineOrigins, label),
+        poolId: str(a.poolId, '', 64),
       }, input.stage),
     },
     errors,
@@ -863,34 +890,9 @@ function normGlobalOnlySubFields(stage, raw, base) {
       : deepClone(def.forwardWhitelist || []);
 
     // 额外剥离规则：统一 {type,value} 语法，type ∈ prefix|exact|regex。
-    if (Array.isArray(src.strip)) {
-      const strip = [];
-      for (const item of src.strip) {
-        if (strip.length >= LIMITS.HEADERS_MAX) break;
-        // 兼容纯字符串写法：视为 exact
-        const obj = isObj(item) ? item : { type: 'exact', value: item };
-        const type = enumOf(obj.type, ['prefix', 'exact', 'regex'], 'exact');
-        let value = str(obj.value, '', 256).toLowerCase();
-        if (!value) continue;
-        // regex 必须可编译，否则回源时会静默不剥离，属于「配置看着生效实则没生效」的坑
-        // 复用 validateRegex 并传 header kind，使其支持通配符（cf-x-* 等）写法
-        if (type === 'regex') {
-          const r = validateRegex(value, 'header');
-          if (!r.ok) {
-            errors.push(`strip 中存在非法正则: ${value}`);
-            continue;
-          }
-          value = r.value;
-        } else if (type === 'exact' && !isValidHeaderName(value)) {
-          errors.push(`strip(exact) 中存在非法头名: ${value}`);
-          continue;
-        }
-        strip.push({ type, value });
-      }
-      out.strip = strip;
-    } else {
-      out.strip = deepClone(def.strip || []);
-    }
+    // 复用 normStripList（与规则级 reqHeaders/respHeaders 同一套校验与回落口径），
+    // src.strip 未提供时回落到全站默认值 def.strip。
+    out.strip = normStripList(src.strip, 'strip', errors, def.strip);
     return { value: out, errors };
   }
 
@@ -926,7 +928,7 @@ function normGlobalOnlySubFields(stage, raw, base) {
   }
 
   // 其余阶段（rewrite/redirect/terminate/origin/respHeaders）没有全站专属子字段：
-  // origin.failover 已由 normRule 校验，respHeaders.remove 就是普通规则字段。
+  // origin.failover 已由 normRule 校验，respHeaders.strip 就是普通规则字段。
   return { value: out, errors };
 }
 
@@ -1127,27 +1129,6 @@ export function validateGlobalOnlyStage(stage, input, base) {
     default:
       return { ok: false, value: {}, errors: [`未知的全站独有阶段 ${stage}`] };
   }
-}
-
-/**
- * 规范化「规则级内联源站」列表（action.inlineOrigins）。
- *
- * 该能力在数据面 pipeline.js 中会被消费（规则命中时直接用内联源站覆盖选源），
- * 但此前 normRule 未对其做规范化，导致用户提交的 inlineOrigins 被静默剥离，
- * 形成「写时丢弃、读时消费」的死能力。此处复用 normOrigin 使其真正可落地。
- *
- * @param {any} input 内联源站数组
- * @param {string} label 错误前缀
- * @returns {import('../contracts.js').Origin[]} 规范化后的源站列表（非法项跳过）
- */
-function normRuleInlineOrigins(input, label) {
-  if (!Array.isArray(input) || input.length === 0) return [];
-  const origins = [];
-  for (let i = 0; i < Math.min(input.length, LIMITS.ORIGINS_MAX); i++) {
-    const o = normOrigin(input[i], i);
-    if (o.value) origins.push(o.value);
-  }
-  return origins;
 }
 
 // ----------------------------------------------------------------------------
@@ -1444,47 +1425,80 @@ function normOrigin(input, idx) {
 }
 
 /**
+ * 源站池回源重试（failover）的「错误码换源」特标。
+ * '4xx5xx'（或别名 '*' / 'all'）= 所有错误响应都换源：运行时判 status >= 400 && status < 600。
+ * 注意：200/3xx 属于正常响应（成功或重定向跟随），绝不算失败，不会触发换源。
+ */
+
+/**
  * 规范化源站池的回源重试（failover）配置。
  *
- * 单轨化：默认值取自「源站」阶段的全站默认 DEFAULT_GLOBAL_RULES.origin.failover，
- * 而不是另写一份池级默认——这样「新建源站池」与「全站默认」共用同一个真相源，
- * 用户在「全站通用规则 · 源站」里调完重试策略，新建的池就自动跟随。
+ * 失败即冷却 / 回退重试仅源站池承载：源站池自带完整的超时 / 回退 / 冷却策略，
+ * 全站层与站点层均不持有 failover 字段，避免「全站默认偷偷塞一份 maxRetries=2 截断回退链」。
  *
- * 入参为空（前端「跟随全站默认」时不下发 failover）即直接返回全站默认副本。
+ *   - 入参为空：返回池级中性基线（非全站副本）。
+ *       · maxRetries 跟随源站数（origins.length - 1，封顶 9）→ 链式回退能试遍所有 enabled 源站，不截断。
+ *       · retryOn = ['4xx5xx'] 特标「全部错误码」→ 运行时凡 status>=400（即 4xx/5xx，含 522/524 等）
+ *         都判失败换源；200/3xx 正常响应不换源。连接异常本就必换源，与 retryOn 无关。
+ *   - 入参带了部分字段：仅用这些字段；缺失字段用中性值补（maxRetries 仍跟随源站数）。
+ *
+ * @param {any} input 池原始 failover（可能为空）
+ * @param {number} originsLen 本池 enabled 源站数，用于推导 maxRetries 跟随
  */
-function normFailover(input) {
-  // DEFAULT_FAILOVER 仅作最后兜底（防止全站默认结构异常时拿不到值）
-  const g = DEFAULT_GLOBAL_RULES.origin && DEFAULT_GLOBAL_RULES.origin.failover;
-  const d = isObj(g) ? g : DEFAULT_FAILOVER;
-  if (!isObj(input)) return deepClone(d);
+export function normFailover(input, originsLen = 0) {
+  // 单一源站：无第二个地址可回退，重试 / 换源无意义，不承载 failover 配置。
+  if (originsLen <= 1) return null;
 
-  let retryOn = [];
+  // 池级中性基线：maxRetries/retryOn 由源站数推导，不继承任何外部默认。
+  const poolMaxRetries = Math.min(Math.max(originsLen - 1, 0), 9);
+  const POOL_BASE = {
+    enabled: true,
+    retryOn: [ERROR_STATUS_RANGE], // 特标：所有错误码（4xx/5xx）都判失败换源；200/3xx 不换
+    maxRetries: poolMaxRetries,
+    timeoutMs: 0, // 0 → 回落全站/平台基础超时
+    maxRetryBodyBytes: 5242880,
+    penaltySeconds: 15, // 前端留空回落的中性值
+    totalTimeoutMs: 0, // 0 → 按平台执行上限自动推导
+    speculativeMs: 500,
+  };
+  if (!isObj(input)) return { ...POOL_BASE };
+
+  // retryOn 解析：
+  //   · 含 '4xx5xx' / '*' / 'all' → 全部错误码（status>=400）换源
+  //   · 显式数字数组 → 仅这些码换源
+  //   · 空数组 → 也视为全部错误码（池显式不给码即不限制码，连接异常仍必换源）
+  let retryOn = [ERROR_STATUS_RANGE];
   if (Array.isArray(input.retryOn)) {
-    const seen = new Set();
-    for (const v of input.retryOn) {
-      const n = int(v, 0, 100, 599);
-      if (n >= 100 && n <= 599 && !seen.has(n)) {
-        seen.add(n);
-        retryOn.push(n);
+    if (input.retryOn.includes(ERROR_STATUS_RANGE) || input.retryOn.includes('*') || input.retryOn.includes('all')) {
+      retryOn = [ERROR_STATUS_RANGE];
+    } else {
+      const seen = new Set();
+      const nums = [];
+      for (const v of input.retryOn) {
+        const n = int(v, 0, 100, 599);
+        if (n >= 100 && n <= 599 && !seen.has(n)) {
+          seen.add(n);
+          nums.push(n);
+        }
       }
+      retryOn = nums.length > 0 ? nums : [ERROR_STATUS_RANGE];
     }
   }
-  if (retryOn.length === 0) retryOn = [...(d.retryOn || DEFAULT_RETRY_ON)];
 
   return {
-    enabled: bool(input.enabled, d.enabled),
+    enabled: bool(input.enabled, POOL_BASE.enabled),
     retryOn,
-    maxRetries: int(input.maxRetries, d.maxRetries, 0, 10),
-    timeoutMs: int(input.timeoutMs, d.timeoutMs, 1000, 60000),
+    maxRetries: int(input.maxRetries, POOL_BASE.maxRetries, 0, 10),
+    timeoutMs: int(input.timeoutMs, POOL_BASE.timeoutMs, 1000, 60000),
     // maxRetryBodyBytes：重试时物化请求体的上限。原先只存在于全站默认里、池级无法调整，
     // 现随 failover 一起落盘，使池级也能覆盖（缺省仍跟随全站默认）。
-    maxRetryBodyBytes: int(input.maxRetryBodyBytes, d.maxRetryBodyBytes ?? 5242880, 0, 32 * 1024 * 1024),
+    maxRetryBodyBytes: int(input.maxRetryBodyBytes, POOL_BASE.maxRetryBodyBytes, 0, 32 * 1024 * 1024),
     // 失败即冷却窗口秒数：0=关闭；>0 时一次失败即把源站放入本 isolate 内存冷却名单。
-    penaltySeconds: int(input.penaltySeconds, d.penaltySeconds ?? 15, 0, 600),
+    penaltySeconds: int(input.penaltySeconds, POOL_BASE.penaltySeconds, 0, 600),
     // 整请求总时间预算毫秒：0=按平台执行上限自动推导。
-    totalTimeoutMs: int(input.totalTimeoutMs, d.totalTimeoutMs ?? 0, 0, 120000),
+    totalTimeoutMs: int(input.totalTimeoutMs, POOL_BASE.totalTimeoutMs, 0, 120000),
     // 竞速阈值毫秒：0=关闭；>0 时首请求超时无首字节即并行打第二候选源站。
-    speculativeMs: int(input.speculativeMs, d.speculativeMs ?? 500, 0, 60000),
+    speculativeMs: int(input.speculativeMs, POOL_BASE.speculativeMs, 0, 60000),
   };
 }
 
@@ -1590,7 +1604,7 @@ export function validatePool(input, caps) {
       kind,
       strategy,
       origins,
-      failover: normFailover(input.failover),
+      failover: normFailover(input.failover, (input.origins || []).length),
       createdBy: str(input.createdBy, '', LIMITS.HOST_MAX).toLowerCase(),
       updatedAt: int(input.updatedAt, 0, 0, Number.MAX_SAFE_INTEGER),
     },

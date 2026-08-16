@@ -6,9 +6,9 @@ import { statusTtlEditor } from './status.js';
 import { section } from './card.js';
 import { normalizeMatchForEditor } from './conditions.js';
 export   function headerEditor(initial) {
-    initial = initial || { set: {}, remove: [] };
+    initial = initial || { set: {}, strip: [] };
     const setWrap = el('div', { class: 'kv-list' });
-    const removeWrap = el('div', { class: 'kv-list' });
+    const stripWrap = el('div', { class: 'kv-list' });
     const read = () => {
       const set = {};
       Array.from(setWrap.children).forEach((row) => {
@@ -16,40 +16,53 @@ export   function headerEditor(initial) {
         const v = $('.hv', row).value;
         if (k) set[k] = v;
       });
-      const remove = [];
-      Array.from(removeWrap.children).forEach((row) => {
-        const k = $('.hk', row).value.trim();
-        if (k) remove.push(k);
+      const strip = [];
+      Array.from(stripWrap.children).forEach((row) => {
+        const type = $('.st-type', row).value;
+        const value = $('.st-val', row).value.trim().toLowerCase();
+        if (value) strip.push({ type, value });
       });
-      return { set, remove };
+      return { set, strip };
     };
-    const addKv = (wrap, k0, v0, withVal) => {
+    const addKv = (wrap, k0, v0) => {
       // 头值支持 ${var} 内置变量（与后端 headers.js 的 applyHeaderOps.set 接入 expandVars 对齐）。
       // 注意：变量提示条只挂一次在编辑器顶部（见 root），不在每行 value 下重复，
       // 否则流量序列里每加一行 key-value 就重复一整段「支持动态变量」说明，极其冗杂。
-      const valCell = withVal
-        ? el('input', { class: 'input hv', value: v0 || '', placeholder: 'value（可写 ${var} 变量）' })
-        : el('span', { class: 'muted', text: '(移除)' });
       const row = el('div', { class: 'kv-row' }, [
         el('input', { class: 'input hk', value: k0 || '', placeholder: 'Header-Name' }),
-        valCell,
+        el('input', { class: 'input hv', value: v0 || '', placeholder: 'value（可写 ${var} 变量）' }),
         el('button', { class: 'btn btn-sm btn-danger', text: '×', onclick: () => row.remove() }),
       ]);
       wrap.appendChild(row);
     };
-    Object.keys(initial.set || {}).forEach((k) => addKv(setWrap, k, initial.set[k], true));
-    (initial.remove || []).forEach((k) => addKv(removeWrap, k, '', false));
-    if (!setWrap.children.length) addKv(setWrap, '', '', true);
-    if (!removeWrap.children.length) addKv(removeWrap, '', '', false);
+    const addStrip = (type0, val0) => {
+      const typeSel = el('select', { class: 'input st-type' }, [
+        el('option', { value: 'exact', text: '精确' }),
+        el('option', { value: 'prefix', text: '前缀' }),
+        el('option', { value: 'regex', text: '正则' }),
+      ]);
+      typeSel.value = type0 || 'exact';
+      const valInput = el('input', { class: 'input st-val', value: val0 || '', placeholder: type0 === 'prefix' ? '如 cf-（删掉所有 cf- 开头的头）' : type0 === 'regex' ? '如 ^x-.*' : '如 x-powered-by' });
+      const row = el('div', { class: 'kv-row' }, [
+        typeSel,
+        valInput,
+        el('button', { class: 'btn btn-sm btn-danger', text: '×', onclick: () => row.remove() }),
+      ]);
+      stripWrap.appendChild(row);
+    };
+    Object.keys(initial.set || {}).forEach((k) => addKv(setWrap, k, initial.set[k]));
+    Array.isArray(initial.strip) && initial.strip.forEach((s) => addStrip(s.type, s.value));
+    if (!setWrap.children.length) addKv(setWrap, '', '');
+    if (!stripWrap.children.length) addStrip('exact', '');
     const root = el('div', { class: 'header-editor' }, [
       varHintBar(),
       el('div', { class: 'kv-label' }, '新增 / 修改（把某个请求头设成指定值）：'),
       setWrap,
-      el('button', { class: 'btn btn-sm', text: '+ 添加', onclick: () => addKv(setWrap, '', '', true) }),
-      el('div', { class: 'kv-label' }, '删除（回源 / 返回时去掉某个请求头）：'),
-      removeWrap,
-      el('button', { class: 'btn btn-sm', text: '+ 添加', onclick: () => addKv(removeWrap, '', '', false) }),
-      el('div', { class: 'field-hint muted', text: '请求头就像信封上的备注。回源请求头在请求发给源站前改；节点响应头在结果返回给用户前改。不知道填什么可留空。' }),
+      el('button', { class: 'btn btn-sm', text: '+ 添加', onclick: () => addKv(setWrap, '', '') }),
+      el('div', { class: 'kv-label' }, '删除（回源 / 返回时去掉某个请求头，支持精确 / 前缀 / 正则）：'),
+      stripWrap,
+      el('button', { class: 'btn btn-sm', text: '+ 添加', onclick: () => addStrip('exact', '') }),
+      el('div', { class: 'field-hint muted', text: '删除统一用「剥离」语法：精确=按头名删单个；前缀=删掉某前缀开头的所有头（如 cf-）；正则=按模式批量删。不再有单独的「额外剥离」板块——精确删除与额外剥离完全等价，已合并到此处。' }),
     ]);
     root.__read = read;
     return { root, read };

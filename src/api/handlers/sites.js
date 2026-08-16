@@ -40,6 +40,9 @@ async function ensureSingleOrigin(ctx, body) {
     return { ok: true };
   }
 
+  // 单源站不承载 failover（仅源站池有），删掉前端可能误传的旧字段
+  delete body.originFailover;
+
   if (origins.length === 0) return { ok: true };
 
   if (origins.length > 1) {
@@ -66,7 +69,6 @@ async function ensureSingleOrigin(ctx, body) {
       kind: 'single',
       strategy: 'chain',
       origins,
-      failover: body.originFailover,
       createdBy: body.host || '',
     },
     ctx.caps
@@ -88,7 +90,6 @@ async function ensureSingleOrigin(ctx, body) {
       body.poolId = hit.id;
       delete body.origins;
       delete body.originStrategy;
-      delete body.originFailover;
       return { ok: true };
     }
   } catch {
@@ -101,7 +102,6 @@ async function ensureSingleOrigin(ctx, body) {
   body.poolId = res.value.id;
   delete body.origins;
   delete body.originStrategy;
-  delete body.originFailover;
   return { ok: true, created: res.value };
 }
 

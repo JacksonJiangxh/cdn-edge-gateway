@@ -1,4 +1,4 @@
-// statusQuickPick / statusTtlEditor / statusPatternListEditor / stripRuleEditor / stringListEditor（含顶层常量）
+// statusQuickPick / statusTtlEditor / statusPatternListEditor / stringListEditor（含顶层常量）
 import { $, el } from '../../dom.js';
 import { ERROR_CODE_GROUPS } from './conditions.js';
 import { field, humanDuration, select, singleSelectPanel } from '../util.js';
@@ -30,7 +30,7 @@ export   function statusQuickPick(onPick) {
    *
    * 取代原先「码:秒, 码:秒」的单一逗号分隔输入框——那种写法既看不出有几条、
    * 也无法逐条删除，且用户很容易漏写冒号导致整条被静默丢弃。
-   * 行式录入与「修改响应头」的 set/remove 控件是同一种交互，前后一致。
+   * 行式录入与「修改响应头」的 set/strip 控件是同一种交互，前后一致。
    *
    * @param {Record<string, any>} initial 初始 {模式: 秒数}
    * @returns {{root: HTMLElement, read: () => Record<string, number>}}
@@ -196,101 +196,6 @@ export   function statusPatternListEditor(initial) {
     return { root, read, validate };
   }
 
-  /**
-   * 请求头「剥离规则」编辑器（统一 {type,value} 语法，一行一条）。
-   *
-   * type：prefix（按头名前缀）/ exact（按头名精确）/ regex（按正则匹配头名）。
-   * 用于「修改请求头」阶段的全站默认——决定哪些客户端请求头在回源前被丢掉。
-   *
-   * @param {Array<any>} initial 初始规则列表
-   * @returns {{root: HTMLElement, read: () => Array<{type:string,value:string}>}}
-   */
-export   function stripRuleEditor(initial) {
-    const listWrap = el('div', { class: 'kv-list' });
-    const errBox = el('div', { class: 'field-hint muted' });
-
-    // 头名正则支持通配符（* 代表任意字符），与后端 compileWildcard('header') 对齐
-    const compileHeadGlob = (src) => {
-      if (!src || !src.includes('*')) return src || '';
-      const escaped = src.replace(/\\/g, '\\\\').replace(/[.+?(){}|[\]^$]/g, '\\$&');
-      return escaped.split('*').join('(.*)');
-    };
-
-    const validate = () => {
-      const bad = [];
-      Array.from(listWrap.children).forEach((row) => {
-        const type = $('.sr-type', row).value;
-        const input = $('.sr-val', row);
-        const v = input.value.trim();
-        let okRow = true;
-        if (v && type === 'regex') {
-          // 正则写错会导致「配置看着生效、实际没剥离」，必须当场报错。
-          // 先按通配符编译（cf-* → cf-(.*)）再做语法校验，避免把合法的 * 写法误判。
-          try { new RegExp(compileHeadGlob(v)); } catch { okRow = false; }
-        }
-        if (!okRow) bad.push(v);
-        input.classList.toggle('input-err', !okRow);
-      });
-      errBox.textContent = bad.length ? `⚠ 正则写法不合法：${bad.join('、')}` : '';
-      return bad.length === 0;
-    };
-
-    const addRow = (type, value) => {
-      const typeSel = select('', [
-        { value: 'prefix', label: '按前缀（如 cf- 去掉所有 cf-* 头）' },
-        { value: 'exact', label: '按完整头名（如 forwarded）' },
-        { value: 'regex', label: '按正则匹配头名（高级）' },
-      ], type || 'prefix');
-      typeSel.className = 'input sr-type';
-      const valInput = el('input', {
-        class: 'input sr-val',
-        value: value || '',
-        placeholder: 'cf-* / true-client-ip / ^x-.*-id$（* 代表任意字符）',
-      });
-      valInput.addEventListener('input', validate);
-      typeSel.addEventListener('change', validate);
-      const row = el('div', { class: 'kv-row' }, [
-        typeSel,
-        el('div', { class: 'kv-val' }, [valInput]),
-        el('button', {
-          class: 'btn btn-sm btn-danger',
-          text: '×',
-          onclick: () => { row.remove(); validate(); },
-        }),
-      ]);
-      listWrap.appendChild(row);
-    };
-
-    (Array.isArray(initial) ? initial : []).forEach((item) => {
-      if (typeof item === 'string') addRow('exact', item);
-      else if (item && typeof item === 'object') addRow(item.type, item.value);
-    });
-    if (!listWrap.children.length) addRow('prefix', '');
-
-    const root = el('div', { class: 'header-editor' }, [
-      el('div', { class: 'kv-label' }, '额外剥离的请求头（一行一条）：'),
-      listWrap,
-      el('button', { class: 'btn btn-sm', text: '+ 添加一条', onclick: () => addRow('prefix', '') }),
-      el('div', {
-        class: 'field-hint muted',
-        text: '白名单之外的头本来就不会透传；这里是再加一层保险，专门用来去掉 CDN / 反代自动注入的追踪头（cf-*、x-forwarded-* 等），避免把访客真实 IP 和链路信息泄露给源站。',
-      }),
-      errBox,
-    ]);
-
-    const read = () => {
-      const out = [];
-      Array.from(listWrap.children).forEach((row) => {
-        const type = $('.sr-type', row).value;
-        const value = $('.sr-val', row).value.trim().toLowerCase();
-        if (!value) return;
-        if (type === 'regex') { try { new RegExp(compileHeadGlob(value)); } catch { return; } }
-        if (!out.some((x) => x.type === type && x.value === value)) out.push({ type, value });
-      });
-      return out;
-    };
-    return { root, read, validate };
-  }
 
   /**
    * 简单字符串列表编辑器（一行一个），用于回源请求头透传白名单等。

@@ -118,9 +118,8 @@ export
     if (id) {
       try { pool = await API.pools.get(id); } catch (e) { toast(e.message, 'err'); return; }
     } else {
-      // 新建源站池的回源重试参数「跟随全站默认」：不在此写死一份，
-      // 而是留空交给后端回落到「源站」阶段的全站默认（stages.origin.failover）。
-      // 前端硬编码一份默认值就等于又造了一个真相源——全站默认改了、新建的池却还是老值。
+      // 新建源站池不在此写死一份 failover 默认值（避免又造一个真相源），
+      // 留空交给后端按源站数归一化（单源站恒为 null，池默认 maxRetries=源站数-1、retryOn=4xx5xx）。
       pool = { id: '', name: '', kind: forceKind || 'pool', strategy: 'chain', origins: [], failover: null };
     }
     // 类型一经创建不可随意切换：single→pool 允许（加源站即升级），pool→single 会丢数据故禁止
@@ -291,13 +290,14 @@ export
 
     const strategyField = field('调度策略', strategySel, '多个源站之间怎么分配请求。新手直接用「链式回退」最省心。');
 
-    // ---- 回源重试 / 故障转移参数（跟随全站默认，留空即不覆盖）----
+    // ---- 回源重试 / 故障转移参数（仅源站池承载；单源站恒关）----
     // 默认全部留空：新建/编辑源站池时不写死一份默认值（避免又造一个真相源）。
+    // 留空时由后端按源站数归一化（maxRetries=源站数-1、retryOn=4xx5xx 等）。
     const fb = pool.failover || {};
     const penaltyIn = el('input', { class: 'input o-penalty', type: 'number', min: '0', max: '600', value: fb.penaltySeconds ?? '', placeholder: '默认 15（0=关闭）' });
     const totalTimeoutIn = el('input', { class: 'input o-total-timeout', type: 'number', min: '0', max: '120000', value: fb.totalTimeoutMs ?? '', placeholder: '默认 0=按平台上限自动推导' });
     const speculativeIn = el('input', { class: 'input o-speculative', type: 'number', min: '0', max: '60000', value: fb.speculativeMs ?? '', placeholder: '默认 500（0=关闭）' });
-    const failoverCard = section('回源重试 / 故障转移', '失败即冷却 · 总时间预算 · 竞速（留空=跟随全站默认）', [
+    const failoverCard = section('回源重试 / 故障转移', '失败即冷却 · 总时间预算 · 竞速（留空=后端按源站数归一化）', [
       field('失败即冷却（秒）', penaltyIn, '一次回源失败立即把该源站放入冷却名单 ~15s（仅本边缘内存生效，不跨边缘即时同步）。配合「60s 内累计 3 次熔断」并存互补，避免反复打同一个刚失败的源站。0=关闭。'),
       field('总时间预算（毫秒）', totalTimeoutIn, '整请求回源最长时间硬顶；超过后不再尝试新源站，触发「全员失败兜底」。默认 0=按平台执行上限自动推导（EO/ESA 120s、CF 30s 减安全余量），避免 (换源次数+1)×超时 无预算叠加撞平台墙钟。'),
       field('竞速阈值（毫秒）', speculativeIn, '首个源站超过该时间未返回首字节，立即并行打第二个候选源站，谁先成功用谁（仅 GET/HEAD 及已物化 body 的请求启用，双写安全）。默认 500；0=关闭竞速。'),
@@ -434,7 +434,7 @@ export
       if (!origins.length) throw new Error(isSingle ? '请填写源站地址' : '至少需要一个源站');
       if (isSingle && origins.length > 1) throw new Error('单一源站只能有 1 个地址；需要多个请新建「源站池」');
 
-      // 组装池级 failover：仅当用户填了任意一项时下发，否则留空让后端回落全站默认
+      // 组装池级 failover：仅当用户填了任意一项时下发，否则留空让后端按源站数归一化
       // （不产生双份真相源）。与既有 pool.failover 合并，保留旧 key。
       const fo = { ...(pool.failover || {}) };
       let foDirty = false;
@@ -454,8 +454,7 @@ export
         kind,
         strategy: isSingle ? 'chain' : strategySel.value,
         origins,
-        // 池级未单独配置时不下发 failover，由后端回落到「源站」阶段的全站默认，
-        // 保证「改一处全站生效」，不产生双份真相源。
+        // 池级未单独配置时不下发 failover，由后端按源站数归一化（单源站恒为 null）。
         ...(foDirty ? { failover: fo } : (pool.failover ? { failover: pool.failover } : {})),
         ...(pool.createdBy ? { createdBy: pool.createdBy } : {}),
       };

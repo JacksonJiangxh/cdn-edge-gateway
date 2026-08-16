@@ -145,10 +145,10 @@ curl -X PUT "http://127.0.0.1:8799/__panel/api/sites/img.example.com" \
     "rewrite":    { "type": "none" },
     "redirect":   { "type": "none" },
     "terminate":  { "forceHttps": true, "forceHttpsStatus": 301, "directResponse": { "enabled": false } },
-    "reqHeaders": { "add": [], "remove": [], "set": [] },
+    "reqHeaders": { "set": {}, "strip": [] },
     "origin":     { "hostHeader": { "mode": "inherit" }, "clientIpHeader": { "enabled": false }, "followRedirect": false },
     "cache":      { "enabled": false, "edgeTtl": 0, "browserTtl": 0, "staleWhileRevalidate": 0 },
-    "respHeaders":{ "add": [], "remove": [], "set": [] }
+    "respHeaders":{ "set": {}, "strip": [] }
   }
 }
 ```

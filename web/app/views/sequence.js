@@ -76,9 +76,9 @@ export   async function renderTrafficSequence() {
       if (cp && cp.mode === 'noCache') subs.push('不缓存');
       else if (cp && cp.enabled) subs.push('缓存');
       const rh = a.reqHeaders || {};
-      if (rh.set && Object.keys(rh.set).length || (rh.remove || []).length) subs.push('改请求头');
+      if (rh.set && Object.keys(rh.set).length || (rh.strip || []).length) subs.push('改请求头');
       const rph = a.respHeaders || {};
-      if (rph.set && Object.keys(rph.set).length || (rph.remove || []).length) subs.push('改响应头');
+      if (rph.set && Object.keys(rph.set).length || (rph.strip || []).length) subs.push('改响应头');
       return subs;
     }
 
@@ -241,17 +241,23 @@ export   async function renderTrafficSequence() {
       // ── ⑭ 回源循环（此时才真正发出回源请求；可干预：源站/池）────
       const effPoolId = (ovrPool && ovrPool.action.poolId) || (globalOv && globalOv.action.poolId) || site.poolId;
       const pool = APP_DATA.pools.find((p) => p.id === effPoolId);
-      const fo = (pool && pool.failover) || {};
+      const fo = (pool && pool.failover) || null;
       // 回源连接参数（clientIp/超时/跟随3xx、engine/scheme/port）均属 ⑨ Origin Rules 阶段，
       // 统一以 ruleStage 索引，不再从 action 现场反推。
       const connRule = rules.find((r) => ruleStage(r) === 'origin');
       const gConnRule = !connRule && globalStages['origin'] && (globalStages['origin'].clientIpHeader || globalStages['origin'].followRedirect || globalStages['origin'].originTimeoutMs || globalStages['origin'].engine || globalStages['origin'].scheme || globalStages['origin'].port);
+      // 单源站 fo 恒为 null（运行时强制关闭回退）；池未填 fo 时后端按源站数归一（重试=源站数-1）。
+      const retryText = (p) => {
+        if (!fo) return '无回退（单源站）';
+        const n = fo.maxRetries != null ? fo.maxRetries : Math.max((p.origins || []).length - 1, 0);
+        return `重试 ${n} 次`;
+      };
       flow.appendChild(seqGroup('⑭', '回源循环 requestWithFailover（真正发出回源请求）', '逐个源站尝试；rewrite/origin/reqHeaders 各阶段规则在此对每个源站落地；回源连接参数受规则 clientIp / 超时 / 跟随3xx 影响。可干预：源站地址、策略、故障转移。'));
       flow.appendChild(seqStage('🗄️', '⑭ 源站与故障转移',
         pool
           ? (poolKind(pool) === 'single'
-            ? `单一源站 ${pool.name || pool.id} · ${originSummary(pool)} · 重试 ${fo.maxRetries != null ? fo.maxRetries : 2} 次${connRule || gConnRule ? '（受规则回源参数影响）' : ''}`
-            : `源站池 ${pool.name || pool.id} · 策略 ${pool.strategy || 'roundrobin'} · ${(pool.origins || []).length} 个源站 · 重试 ${fo.maxRetries != null ? fo.maxRetries : 2} 次${connRule || gConnRule ? '（受规则回源参数影响）' : ''}`)
+            ? `单一源站 ${pool.name || pool.id} · ${originSummary(pool)} · ${retryText(pool)}${connRule || gConnRule ? '（受规则回源参数影响）' : ''}`
+            : `源站池 ${pool.name || pool.id} · 策略 ${pool.strategy || 'roundrobin'} · ${(pool.origins || []).length} 个源站 · ${retryText(pool)}${connRule || gConnRule ? '（受规则回源参数影响）' : ''}`)
           : '未配置源站',
         pool ? '已配置' : '未配置', null,
         pool ? () => openPoolDrawer(pool.id) : () => openInitialOriginDrawer(site.host, 'sec-origin'),
@@ -519,5 +525,5 @@ export   function seqRuleInPack(rule, subs, condCount, host, draggable, stageNo,
   // 通用子组件
   // ---------------------------------------------------------------------------
 
-  // 键值对头部编辑器（set）+ 删除列表（remove）
-  // 返回 { root, read() }，read() 返回 { set:{}, remove:[] }
+  // 键值对头部编辑器（set）+ 删除列表（strip：精确/前缀/正则）
+  // 返回 { root, read() }，read() 返回 { set:{}, strip:[] }

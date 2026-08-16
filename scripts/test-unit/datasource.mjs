@@ -207,15 +207,15 @@ function buildImageSite() {
     host: 'img.example.com',
     rules: [
       { id: 'r-req', priority: 100, enabled: true, stage: 'reqHeaders', match: { conditions: [] },
-        action: { reqHeaders: { set: { 'User-Agent': 'SiteBot/2.0', Accept: 'image/*', 'X-Site-Req': 'yes' }, remove: ['Accept-Language'] } } },
+        action: { reqHeaders: { set: { 'User-Agent': 'SiteBot/2.0', Accept: 'image/*', 'X-Site-Req': 'yes' }, strip: [{ type: 'exact', value: 'accept-language' }] } } },
       { id: 'r-origin', priority: 100, enabled: true, stage: 'origin', match: { conditions: [] },
         action: { origin: { hostHeader: { mode: 'custom', custom: 'img-cdn.example.net' }, clientIpHeader: { enabled: true, name: 'X-Real-IP' }, followRedirect: true, originTimeoutMs: 5000 } } },
       { id: 'r-cache', priority: 100, enabled: true, stage: 'cache', match: { conditions: [] },
         action: { cache: { enabled: true, mode: 'ttl', edgeTtl: 86400, staleWhileRevalidate: 0, browserTtl: 3600, ignoreQuery: false, queryWhitelist: [], key: { ignoreCase: false, includeScheme: false, headers: [], cookies: [] }, statusTtl: {}, preRefresh: false, preRefreshPercent: 80, offlineCache: false } } },
       { id: 'r-resp', priority: 100, enabled: true, stage: 'respHeaders', match: { conditions: [] },
-        action: { respHeaders: { set: { 'x-img-tag': 'v1' }, remove: ['server', 'via'] } } },
+        action: { respHeaders: { set: { 'x-img-tag': 'v1' }, strip: [{ type: 'exact', value: 'server' }, { type: 'exact', value: 'via' }] } } },
       { id: 'r-nohit', priority: 50, enabled: true, stage: 'reqHeaders', match: { conditions: [{ target: 'path', op: 'equal', values: ['/never/matches'] }] },
-        action: { reqHeaders: { set: { 'X-Should-Not-Apply': '1' }, remove: [] } } },
+        action: { reqHeaders: { set: { 'X-Should-Not-Apply': '1' }, strip: [] } } },
     ],
   });
 }
@@ -252,12 +252,12 @@ test('datasource: 站点规则覆盖全站默认（逐阶段合并语义）', as
     // 站点 reqHeaders 覆盖（UA/Accept 覆盖全站、Accept-Language 删除、X-Site-Req 新增）
     assert.strictEqual(capture.headerGet('user-agent'), 'SiteBot/2.0', '站点覆盖 UA');
     assert.strictEqual(capture.headerGet('accept'), 'image/*', '站点覆盖 Accept');
-    assert.ok(!capture.headerGet('accept-language'), '站点 remove Accept-Language');
+    assert.ok(!capture.headerGet('accept-language'), '站点 strip 删除了 Accept-Language');
     assert.strictEqual(capture.headerGet('x-site-req'), 'yes', '站点新增 X-Site-Req');
 
-    // 站点 respHeaders remove 删掉全站 set 的 server/via → 最终响应不含
-    assert.ok(!h.has('server'), '站点 remove 真正移除了 Server');
-    assert.ok(!h.has('via'), '站点 remove 真正移除了 Via');
+    // 站点 respHeaders strip 删掉全站 set 的 server/via → 最终响应不含
+    assert.ok(!h.has('server'), '站点 strip 真正移除了 Server');
+    assert.ok(!h.has('via'), '站点 strip 真正移除了 Via');
     assert.strictEqual(h.get('x-img-tag'), 'v1', '站点新增 x-img-tag');
 
     // 站点 cache 覆盖（非全站 BYPASS）
@@ -272,12 +272,12 @@ test('datasource: 站点规则覆盖全站默认（逐阶段合并语义）', as
   }
 });
 
-testA('datasource: 合并期 headerOps 用 mergeStageHeaderOps（站点 remove 删全站 set key）', (a) => {
+testA('datasource: 合并期 headerOps 用 mergeStageHeaderOps（站点 strip(exact) 删全站 set key）', (a) => {
   const g = deepClone(DEFAULT_GLOBAL_RULES.respHeaders);
-  const siteAction = { set: { 'x-img-tag': 'v1' }, remove: ['server', 'via'] };
+  const siteAction = { set: { 'x-img-tag': 'v1' }, strip: [{ type: 'exact', value: 'server' }, { type: 'exact', value: 'via' }] };
   const merged = mergeStageHeaderOps(g, siteAction);
-  a.equal('server' in (merged.set || {}), false, '站点 remove 删掉全站 set 的 server');
-  a.equal('via' in (merged.set || {}), false, '站点 remove 删掉全站 set 的 via');
+  a.equal('server' in (merged.set || {}), false, '站点 strip(exact) 删掉全站 set 的 server');
+  a.equal('via' in (merged.set || {}), false, '站点 strip(exact) 删掉全站 set 的 via');
   a.equal(merged.set['x-img-tag'], 'v1', '站点新增 x-img-tag 保留');
 });
 

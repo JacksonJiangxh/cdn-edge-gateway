@@ -37,27 +37,27 @@ test('applyRewrite: 空 rewrite（none）返回原路径', () => {
   assert.strictEqual(out, '/keep', 'none 不改路径');
 });
 
-testA('mergeStageHeaderOps: 站点 set 覆盖全站同键，remove 删除全站 set 键', (a) => {
-  const globalOps = { set: { 'x-a': '1', server: 'EdgeGateway' }, remove: ['x-drop'] };
-  const siteOps = { set: { 'x-a': '2', 'x-b': '3' }, remove: ['server', 'x-drop2'] };
+testA('mergeStageHeaderOps: 站点 set 覆盖全站同键，strip(exact) 删除全站 set 键', (a) => {
+  const globalOps = { set: { 'x-a': '1', server: 'EdgeGateway' }, strip: [{ type: 'exact', value: 'x-drop' }] };
+  const siteOps = { set: { 'x-a': '2', 'x-b': '3' }, strip: [{ type: 'exact', value: 'server' }, { type: 'exact', value: 'x-drop2' }] };
   const merged = mergeStageHeaderOps(globalOps, siteOps);
   a.equal(merged.set['x-a'], '2', 'x-a 被站点覆盖');
   a.equal(merged.set['x-b'], '3', 'x-b 来自站点');
-  a.equal('server' in merged.set, false, '站点 remove server 删掉全站 set 的 server');
-  a.equal(merged.remove.includes('x-drop'), true, '全站 remove 保留');
-  a.equal(merged.remove.includes('x-drop2'), true, '站点 remove 保留');
+  a.equal('server' in merged.set, false, '站点 strip(exact) server 删掉全站 set 的 server');
+  a.ok(merged.strip.some((x) => x.type === 'exact' && x.value === 'x-drop'), '全站 strip 保留');
+  a.ok(merged.strip.some((x) => x.type === 'exact' && x.value === 'x-drop2'), '站点 strip 保留');
 });
 
 testA('mergeStageHeaderOps: 缺省输入不产生 undefined', (a) => {
   const merged = mergeStageHeaderOps(undefined, undefined);
   a.ok(merged.set && typeof merged.set === 'object', 'set 为对象');
-  a.ok(Array.isArray(merged.remove), 'remove 为数组');
+  a.ok(Array.isArray(merged.strip), 'strip 为数组');
 });
 
-testA('mergeHeaderOps: 源站打底 + 规则覆盖（remove 仅透传不删 set）', (a) => {
-  const merged = mergeHeaderOps({ set: { a: '1' }, remove: ['x'] }, { set: { a: '2' }, remove: ['y'] });
+testA('mergeHeaderOps: 源站打底 + 规则覆盖（strip 仅透传不删 set）', (a) => {
+  const merged = mergeHeaderOps({ set: { a: '1' }, strip: [{ type: 'exact', value: 'x' }] }, { set: { a: '2' }, strip: [{ type: 'exact', value: 'y' }] });
   a.equal(merged.set.a, '2', '规则覆盖源站同键');
-  a.equal(merged.remove.includes('x') && merged.remove.includes('y'), true, 'remove 并集');
+  a.ok(merged.strip.some((x) => x.type === 'exact' && x.value === 'x') && merged.strip.some((x) => x.type === 'exact' && x.value === 'y'), 'strip 并集');
 });
 
 test('mergeHeaderOps: 非法输入不抛错', () => {

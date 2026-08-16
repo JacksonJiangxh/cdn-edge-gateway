@@ -22,7 +22,6 @@
  * ============================================================================
  */
 
-import { DEFAULT_RETRY_ON } from '../contracts.js';
 import { deepUnfreeze, deepClone } from './factory.js';
 import { DEFAULT_HOST_HEADER, FORWARD_HEADER_WHITELIST_LIST } from './global.js';
 
@@ -90,7 +89,9 @@ export const DEFAULT_CACHE_POLICY = Object.freeze({
  */
 export const DEFAULT_HEADER_OPS = Object.freeze({
   set: Object.freeze({}),
-  remove: Object.freeze([]),
+  // 删除统一走 strip（{type,value} 语法）；精确删除即 type:'exact'。
+  // 不再有 remove 字段：精确删除与「额外剥离」的 exact 完全等价，合并为单一入口。
+  strip: Object.freeze([]),
 });
 
 // ----------------------------------------------------------------------------
@@ -225,7 +226,8 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
       'Accept-Encoding': 'gzip, deflate, br',
     }),
-    remove: Object.freeze([]),
+    // 删除统一走 strip 语法（此处默认无额外剥离；全站兜底剥离见下方 strip 字段）。
+    strip: Object.freeze([]),
     // 单轨化：以下三项原在 settings.reqHeaders（隐藏双轨），现并入本阶段默认 action，
     // 使「回源请求头如何构造」的全部配置都在「修改请求头」阶段一处可视、可改。
     //
@@ -250,27 +252,6 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
     clientIpHeader: deepUnfreeze(DEFAULT_CLIENT_IP_HEADER),
     followRedirect: true,
     originTimeoutMs: 0,
-    // 故障转移 / 回源重试策略：全站兜底默认值，同时也是「新建源站池」的默认参数。
-    //
-    // 单轨化：原先此处与 settings.origin 各写一份完全相同的默认值（双份真相源，
-    // 前者作用于规则/源站、后者作用于池），现统一为本处唯一真相源：
-    // 池级 failover 未配置时回落到这里，源站池 UI 提供「跟随全局默认」开关。
-    // maxRetryBodyBytes：判定源站「可重试错误响应」的最大响应体字节。
-    failover: Object.freeze({
-      enabled: true,
-      retryOn: DEFAULT_RETRY_ON,
-      maxRetries: 2,
-      timeoutMs: 10000,
-      maxRetryBodyBytes: 5242880,
-      // 失败即冷却：一次回源失败立即把源站放入本 isolate 内存冷却名单 ~15s，
-      // 与「60s 内累计 3 次才熔断」并存互补。纯内存、零 KV 读写（见 circuit.js）。
-      penaltySeconds: 15,
-      // 整请求总时间预算：0=按平台执行上限自动推导（failover.js computeBudget）。
-      totalTimeoutMs: 0,
-      // 竞速阈值：首请求超过 500ms 无首字节即并行打第二候选源站，谁先成功用谁；
-      // 仅 GET/HEAD 及已物化 body 的请求启用（双写安全）。0=关闭。
-      speculativeMs: 500,
-    }),
   }),
   // 单轨化新增阶段：安全校验（全站维度）。
   // 原 settings.security.*（隐藏双轨）。限速是跨请求的全站级判定，不属于某条规则的
@@ -328,7 +309,9 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
     browserTtl: 3600,
     ignoreQuery: true,
     queryWhitelist: Object.freeze([]),
-    key: deepUnfreeze(DEFAULT_CACHE_KEY),
+    // 全站缺省「缓存键不区分大小写」开启（/A.jpg 与 /a.jpg 命中同一缓存条目）。
+    // 注意：仅全站兜底如此，站点/规则级默认仍跟随 DEFAULT_CACHE_KEY（false）。
+    key: Object.assign(deepUnfreeze(DEFAULT_CACHE_KEY), { ignoreCase: true }),
     // 错误码缓存 TTL：命中状态码 → 缓存秒数；0 = no-store（不写缓存 + 下发 no-store 头）。
     // 默认 4xx / 5xx / 52x 不缓存（原 noCacheStatus 黑名单语义并入此处：TTL=0 即 no-store）。
     statusTtl: Object.freeze({ '4xx': 0, '5xx': 0, '52x': 0 }),
@@ -353,40 +336,41 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
   }),
   respHeaders: Object.freeze({
     // 全站兜底「默认响应头」。所有响应默认注入本项目品牌头 Server / Via，
-    // 并剥离上游敏感响应头（与旧 headers.js 写死的 PRODUCT_NAME / DEFAULT_STRIP_RESP_HEADERS 一致）。
+    // 并剥离上游敏感响应头（strip 精确删除，与 headers.js 行为一致）。
     //
     // 品牌名统一引用「单一真相源」：代码常量 PRODUCT_NAME（经 vars.js 的 ${product_name} 变量）。
     // 注意：Server / Via 不再经由 settings.respHeaders.serverName/viaName 中转，
     // 而是直接在此 stages 里以 ${product_name} 表达（用户认可的「全局规则里直接写」方式）。
     // 调试响应头（X-Cache / X-Origin-Id / X-Rule-Id / X-Retry-Count / X-Edge-Time）不在 stages
     // 显式列出，而由 headers.js 按引擎常量 DEBUG_HEADER_NAMES 默认下发；如需关闭，
-    // 在站点规则 stages.respHeaders.remove 中加入对应头名即可。
+    // 在站点规则 stages.respHeaders.strip 中加入对应头名（type:'exact'）即可。
     set: Object.freeze({
       server: '${product_name}',
       via: '1.1 ${product_name}',
     }),
-    remove: Object.freeze([
-      // —— 全站通用兜底：仅剥离【实测 CNB 与 GitHub 共有、且对所有源站都该剥】的头 ——
-      // 其余「仓库接口特有的头」已下沉到 cnb / github 引擎关联的「内置预设规则模板」
-      // (respHeaders 阶段)，按引擎分别处理，不污染全站默认。
+    // 删除统一走 strip 语法（精确删除即 type:'exact'）。
+    // 以下为全站通用兜底：仅剥离【实测 CNB 与 GitHub 共有、且对所有源站都该剥】的头；
+    // 其余「仓库接口特有的头」已下沉到 cnb / github 引擎关联的「内置预设规则模板」
+    // (respHeaders 阶段)，按引擎分别处理，不污染全站默认。
+    strip: Object.freeze([
       // CNB same-origin / GitHub cross-origin（实测两者都有）
-      'cross-origin-resource-policy',
-      'cross-origin-embedder-policy',
+      Object.freeze({ type: 'exact', value: 'cross-origin-resource-policy' }),
+      Object.freeze({ type: 'exact', value: 'cross-origin-embedder-policy' }),
       // 全有（360 渲染杀器之一）
-      'content-security-policy',
-      'content-security-policy-report-only',
+      Object.freeze({ type: 'exact', value: 'content-security-policy' }),
+      Object.freeze({ type: 'exact', value: 'content-security-policy-report-only' }),
       // 全有
-      'x-frame-options',
+      Object.freeze({ type: 'exact', value: 'x-frame-options' }),
       // 通用安全
-      'set-cookie',
+      Object.freeze({ type: 'exact', value: 'set-cookie' }),
       // 上游常回 X-Content-Type-Options: nosniff（全部 5 个 URL 都有！这是 360 不渲染主因）。
       // 作为 CDN/网关，下发给浏览器的 Content-Type 由本项目 fixContentType 控制并信任，
       // 无需上游 nosniff 约束；部分内核较严的浏览器（如 360）在 nosniff 下会因任何 MIME
       // 边角问题拒绝渲染图片（Chrome/Edge 有更强内部嗅探兜底故正常）。故默认剥离。
-      'x-content-type-options',
+      Object.freeze({ type: 'exact', value: 'x-content-type-options' }),
       // 上游源站的 CORS 策略（CNB 写死 https://docs.cnb.cool；GitHub 写死 *），对你的用户
       // 是错误且无效的；两者实测都有，全站统一剥离（后续可由网关统一主动下发正确 CORS 策略）。
-      'access-control-allow-origin',
+      Object.freeze({ type: 'exact', value: 'access-control-allow-origin' }),
       // —— 以下均为【仓库接口特有头】，已下沉到对应引擎的站点规则（见 repoEngine.js）——
       // CNB 特有：access-control-allow-credentials / access-control-expose-headers /
       //   referrer-policy / traceparent / x-trace-id / x-ratelimit-* / x-repo-commit

@@ -44,7 +44,7 @@
 | `cacheGen` | number | `0` | 缓存代次（清缓存用） | |
 | `defaultUpstreamTimeoutMs` | number | `30000` | 默认回源超时 | ★ |
 | `allowedHeaders` | array | — | 透传请求头白名单 | ★ |
-| `stripHeaders` | array | — | 删除的请求/响应头 | ★ |
+| `stripHeaders` | array | — | 剥离的请求/响应头（strip：prefix/exact/regex） | ★ |
 | `securityEnabled` | boolean | `true` | 安全总开关 | |
 | `refererCheck` | object | — | 防盗链 | |
 | `ipBlacklist` | array | — | IP 黑名单 | |

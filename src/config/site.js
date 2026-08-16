@@ -10,7 +10,6 @@
  * ============================================================================
  */
 
-import { DEFAULT_RETRY_ON } from '../contracts.js';
 import { deepUnfreeze } from './factory.js';
 import { DEFAULT_SITE_HOST_HEADER, DEFAULT_HOST_HEADER } from './global.js';
 import {
@@ -71,21 +70,6 @@ export const DEFAULT_SECURITY = Object.freeze({
 // ----------------------------------------------------------------------------
 // 站点
 // ----------------------------------------------------------------------------
-
-/**
- * 默认故障转移（内联源站复用）。提前定义以避免 DEFAULT_SITE 引用时的 TDZ。
- * @type {Readonly<import('../contracts.js').Failover>}
- */
-export const DEFAULT_FAILOVER = Object.freeze({
-  enabled: true,
-  retryOn: DEFAULT_RETRY_ON,
-  maxRetries: 2,
-  timeoutMs: 10000,
-  maxRetryBodyBytes: 5242880,
-  penaltySeconds: 15,
-  totalTimeoutMs: 0,
-  speculativeMs: 500,
-});
 
 /**
  * 默认站点。
@@ -164,7 +148,8 @@ export const DEFAULT_POOL = Object.freeze({
   kind: 'single',
   strategy: 'chain',
   origins: Object.freeze([]),
-  failover: DEFAULT_FAILOVER,
+  // 单源站无第二个地址可回退，不承载 failover（运行时 requestWithFailover 强制关闭）。
+  failover: null,
   // 由站点自动联动创建时记录来源 host，便于 UI 展示「随站点 xxx 自动创建」
   createdBy: '',
   updatedAt: 0,

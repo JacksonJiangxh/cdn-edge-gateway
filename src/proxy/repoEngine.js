@@ -18,7 +18,7 @@
  *   - 请求头修改阶段（reqHeaders）：
  *       · 私密仓库：注入 Authorization（值引用 token，运行时由引擎解密）
  *       · 公开仓库：不注入任何头（匿名可访问，另一分支）
- *   - 响应头修改阶段（respHeaders）：剥离【仓库接口特有的头】（见 REPO_RESP_HEADER_REMOVE，按引擎区分），
+ *   - 响应头修改阶段（respHeaders）：剥离【仓库接口特有的头】（见 REPO_RESP_HEADER_STRIP，按引擎区分），
  *       这些头不属于「通用全站规则」范畴，随引擎关联下沉到站点规则，避免污染全站默认。
  *   即「公开 vs 私密」的差异仅在 reqHeaders 阶段；rewrite / respHeaders 阶段通用。
  *
@@ -96,41 +96,32 @@ export const REPO_ENGINE_LABEL = Object.freeze({ cnb: 'CNB', github: 'GitHub' })
  *
  * 两者共有（CSP / XFO / nosniff / CORP / access-control-allow-origin）已留在全站默认剥离，
  * 不在此重复。
- * @type {Readonly<Record<'cnb'|'github', readonly string[]>>}
+ * @type {Readonly<Record<'cnb'|'github', ReadonlyArray<{type:'exact',value:string}>>>}
  */
-export const REPO_RESP_HEADER_REMOVE = Object.freeze({
+export const REPO_RESP_HEADER_STRIP = Object.freeze({
   cnb: Object.freeze([
-    // CNB 写死 false，上游 CORS 配套，无意义透传
-    'access-control-allow-credentials',
-    // 上游 CORS 配套
-    'access-control-expose-headers',
-    // CNB 写死 no-referrer，覆盖网关统一默认值
-    'referrer-policy',
-    // CNB 内部链路追踪（GitHub 无此头）
-    'traceparent',
-    // CNB 内部链路 id
-    'x-trace-id',
-    'x-ratelimit-limit',
-    'x-ratelimit-remaining',
-    'x-ratelimit-reset',
-    // 上游仓库内部信息，泄露源站结构
-    'x-repo-commit',
+    { type: 'exact', value: 'access-control-allow-credentials' }, // CNB 写死 false，上游 CORS 配套，无意义透传
+    { type: 'exact', value: 'access-control-expose-headers' }, // 上游 CORS 配套
+    { type: 'exact', value: 'referrer-policy' }, // CNB 写死 no-referrer，覆盖网关统一默认值
+    { type: 'exact', value: 'traceparent' }, // CNB 内部链路追踪（GitHub 无此头）
+    { type: 'exact', value: 'x-trace-id' }, // CNB 内部链路 id
+    { type: 'exact', value: 'x-ratelimit-limit' },
+    { type: 'exact', value: 'x-ratelimit-remaining' },
+    { type: 'exact', value: 'x-ratelimit-reset' },
+    { type: 'exact', value: 'x-repo-commit' }, // 上游仓库内部信息，泄露源站结构
   ]),
   github: Object.freeze([
-    // 上游源站 HSTS（max-age=31536000），对用户域名无意义
-    'strict-transport-security',
-    // 已废弃安全头，与 CSP 冲突时反而有害
-    'x-xss-protection',
-    'x-github-request-id',
-    'x-github-edge-region',
-    'x-fastly-request-id',
-    'x-served-by',
-    'x-timer',
-    'x-cache',
-    'x-cache-hits',
-    'source-age',
-    // 1.1 varnish
-    'via',
+    { type: 'exact', value: 'strict-transport-security' }, // 上游源站 HSTS（max-age=31536000），对用户域名无意义
+    { type: 'exact', value: 'x-xss-protection' }, // 已废弃安全头，与 CSP 冲突时反而有害
+    { type: 'exact', value: 'x-github-request-id' },
+    { type: 'exact', value: 'x-github-edge-region' },
+    { type: 'exact', value: 'x-fastly-request-id' },
+    { type: 'exact', value: 'x-served-by' },
+    { type: 'exact', value: 'x-timer' },
+    { type: 'exact', value: 'x-cache' },
+    { type: 'exact', value: 'x-cache-hits' },
+    { type: 'exact', value: 'source-age' },
+    { type: 'exact', value: 'via' }, // 1.1 varnish
   ]),
 });
 
@@ -208,7 +199,7 @@ export function buildRepoPresetRules(engine, opts) {
             // 这里标记为需引擎注入，避免把 token 明文写进规则。
             Authorization: '__REPO_ENGINE_INJECT__',
           },
-          remove: [],
+          strip: [],
         },
       ],
     };
@@ -216,7 +207,7 @@ export function buildRepoPresetRules(engine, opts) {
 
   // —— 响应头修改阶段规则（剥离【本引擎特有】的仓库接口头；公开/私密通用） ——
   // 注意：只剥该引擎实测特有的头（cnb/github 不同），共有的已留在全站默认剥离。
-  const respRemoveList = REPO_RESP_HEADER_REMOVE[engine] || [];
+  const respStripList = REPO_RESP_HEADER_STRIP[engine] || [];
   const respHeadersRule = {
     id: `repo-${engine}-${repoName}-resp`,
     name: `${REPO_ENGINE_LABEL[engine]} 仓库特有响应头剥离`,
@@ -224,7 +215,7 @@ export function buildRepoPresetRules(engine, opts) {
     stage: 'respHeaders',
     priority: 1,
     match: matchConditions.length ? { type: 'all', conditions: matchConditions } : { type: 'all', conditions: [] },
-    actions: [{ type: 'setHeaders', set: {}, remove: [...respRemoveList] }],
+    actions: [{ type: 'setHeaders', set: {}, strip: [...respStripList] }],
   };
 
   return { rewrite: rewriteRule, reqHeaders: reqHeadersRule, respHeaders: respHeadersRule };
