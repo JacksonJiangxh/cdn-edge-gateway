@@ -36,12 +36,15 @@ const OUT = join(ROOT, 'dist-eo');
 
 // 精简版 edgeone.json：刻意不含 buildCommand / installCommand，
 // 使云端读取后不触发构建，直接托管已上传产物。
+// outputDirectory 必须指向静态资源所在目录（dist/public），EO 会把它作为静态根托管
+// /assets/app.js → dist-eo/dist/public/assets/app.js。若设为 '.' 则 EO 在 dist-eo/ 根
+// 找 /assets，导致 404。
 const EO_JSON = {
   name: 'cdn-edge-gateway',
   version: '1.0.0',
   description: '通用 CDN 回源加速网关 — EdgeOne Makers 部署配置（本地产物上传，不触发云端构建）',
   framework: 'others',
-  outputDirectory: '.',
+  outputDirectory: 'dist/public',
   env: {
     NODE_VERSION: '22',
     CLOUD_PLATFORM: 'eo',
@@ -72,8 +75,13 @@ async function main() {
   await cp(join(ROOT, 'edge-functions', '[[default]].js'), join(OUT, 'edge-functions', '[[default]].js'));
   // 2) 已打包 worker 产物（薄壳 import 的目标）
   await cp(join(ROOT, '_worker.js'), join(OUT, '_worker.js'));
-  // 3) 静态资源
-  await cp(join(ROOT, 'dist', 'public'), join(OUT, 'dist', 'public'), { recursive: true });
+  // 3) 静态资源：只拷贝 assets/，【刻意排除 dist/public/index.html】
+  //    index.html 是管理面页面本身（含 app.js 前端）。若把它放进 EO 静态根，EO 会把它
+  //    作为站点首页挂到 `/`，导致访问根路径直接暴露管理面登录页，绕过 core/app.js 的
+  //    adminPath 校验门（安全漏洞）。管理面 HTML 必须由 worker 在 /{adminPath} 动态渲染
+  //    （renderAdminPage → ui.gen.js 内联生成），assets 走 EO 静态托管即可。
+  await mkdir(join(OUT, 'dist', 'public', 'assets'), { recursive: true });
+  await cp(join(ROOT, 'dist', 'public', 'assets'), join(OUT, 'dist', 'public', 'assets'), { recursive: true });
   // 4) 精简 edgeone.json（无 buildCommand）
   await writeFile(join(OUT, 'edgeone.json'), JSON.stringify(EO_JSON, null, 2) + '\n', 'utf8');
 
