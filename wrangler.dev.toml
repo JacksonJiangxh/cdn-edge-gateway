@@ -37,6 +37,13 @@ enabled = true
 [assets]
 directory = "dist/public"
 binding = "ASSETS"
+# 与根 wrangler.toml 对齐：禁止 CF 自动用静态 index.html 接管路由。
+# html_handling = "none" 让管理面根 HTML 必须由 Worker 在 /{adminPath} 动态返回，
+# 否则 Miniflare 默认会把 index.html 挂到 /，导致访问根路径直接暴露管理面登录页、
+# 绕过 core/app.js 的 adminPath 校验门（安全漏洞）。not_found_handling = "none" 让资产
+# 未命中时交给 Worker 继续路由，而非直接 404。
+html_handling = "none"
+not_found_handling = "none"
 
 [[kv_namespaces]]
 binding = "CDN_KV"

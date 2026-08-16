@@ -46,11 +46,13 @@ export const DEFAULT_HOST_HEADER = Object.freeze({
 });
 
 /**
- * 站点级默认回源 Host：accel = 使用加速域名（默认）。
+ * 站点级默认回源 Host：origin = 沿用源站自身 addr（回源域名）。
+ * 仅作为 fetch / socket 引擎的兜底；仓库引擎（cnb/github）与 r2 站点下
+ * 前端不渲染该下拉，回源 host 由引擎在代码层强制约定。
  * @type {Readonly<{mode:'accel'|'origin'|'custom', custom?:string}>}
  */
 export const DEFAULT_SITE_HOST_HEADER = Object.freeze({
-  mode: 'accel',
+  mode: 'origin',
   custom: '',
 });
 

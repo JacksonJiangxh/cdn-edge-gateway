@@ -150,6 +150,10 @@ export   async function openSiteDrawer(host, anchor) {
         schemeField.style.display = (isR2 || isRepo) ? 'none' : '';
         r2BindingField.style.display = isR2 ? '' : 'none';
         repoFields.style.display = isRepo ? '' : 'none';
+        // 回源 Host 下拉：仓库型（cnb/github）与 r2 引擎由代码层引擎常量自动约定，不暴露给用户
+        const showHost = !(isR2 || isRepo);
+        hostModeField.style.display = showHost ? '' : 'none';
+        hostCustomField.style.display = showHost ? '' : 'none';
       };
       const syncHostCustom = () => { hostCustomField.style.display = fHostMode.value === 'custom' ? '' : 'none'; };
       const syncOriginMode = () => {
@@ -268,10 +272,13 @@ export   async function openSiteDrawer(host, anchor) {
             o[tokenField] = fRepoToken.value.trim();
           }
           basics.origins = [o];
-          basics.defaultHostHeader = {
-            mode: fHostMode.value,
-            custom: fHostMode.value === 'custom' ? fHostCustom.value.trim() : '',
-          };
+          // 仓库型（cnb/github）/ r2 引擎：回源 Host 由代码层引擎常量自动约定，强制 inherit
+          basics.defaultHostHeader = (eng === 'r2' || eng === 'cnb' || eng === 'github')
+            ? { mode: 'inherit', custom: '' }
+            : {
+                mode: fHostMode.value,
+                custom: fHostMode.value === 'custom' ? fHostCustom.value.trim() : '',
+              };
         }
       }
       if (editing) {
@@ -500,6 +507,14 @@ export   async function openInitialOriginDrawer(host, anchor) {
         return;
       }
       const engines = inlineEngines();
+      // 仓库型（cnb/github）与 r2 引擎：回源 Host 由代码层引擎常量自动约定，不暴露给用户
+      const allHidden = engines.length > 0 && engines.every((e) => e === 'cnb' || e === 'github' || e === 'r2');
+      if (allHidden) {
+        hhField.style.display = 'none';
+        hhNote.style.display = 'none';
+        hhCustomField.style.display = 'none';
+        return;
+      }
       // 全部源站都是 r2 → 回源 Host 完全无意义（不走 HTTP 回源），整块隐藏
       const allR2 = engines.length > 0 && engines.every((e) => e === 'r2');
       // 存在 socket 源站才允许 accel（Host ≠ 回源地址）

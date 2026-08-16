@@ -26,7 +26,7 @@ export const REPO_ENGINE_LABEL = Object.freeze({
  */
 export function repoUpstreamHost(engine, isPrivate) {
   if (engine === 'cnb') return isPrivate ? 'api.cnb.cool' : 'cnb.cool';
-  if (engine === 'github') return 'github.com';
+  if (engine === 'github') return 'raw.githubusercontent.com';
   return '';
 }
 
@@ -86,11 +86,11 @@ export function buildRepoPresetRules(engine, opts = {}) {
   const upHost = repoUpstreamHost(engine, isPrivate);
 
   // 重写路径：把站点路径 /{path} 映射到仓库 raw 文件 URL 的 path 部分。
-  // cnb 私有走 /-/git/raw/，公开走 /-/git/raw/ 之外；github 走 /raw/。
+  // cnb 私有走 /-/git/raw/；github 走 /{user}/{repo}/{branch}/{path}（无 /raw 段）。
   const regexTo =
     engine === 'cnb'
       ? `/${repoUser}/${repoName}/-/git/raw/${branch}/$1`
-      : `/${repoUser}/${repoName}/raw/${branch}/$1`;
+      : `/${repoUser}/${repoName}/${branch}/$1`;
 
   const rewrite = {
     id: `repo-${engine}-${repoName}-rewrite`,

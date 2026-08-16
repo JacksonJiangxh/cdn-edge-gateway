@@ -335,7 +335,11 @@ async function runPipeline(ctx) {
     // 用同站 fetch 委托 EO 边缘节点缓存；任何自定义 Host 都必须走 failover 路径。
     effectiveHostHeader?.mode === 'accel' && !effectiveHostHeader?.custom &&
     cacheKey &&
-    safeIsCacheable(ctx, cacheKey, new Response(null, { status: 200 }), policy);
+    safeIsCacheable(ctx, cacheKey, new Response(null, { status: 200 }), policy) &&
+    // 仓库引擎（cnb/github）/ r2 的回源 host 由代码层引擎常量决定（如 raw.githubusercontent.com），
+    // 与「同站加速域名」完全不同，绝不能走「同站 fetch 委托」——否则会回源打回自己导致死循环/超时。
+    // 这类引擎必须走 requestWithFailover 路径，由 buildOriginUrl 按引擎解析真实上游。
+    !['cnb', 'github', 'r2'].includes(primaryOriginActual?.engine);
 
   let originResp;
   if (delegateEoEdge) {

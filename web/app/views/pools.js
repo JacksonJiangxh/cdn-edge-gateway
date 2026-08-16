@@ -250,10 +250,12 @@ export
         addrField.style.display = (isR2 || isRepo) ? 'none' : '';
         portField.style.display = (isR2 || isRepo) ? 'none' : '';
         schemeField.style.display = (isR2 || isRepo) ? 'none' : '';
-        // 回源 Host 选择器对所有引擎可见；自定义域名输入框仅在 custom 模式显示
-        hostField.style.display = '';
-        hostNote.style.display = '';
-        fHostCustom.style.display = fHostMode.value === 'custom' ? '' : 'none';
+        // 回源 Host 选择器：仓库型（cnb/github）与 r2 引擎由代码层引擎常量自动约定，
+        // 不再暴露给用户选择（与后端 buildOriginUrl 引擎优先逻辑一致）。fetch/socket 才展示。
+        const showHost = !(isR2 || isRepo);
+        hostField.style.display = showHost ? '' : 'none';
+        hostNote.style.display = showHost ? '' : 'none';
+        fHostCustom.style.display = (showHost && fHostMode.value === 'custom') ? '' : 'none';
       };
       const syncHostMode = () => { fHostCustom.style.display = fHostMode.value === 'custom' ? '' : 'none'; };
       fHostMode.onchange = syncHostMode;
@@ -424,9 +426,12 @@ export
           addr: (engine === 'r2' || isRepo) ? '' : addr,
           port: Number($('.o-port', row).value) || 443,
           pathPrefix: legacy.pathPrefix || '',
-          // 回源 Host：取选择器值；cnb/github 由引擎常量固定回源域名，这里仍按用户选择旁置
-          // （后端 normOrigin 对仓库引擎强制 inherit）。默认/留空 = origin（回源域名）。
+          // 回源 Host：
+          //   · 仓库型（cnb/github）/ r2 引擎 → 由代码层引擎常量自动约定，
+          //     强制 inherit，不读取前端的 Host 下拉（前端也已隐藏该下拉）。
+          //   · fetch / socket → 取选择器值，默认/留空 = origin（回源域名）。
           hostHeader: (() => {
+            if (isRepo || engine === 'r2') return { mode: 'inherit', custom: '' };
             const m = $('.o-host-mode', row) ? $('.o-host-mode', row).value : 'origin';
             const c = $('.o-host-custom', row) ? ($('.o-host-custom', row).value || '').trim() : '';
             if (m === 'custom') return { mode: 'custom', custom: c };
