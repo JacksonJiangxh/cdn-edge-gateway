@@ -478,14 +478,23 @@ $:
             PROJECT="${eo_pages_project:-${EO_PAGES_PROJECT:-cdn-edge-gateway}}"
             TARGET_ENV="${eo_env:-preview}"
             echo "项目: $PROJECT / 环境: $TARGET_ENV"
-            # 部署目录必须是仓库根，不能是 dist/public：
-            # EO Makers 需要根目录的 edge-functions/[[default]].js 承载全部动态请求，
-            # 并自动托管 dist/public/ 静态资源（与函数路由冲突时静态优先）。
-            edgeone makers deploy . \
+
+            # 【关键】对齐 Cloudflare 的「构建好只上传」语义，避免 EO 云端重复构建
+            # 消耗构建次数、并在云端重跑 e2e 校验：
+            #   1) 本地先 npm run build（产出 _worker.js + dist/public）
+            #   2) node scripts/package-eo.mjs 把薄壳 + 产物 + 静态资源 + 无 buildCommand 的
+            #      精简 edgeone.json 打包进 dist-eo/（云端读到该目录不再触发构建）
+            #   3) edgeone makers deploy dist-eo 只上传产物，云端不再 npm install / npm run build
+            command -v node >/dev/null 2>&1 || { echo "✗ 该部署镜像不含 node，无法本地构建；请改用基于 node 的镜像或前置 build stage"; exit 1; }
+            npm ci
+            npm run build
+            node scripts/package-eo.mjs
+
+            edgeone makers deploy dist-eo \
               -n "$PROJECT" \
               -t "$EO_SECRET" \
               -e "$TARGET_ENV"
-            echo "✓ EO Pages 部署完成（项目: $PROJECT / 环境: $TARGET_ENV）"
+            echo "✓ EO Pages 部署完成（项目: $PROJECT / 环境: $TARGET_ENV，本地构建产物上传，未触发云端构建）"
 
   # ---- 按钮：部署阿里云 ESA Pages ----
   # 说明：CNB 此前缺 ESA Pages 按钮（GitHub 侧已有 deploy-esa-pages.yml），本次补齐对齐。

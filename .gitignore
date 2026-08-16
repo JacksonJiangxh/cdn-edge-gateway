@@ -20,6 +20,8 @@ web/_stage.gen.js
 web/_app.entry.js
 web/_stage.entry.js
 dist/
+# EO Makers 仅上传产物部署包（由 scripts/package-eo.mjs 本地构建生成）
+dist-eo/
 
 # 文档站构建产物（MkDocs 生成，不纳入版本管理）
 docs-site/site/

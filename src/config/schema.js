@@ -1719,6 +1719,17 @@ export function validateGlobal(input, caps, current) {
   let globalRateLimit = int(input.globalRateLimit, d.globalRateLimit, 0, 1000000);
   if (globalRateLimit > 0 && globalRateLimit < 10) globalRateLimit = 10;
 
+  // 统计驱动自适应：统计落盘只支持 D1。平台无 D1 绑定时，用户即便选了 'd1' 也
+  // 无法落盘——按产品语义「没有就不可用」自动归一到 'none'（统计功能关闭），
+  // 而非报错阻断保存。这样 EdgeOne / ESA 等无 D1 平台也能正常保存全局配置。
+  let statsDriver = enumOf(input.statsDriver, ['d1', 'none'], d.statsDriver);
+  if (caps && caps.hasD1 === false && statsDriver === 'd1') {
+    statsDriver = 'none';
+    console.warn(
+      `[config] 平台（${caps.platform || 'unknown'}）未绑定 D1，统计驱动自动归一到 'none'（统计功能不可用，绝不写 KV）`
+    );
+  }
+
   const value = {
     adminPath,
     adminDomain,
@@ -1726,7 +1737,7 @@ export function validateGlobal(input, caps, current) {
     passwordSalt: str(input.passwordSalt, '', 512),
     tokenTtl,
     statsEnabled: bool(input.statsEnabled, d.statsEnabled),
-    statsDriver: enumOf(input.statsDriver, ['d1', 'none'], d.statsDriver),
+    statsDriver,
     configCacheTtl,
     globalRateLimit,
     disguise: normDisguise(input.disguise),

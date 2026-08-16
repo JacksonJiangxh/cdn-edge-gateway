@@ -4,7 +4,7 @@
  * 安全要点：
  *  - GET 返回时剥离 passwordHash / passwordSalt，避免凭据随响应外泄
  *  - PUT 通过 validateGlobal(input, caps) 做平台能力联动校验
- *    （如 EdgeOne 上选 d1 统计驱动会被拦截）
+ *    （如 EdgeOne 无 D1 时，statsDriver 会被自动归一到 'none'，统计功能不可用）
  */
 
 import { ok, fail } from '../../utils/response.js';
