@@ -64,9 +64,16 @@ RUN mkdir -p /opt/playwright-browsers \
  && npx playwright install --with-deps chromium \
  && echo "✓ chromium 已固化进镜像: $PLAYWRIGHT_BROWSERS_PATH"
 
-# ---------- 4) 全局 esa-cli（ESA 按钮复用） ----------
+# ---------- 4) 全局 CLI 固化（ESA / EO 部署复用） ----------
+# esa-cli：ESA 按钮免 npm install -g
 RUN npm install -g esa-cli \
  && echo "✓ esa-cli 已固化进镜像"
+# edgeone：EO Makers 部署 CLI（edgeone makers deploy）。预装进镜像，
+# 避免部署 stage 每次 `npx -y edgeone@latest` 临时下载（约数十 MB、耗时且依赖联网）。
+# 与 esa-cli 同级全局安装，运行时容器直接在 PATH 拿到 `edgeone` 命令。
+# 注意：edgeone 不进 package.json devDependencies，避免影响其他 stage 的依赖树与镜像重建触发条件。
+RUN npm install -g edgeone@latest \
+ && echo "✓ edgeone 已固化进镜像"
 
 # 运行时容器把镜像内 /space/node_modules cp 到工作区即可（见 .cnb.yml 的 use cache 阶段）
 ENV NODE_PATH=/space/node_modules

@@ -494,12 +494,13 @@ $:
 
             # 官方标准 CLI：edgeone makers deploy（包名 edgeone，本地构建产物后上传，
             # 不消耗 EO 云端构建次数；云端构建次数仅在 Git 集成模式下才计）。
+            # edgeone 已预装在 docker:cache 镜像（cache.dockerfile 第 4 步），直接用、不 npx 下载。
             # 非交互/CI 环境必须加 --json（见 edgeone-makers-tools skill），否则 stdout 带
             # 动画会被 runner 误判卡住；PAGES_SOURCE=skills 为官方要求的上下文变量。
             # 上传本地产物包 dist-eo/（含薄壳+_worker.js+静态资源+无 buildCommand 的精简
             # edgeone.json），CLI 直接上传、不再本地重新 build（npm run build 含 e2e 会退出）。
             export PAGES_SOURCE=skills
-            npx -y edgeone@latest makers deploy dist-eo \
+            edgeone makers deploy dist-eo \
               -n "$PROJECT" \
               -t "$EO_SECRET" \
               -e "$TARGET_ENV" \
