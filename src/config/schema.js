@@ -1383,7 +1383,11 @@ function normOrigin(input, idx) {
 
   // hostHeader
   const hhIn = isObj(input.hostHeader) ? input.hostHeader : {};
-  const hhMode = enumOf(hhIn.mode, ['inherit', 'origin', 'client', 'custom'], 'inherit');
+  // 仓库型引擎（cnb/github）回源 host 由引擎常量（resolveRepoDomain）固定，
+  // 源站级 hostHeader 保持 inherit 让其走引擎常量；其余引擎（fetch/socket 等）
+  // 默认 origin（回源域名 = 源站自身 addr），避免被站点级 defaultHostHeader（accel）兜底吃掉。
+  const hhDefaultMode = (engine === 'cnb' || engine === 'github') ? 'inherit' : 'origin';
+  const hhMode = enumOf(hhIn.mode, ['inherit', 'origin', 'client', 'custom'], hhDefaultMode);
   const hhCustom = str(hhIn.custom, '', LIMITS.HOST_MAX).toLowerCase();
   if (hhMode === 'custom' && !hhCustom) {
     errors.push(`${label} hostHeader 为 custom 时必须填写 custom 值`);

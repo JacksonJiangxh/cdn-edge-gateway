@@ -219,10 +219,18 @@ export
       const addrField = field('源站地址', addrInput, '格式随「引擎类型」变化，见上方提示。');
       const portField = field('端口', el('input', { class: 'input o-port', type: 'number', value: o.port || 443 }), 'https 默认 443，http 默认 80。可被⑨规则覆盖。');
       const schemeField = field('协议', select('', [''], o.scheme || 'https', [{ value: 'https', label: 'https' }, { value: 'http', label: 'http' }], 'o-scheme'), '可被⑨规则覆盖。');
-      const hostField = field('回源 Host（该源站专用）', el('input', { class: 'input o-host', value: o.hostHeader?.custom || '', placeholder: '如 api1.internal（留空=用规则/站点级 Host）' }), '仅这台源站回源时使用的 Host 头（整池默认）。同组多源站各自 Host 不同时填这里；⑨规则再设 Host 会覆盖它。');
-      // fetch 引擎无法手写 Host 头（平台强制 Host = 回源 URL hostname），
-      // 该字段只有 socket 引擎能真正生效，故仅 socket 时显示。
-      const hostNote = el('div', { class: 'hint', text: 'fetch 引擎下该 Host 由回源地址决定、无法自定义；如需自定义 Host 请把引擎改为 socket。' });
+      // 回源 Host 三选项（与「新建站点」单一源站保持一致）：
+      //   accel  = 加速域名（站点 Host）
+      //   origin = 回源域名（源站自身 addr，默认）
+      //   custom = 自定义域名（仅 socket 真正生效；fetch 平台会静默丢弃）
+      const fHostMode = select('', [], (o.hostHeader?.mode || 'origin'), [
+        { value: 'accel', label: '加速域名（站点 Host）' },
+        { value: 'origin', label: '回源域名（源站自身地址）' },
+        { value: 'custom', label: '自定义域名' },
+      ], 'o-host-mode');
+      const fHostCustom = el('input', { class: 'input o-host-custom', value: o.hostHeader?.mode === 'custom' ? (o.hostHeader.custom || '') : '', placeholder: '如 api1.internal' });
+      const hostField = field('回源 Host（该源站专用）', el('div', { class: 'host-mode-wrap' }, [fHostMode, fHostCustom]), '这台源站回源时使用的 Host 头；默认「回源域名」即用源站自身地址，避免误用加速域名去公网源站拉数据。⑨规则再设 Host 会覆盖它。');
+      const hostNote = el('div', { class: 'hint', text: 'fetch 引擎下自定义 Host 由回源地址决定、平台会静默丢弃；如需真正自定义 Host 请把引擎改为 socket。cnb/github 由引擎常量固定回源域名，此处选择仅作示意。' });
       // 别名（仅展示用，方便在列表里区分）
       // 源站名称（折叠时显示在标题行；对标规则卡「规则名称」）
       const nameInput = el('input', { class: 'input o-name', value: o.name || '', placeholder: '如 主站 / 北京备份' });
@@ -242,9 +250,13 @@ export
         addrField.style.display = (isR2 || isRepo) ? 'none' : '';
         portField.style.display = (isR2 || isRepo) ? 'none' : '';
         schemeField.style.display = (isR2 || isRepo) ? 'none' : '';
-        hostField.style.display = eng === 'socket' ? '' : 'none';
-        hostNote.style.display = eng === 'fetch' ? '' : 'none';
+        // 回源 Host 选择器对所有引擎可见；自定义域名输入框仅在 custom 模式显示
+        hostField.style.display = '';
+        hostNote.style.display = '';
+        fHostCustom.style.display = fHostMode.value === 'custom' ? '' : 'none';
       };
+      const syncHostMode = () => { fHostCustom.style.display = fHostMode.value === 'custom' ? '' : 'none'; };
+      fHostMode.onchange = syncHostMode;
       engineSel.onchange = syncEngine;
       // —— 整行可折叠（严格照规则卡 rule-card：header 常驻显示名称，detail 里才是名称/备注输入框）——
       const isExisting = !!(o && o.id);
@@ -412,9 +424,16 @@ export
           addr: (engine === 'r2' || isRepo) ? '' : addr,
           port: Number($('.o-port', row).value) || 443,
           pathPrefix: legacy.pathPrefix || '',
-          hostHeader: ($('.o-host', row).value || '').trim()
-            ? { mode: 'custom', custom: ($('.o-host', row).value || '').trim() }
-            : (legacy.hostHeader || { mode: 'inherit', custom: '' }),
+          // 回源 Host：取选择器值；cnb/github 由引擎常量固定回源域名，这里仍按用户选择旁置
+          // （后端 normOrigin 对仓库引擎强制 inherit）。默认/留空 = origin（回源域名）。
+          hostHeader: (() => {
+            const m = $('.o-host-mode', row) ? $('.o-host-mode', row).value : 'origin';
+            const c = $('.o-host-custom', row) ? ($('.o-host-custom', row).value || '').trim() : '';
+            if (m === 'custom') return { mode: 'custom', custom: c };
+            if (m === 'accel') return { mode: 'accel', custom: '' };
+            if (m === 'inherit') return { mode: 'inherit', custom: '' };
+            return { mode: 'origin', custom: '' };
+          })(),
           extraHeaders: legacy.extraHeaders || {},
           ...(engine === 'r2'
             ? {
