@@ -53,7 +53,12 @@ import { registerDomain, allocBytes, releaseBytes, syncEntries } from '../platfo
 // 写入流程统一为：改本地内存(立即生效本 isolate) → 落库 KV → 自增版本号。
 // ============================================================================
 
-/** 全局版本号 key（单一值，跨 isolate 真相源广播位）。 */
+/**
+ * 全局版本号 key（单一值，跨 isolate 真相源广播位）。
+ * 值语义：分钟级 UTC 时间戳（Math.floor(Date.now()/1000/60)），整数。
+ * 同一分钟内任意写入值相同，仅用于跨 isolate 相等性比对以判断配置是否变化；
+ * 不表示「连续递增序列」，旧的数字版本号在首次写入时被时间戳直接覆盖。
+ */
 const K_VERSION = 'cfg:version';
 
 /**
@@ -133,18 +138,28 @@ async function readVersion(ctx) {
 }
 
 /**
- * 自增全局版本号（写入完成后调用）。
+ * 当前分钟级 UTC 时间戳作为配置版本号。
+ * 取 Date.now()（毫秒）向下取整到分钟：Math.floor(now / 1000 / 60)。
+ * 同一分钟内的任意时刻结果相同（余数被 floor 截断），跨分钟边界 +1。
+ * 仅用于跨 isolate 判断「配置是否变化」，不依赖连续递增或大小比较。
+ * @returns {number} 整数，分钟级时间戳
+ */
+function currentMinuteVersion() {
+  return Math.floor(Date.now() / 1000 / 60);
+}
+
+/**
+ * 以分钟级 UTC 时间戳刷新全局版本号（写入完成后调用）。
  * 失败不抛（版本号只是优化，写入本身已落库），仅吞掉并记录。
+ * 旧的数字版本号在首次调用时被时间戳直接覆盖，不兼容、不迁移。
  * @param {import('../contracts.js').Ctx} ctx
  * @returns {Promise<void>}
  */
 async function bumpVersion(ctx) {
   try {
-    // 本地先 +1（即使 KV 读失败也能推进本地视图）
-    let next;
-    const cur = await readJson(ctx, K_VERSION);
-    if (typeof cur === 'number' && Number.isFinite(cur)) next = cur + 1;
-    else next = 1;
+    // 直接写入当前分钟级时间戳（不读旧值、不 +1）。
+    // 同 1 分钟内多次写入为同一值，仅分钟边界变化时才触发其它 isolate 重拉。
+    const next = currentMinuteVersion();
     await writeJson(ctx, K_VERSION, next);
     // 刷新本地版本号状态：立即看到自己刚写入的新版本，并进入激进档（2s），
     // 使本 isolate 后续请求快速稳定（其它 isolate 经 KV 版本号同步后各自收敛）。
@@ -153,7 +168,7 @@ async function bumpVersion(ctx) {
     _verState.rapidLeft = VERSION_RAPID_ROUNDS;
     _verState.expireAt = Date.now() + VERSION_POLL_LEVELS_MS[0];
   } catch (err) {
-    console.error('[store] 自增配置版本号失败（已忽略，写入本身已落库）:', err?.message);
+    console.error('[store] 刷新配置版本号失败（已忽略，写入本身已落库）:', err?.message);
   }
 }
 
