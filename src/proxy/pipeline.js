@@ -19,14 +19,14 @@
  * 设计原则：任何一步抛异常都必须被兜住，返回 502/500 而不是让 Worker 崩溃。
  */
 
-import { matchSite, matchRuleByStage } from './matcher.js';
+import { matchSite } from './matcher.js';
+import { buildRuleForOrigin } from './ruleEval.js';
 import { buildClientHeaders, getBrandHeaders, applyHeaderOps } from './headers.js';
 import { buildCacheKey, shouldBypassCache } from './cachekey.js';
-import { buildOriginUrl, resolveHostHeader, mergeRewrite, mergeHeaderOps, mergeStageHeaderOps } from './rewrite.js';
+import { buildOriginUrl, resolveHostHeader, mergeRewrite, mergeHeaderOps } from './rewrite.js';
 import { getPool, getGlobal, getGlobalRules } from '../config/store.js';
 import { renderDisguise } from './disguise.js';
-import { DEFAULT_GLOBAL_RULES, deepClone } from '../config/defaults.js';
-import { STAGE_ORDER } from '../config/stages.js';
+import { DEFAULT_GLOBAL_RULES } from '../config/defaults.js';
 import { cacheMatch, cachePut, isCacheable } from '../platform/cache.js';
 import { checkSecurity } from '../security/guard.js';
 import { checkGlobalRateLimit } from '../security/ratelimit.js';
@@ -191,49 +191,12 @@ async function runPipeline(ctx) {
   //
   // 站内各阶段规则经 buildActionByStage 已按 rule.stage 裁剪（action 只含该阶段字段），
   // 因此每条命中规则的 action 可直接合并到 eff 而不污染其它阶段。
-  const effAction = {};
-  ctx.debug.ruleSource = ctx.debug.ruleSource || {};
-  for (const stage of STAGE_ORDER) {
-    const eff = deepClone(globalStages[stage] || {});
-    const sr = matchRuleByStage(site, stage, ctx);
-    if (sr && sr.action) {
-      // sr.action 的 key 即阶段名（如 'reqHeaders' / 'terminate'），其值是「该阶段的扁平对象」。
-      // 而 eff 已经是「全站同阶段扁平对象」（deepClone(globalStages[stage])）。
-      // 因此每个阶段都是把 eff（全站）与站点同阶段对象合并——这才是「全站默认 + 站点覆盖」的语义。
-      // 注意：绝不能写成 eff[k] = sr.action[k]——eff 本身已是该阶段对象，k 是它的「阶段名包装」，
-      // 嵌套赋值会把站点值错误地塞进 eff.terminate，而 eff 顶层全站字段（如 forceHttps）反而没被覆盖。
-      for (const k of Object.keys(sr.action)) {
-        const siteStageObj = sr.action[k];
-        if (!siteStageObj || typeof siteStageObj !== 'object') continue;
-        if (stage === 'reqHeaders' || stage === 'respHeaders') {
-          // HeaderOps 段：整段并集（set 站点覆盖全站同名 key、全站其余保留；
-          // 站点 strip 中的 exact 项在合并期即从 set 剔除全站被点名 key）
-          const merged = mergeStageHeaderOps(eff, siteStageObj);
-          eff.set = merged.set;
-          eff.strip = merged.strip;
-          if (siteStageObj.forwardWhitelist !== undefined) eff.forwardWhitelist = siteStageObj.forwardWhitelist;
-        } else {
-          // 标量段（rewrite/redirect/terminate/origin/cache 等）：整段逐字段覆盖（含子对象整段覆盖），
-          // 未设字段沿用全站 eff 中的值。
-          for (const fk of Object.keys(siteStageObj)) {
-            eff[fk] = deepClone(siteStageObj[fk]);
-          }
-        }
-      }
-      ctx.debug.ruleSource[stage] = 'site';
-    } else {
-      // 该阶段站点规则集未命中 → 全站结果保留进入下一阶段。
-      ctx.debug.ruleSource[stage] = 'global';
-    }
-    // 每个阶段的结果都以「整段」形式挂到 effAction[stage]，与 STAGE_ORDER 一一对应：
-    //   effAction.rewrite / redirect / terminate / reqHeaders / origin / cache / respHeaders
-    // 这样下游（buildClientHeaders 读 effAction.cache、mergeRewrite 读 effAction.rewrite、
-    // applyTerminalActions 读 effAction.terminate / effAction.redirect 等）按统一「阶段名 → 整段」路径取值，
-    // 不会出现「标量段被展开到 effAction 顶层、而消费代码又整段读取」的错位。
-    // 注：HeaderOps 段（reqHeaders/respHeaders）同样是整段 {set, strip} 存放，与此一致。
-    effAction[stage] = eff;
-  }
-  const rule = { action: effAction, _source: ctx.debug.ruleId ? 'site' : 'global' };
+  // 该合并逻辑已抽到 ./ruleEval.js，因为「按源站求值」必须同时被本管线与
+  // 故障转移（每次尝试 / 竞速每条通道）复用——站点规则可用 origin 作为匹配
+  // 条件（如 CNB / GitHub 的 raw 路径格式不同），若求值依据的源站与实际拨号
+  // 的源站不一致，就会把 A 源站的路径打到 B 源站域名上而 404。
+  const rule = buildRuleForOrigin(ctx, site, primaryOriginActual);
+  const effAction = rule.action;
   const ruleSource = rule._source;
 
   // ---- 4.5 终止型动作 ----
@@ -346,7 +309,13 @@ async function runPipeline(ctx) {
     ctx.debug.cachePath = 'A_EO_EDGE';
     originResp = await eoEdgeFetch(ctx, ctx.request, policy);
   } else {
-    originResp = await requestWithFailover(ctx, pool, rule, effectiveHostHeader);
+    // 传入 site 与「已选中的首选源站」：failover 首次尝试直接复用 primaryOriginActual
+    // （避免同一请求内重复推进 SWRR 权重、也保证缓存键与首次回源用同一源站），
+    // 并在每次换源 / 竞速的每条通道上按该源站重新求值规则。
+    originResp = await requestWithFailover(ctx, pool, rule, effectiveHostHeader, {
+      site,
+      preferredOrigin: primaryOriginActual,
+    });
   }
 
   // ---- 7.5 serve-stale-on-error（SWR 行为兜底）----

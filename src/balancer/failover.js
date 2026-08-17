@@ -33,6 +33,7 @@ import { ERROR_STATUS_RANGE, isErrorStatus } from '../contracts.js';
 import { selectOrigin, primeChainWeights } from './strategy.js';
 import { isTripped, recordFailure, recordSuccess, penalize, isPenalized } from './circuit.js';
 import { buildOriginUrl, resolveHostHeader, mergeRewrite, mergeHeaderOps } from '../proxy/rewrite.js';
+import { evalStagesForOrigin } from '../proxy/ruleEval.js';
 import { buildOriginHeaders } from '../proxy/headers.js';
 import { DEFAULT_CLIENT_IP_HEADER } from '../config/stages-defaults.js';
 import { fetchOrigin } from '../proxy/engines/fetchEngine.js';
@@ -87,11 +88,18 @@ function isSpeculable(ctx, bodyBuf) {
  *
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
  * @param {Object} pool 源站池
- * @param {Object} [rule] 命中的规则
+ * @param {Object} [rule] 管线按「首选源站」求值出的规则（作为 site 缺省时的回退）
  * @param {Object} [hostHeader] 已解析的回源 Host 配置 {mode, custom}
+ * @param {Object} [opts] 附加项
+ * @param {Object} [opts.site] 命中的站点配置。传入后，每次尝试都会按「本次实际使用的
+ *   源站」重新求值阶段规则（rewrite / reqHeaders / hostHeader），保证回源路径与鉴权头
+ *   永远与目标域名匹配。未传入时退化为沿用 rule（与历史行为一致）。
+ * @param {Object} [opts.preferredOrigin] 管线已选中的首选源站：首次尝试直接复用，
+ *   避免同一请求内重复推进 SWRR 权重，并保证缓存键与首次回源使用同一源站。
  * @returns {Promise<Response>} 源站响应；全部失败时返回 502（或触发 serve-stale 兜底）
  */
-export async function requestWithFailover(ctx, pool, rule, hostHeader) {
+export async function requestWithFailover(ctx, pool, rule, hostHeader, opts = {}) {
+  const { site = null, preferredOrigin = null } = opts;
   const failover = pool?.failover || {};
   // 单一源站（无第二个地址可回退）：重试 / 换源无意义，强制关闭 failover，只打一次。
   // 否则 fail-open 会把同一个挂掉的源站连打 maxRetries 遍，只有害处没有收益。
@@ -108,6 +116,11 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
   const retryOnErrorRange =
     rawRetryOn.includes(ERROR_STATUS_RANGE) || rawRetryOn.includes('*') || rawRetryOn.includes('all');
   const retryOn = retryOnErrorRange ? null : new Set(rawRetryOn);
+  // 统一换源判据：串行分支与竞速分支共用，避免语义分叉。
+  // 仓库引擎场景下 404 意味着「本源站没有该文件」，应触发换源到下一个源站
+  // （CNB 没有就去 GitHub 找）—— 这已由池级缺省 retryOn=['4xx5xx'] 覆盖。
+  const isRetryableStatus = (status) =>
+    enabled && ((retryOnErrorRange && isErrorStatus(status)) || (retryOn && retryOn.has(status)));
   // maxRetries：优先用源站池显式配置；缺失时按「源站数 - 1」自动推导（试遍所有 enabled 源站），
   // 与文件头声明的真实模型一致，不使用任何硬编码默认次数。
   const maxRetries = enabled
@@ -161,10 +174,19 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
   const speculable = enabled && speculativeMs > 0 && isSpeculable(ctx, bodyBuf);
 
   for (let attempt = 0; attempt < totalAttempts; attempt++) {
-    const selected = selectOrigin(pool, ctx, excludeIds);
+    // 首次尝试复用管线已选中的首选源站：管线为了「按 origin 匹配规则」和「构造缓存键」
+    // 已经选过一次源（推进过 SWRR 权重）。这里若再选一次，不仅会二次推进权重使轮询分布
+    // 失真，更会让「求值规则时的源站」与「实际拨号的源站」不一致 —— 那正是多源站
+    // 场景下 CNB 路径被打到 GitHub 域名而 404 的根因。
+    const selected = (attempt === 0 && preferredOrigin && !excludeIds.includes(preferredOrigin.id))
+      ? preferredOrigin
+      : selectOrigin(pool, ctx, excludeIds);
     if (!selected) break;
 
-    const ra = rule?.action || {};
+    // 按「本次实际要拨号的源站」重新求值规则：站点规则可用 origin 作为匹配条件，
+    // 不同源站的 rewrite / 鉴权头可能完全不同（如 CNB 与 GitHub 的 raw 路径格式）。
+    // 只有逐尝试重新求值，才能保证 path / header 永远与目标域名匹配。
+    const ra = resolveActionForOrigin(ctx, site, rule, selected);
     const ruleOrigin = ra.origin || {};
     const effScheme = ruleOrigin.scheme || selected.scheme || 'https';
     const effPort = Number(ruleOrigin.port) > 0 ? Number(ruleOrigin.port)
@@ -194,7 +216,8 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
     const followRedirect = ruleOrigin.followRedirect === true;
 
     const effectiveRule = { action: { rewrite: mergedRewrite } };
-    const originHostHeader = resolveHostHeader(rule?.action?.hostHeader, origin.hostHeader, hostHeader);
+    // hostHeader 亦取自「按本源站求值」的结果（ra），而非请求级冻结的 rule。
+    const originHostHeader = resolveHostHeader(ra.hostHeader, origin.hostHeader, hostHeader);
     const originUrl = buildOriginUrl(ctx, origin, effectiveRule, originHostHeader);
 
     const headers = await buildOriginHeaders(
@@ -211,6 +234,13 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
         hostHeader: originHostHeader,
         speculativeMs,
         remaining,
+        // 第二通道必须按「它自己的源站」重新求值规则并自建 URL / Headers，
+        // 绝不能复用首路的 originUrl（否则 CNB 路径会打到 GitHub 域名 → 必然 404，
+        // 且 CNB 的 Authorization 会泄漏给 GitHub）。
+        site,
+        rule,
+        hostHeaderFallback: hostHeader,
+        isRetryableStatus,
       });
       if (raceResult) {
         if (raceResult.ok) {
@@ -221,6 +251,10 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
         noteOriginFailure(ctx, pool, origin, penaltySeconds);
         if (raceResult.secondary && raceResult.secondaryFailed) {
           noteOriginFailure(ctx, pool, raceResult.secondary, penaltySeconds);
+          // 第二路已实际拨号过且失败：并入排除列表，避免下一轮又选中它白跑一次。
+          if (!excludeIds.includes(raceResult.secondary.id)) {
+            excludeIds.push(raceResult.secondary.id);
+          }
         }
         lastResponse = raceResult.lastResponse;
         lastError = raceResult.lastError;
@@ -237,7 +271,7 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
       });
 
       // 换源判据：启用 且 (指定全错误码范围且为错误响应，或命中显式码清单)
-      if (enabled && ((retryOnErrorRange && isErrorStatus(resp.status)) || retryOn.has(resp.status))) {
+      if (isRetryableStatus(resp.status)) {
         noteOriginFailure(ctx, pool, origin, penaltySeconds, resp);
         await resp.body?.cancel().catch(() => {});
         lastResponse = {
@@ -281,6 +315,39 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader) {
       },
     }
   );
+}
+
+/**
+ * 按「本次实际要拨号的源站」求值该源站生效的规则动作。
+ *
+ * 这是本模块修复多源站 404 的关键：站点规则可以用 `origin` 作为匹配条件，
+ * 不同源站的 rewrite 目标路径与鉴权头可能完全不同（典型如仓库型源站池中
+ * CNB 的 `/-/git/raw/<branch>/` 与 GitHub 的 `/<branch>/`）。若沿用「请求级
+ * 只求值一次」的冻结规则，换源后就会把上一个源站的路径打到新源站的域名上。
+ *
+ * 传入 site 时按该源站重新求值；未传入（旧调用方 / 单元测试）时退化为沿用
+ * 请求级 rule，保持向后兼容。
+ *
+ * @param {import('../contracts.js').Ctx} ctx 请求上下文
+ * @param {Object|null} site 命中的站点配置（缺省则退化）
+ * @param {Object} [rule] 请求级已求值的规则（退化路径使用）
+ * @param {Object} origin 本次尝试使用的源站
+ * @returns {Object} 该源站生效的 action（含 rewrite / reqHeaders / origin / hostHeader…）
+ */
+function resolveActionForOrigin(ctx, site, rule, origin) {
+  if (!site) {
+    // 退化路径：无站点上下文时沿用请求级规则，但仍同步 ctx.origin，
+    // 保证下游调试头 / 统计反映真实使用的源站。
+    ctx.origin = origin;
+    return rule?.action || {};
+  }
+  try {
+    return evalStagesForOrigin(ctx, site, origin) || {};
+  } catch {
+    // 规则求值失败不应中断回源：退回请求级规则（宁可用旧规则回源，也不要 500）。
+    ctx.origin = origin;
+    return rule?.action || {};
+  }
 }
 
 /**
@@ -352,6 +419,17 @@ async function speculativeRace(ctx, pool, excludeIds, primary, originUrl, header
         lastError: primaryErr,
       };
     }
+    // 首路先于竞速定时器返回：仍须做换源判据 —— 错误响应（含 404）不能算成功，
+    // 否则「本源站没有该文件」会被当成最终结果返回，绕过故障转移。
+    const earlyRetryable = typeof opts.isRetryableStatus === 'function'
+      ? opts.isRetryableStatus
+      : () => false;
+    if (primaryResp && earlyRetryable(primaryResp.status)) {
+      const snap = snapshotResp(primaryResp);
+      primaryResp.body?.cancel().catch(() => {});
+      // 第二路尚未启动，不存在 secondary 失败，交由外层继续换源。
+      return { ok: false, primaryFailed: true, lastResponse: snap };
+    }
     // 首路成功：不能 abort 已返回响应的 fetch，否则会中断正在传输的响应
     // body 流（与 ctrl.signal 关联），导致下游读取 AbortError / 502/500。
     // 第二路尚未启动（primaryDone 时 raced 仍为 false），无需取消。
@@ -362,11 +440,33 @@ async function speculativeRace(ctx, pool, excludeIds, primary, originUrl, header
   if (!Array.isArray(ctx.debug.notes)) ctx.debug.notes = [];
   ctx.debug.notes.push(`speculative:${primary.id}->${secondary.id}`);
 
-  // 第二路：构造独立 URL/headers（复用一个请求对象需谨慎，headers.get 幂等，可复用）
-  const secHostHeader = opts.hostHeader;
-  const secUrl = originUrl; // primary/secondary 同池同 rule，URL 一致；仅 origin 不同在 dispatch 内解析
-  const secondaryTask = dispatch(ctx, secondary, secUrl, headers, opts.timeoutMs, {
-    followRedirect: opts.followRedirect,
+  // ---- 第二路：必须按「它自己的源站」独立求值规则并自建 URL / Headers ----
+  // 过去这里写的是 `const secUrl = originUrl`，注释称「同池同 rule，URL 一致」——
+  // 该前提在「规则以 origin 为匹配条件」时是错误的：仓库型源站池里 CNB 与 GitHub
+  // 的 raw 路径格式完全不同，复用首路 URL 会 100% 打错路径（必然 404），
+  // 且首路的 Authorization（CNB token）会被泄漏到 GitHub 请求上。
+  const secAction = resolveActionForOrigin(ctx, opts.site, opts.rule, secondary);
+  const secRuleOrigin = secAction.origin || {};
+  const secScheme = secRuleOrigin.scheme || secondary.scheme || 'https';
+  const secPort = Number(secRuleOrigin.port) > 0 ? Number(secRuleOrigin.port)
+    : Number(secondary.port) > 0 ? Number(secondary.port)
+    : (secScheme === 'http' ? 80 : 443);
+  const secEngine = secRuleOrigin.engine || secondary.engine || 'fetch';
+  const secOrigin = { ...secondary, scheme: secScheme, port: secPort, engine: secEngine };
+
+  const secHostHeader = resolveHostHeader(secAction.hostHeader, secOrigin.hostHeader, opts.hostHeaderFallback);
+  const secUrl = buildOriginUrl(
+    ctx, secOrigin, { action: { rewrite: mergeRewrite(undefined, secAction.rewrite) } }, secHostHeader
+  );
+  // 独立 Headers 实例（buildOriginHeaders 每次返回新的 Headers），
+  // 确保两条通道的鉴权头互不串扰。
+  const secHeaders = await buildOriginHeaders(
+    ctx, secOrigin, mergeHeaderOps(undefined, secAction.reqHeaders), ctx.env,
+    mergeClientIpHeader(secRuleOrigin.clientIpHeader)
+  );
+
+  const secondaryTask = dispatch(ctx, secOrigin, secUrl, secHeaders, opts.timeoutMs, {
+    followRedirect: secRuleOrigin.followRedirect === true,
     bodyBuf: opts.bodyBuf,
     hostHeader: secHostHeader,
     // 第二路不接竞速 controller（竞速取消只取消首路，慢路 abort 由自身超时处理）
@@ -375,28 +475,87 @@ async function speculativeRace(ctx, pool, excludeIds, primary, originUrl, header
     (e) => ({ ok: false, err: e })
   );
 
+  // 换源判据：错误响应（含 404）不得作为竞速胜者。
+  // 否则「某源站没有该文件」会被当成最终成功回给客户端，彻底绕过故障转移 ——
+  // 这正是多源站下偶发 404 的直接原因。判据与串行分支共用同一实现。
+  const isRetryable = typeof opts.isRetryableStatus === 'function'
+    ? opts.isRetryableStatus
+    : () => false;
+  /** 记录被判为失败的响应快照，供两路皆败时对外报告 */
+  let primaryBadResp = null;
+  let secondaryBadResp = null;
+
   const winner = await Promise.race([
-    primaryTask.then((r) => ({ lane: 'primary', resp: r })).catch(() => null),
-    secondaryTask.then((s) => (s.ok ? { lane: 'secondary', resp: s.resp } : null)).catch(() => null),
+    primaryTask.then((r) => {
+      if (!r) return null;
+      if (isRetryable(r.status)) {
+        primaryBadResp = snapshotResp(r);
+        r.body?.cancel().catch(() => {});
+        return null;
+      }
+      return { lane: 'primary', resp: r };
+    }).catch(() => null),
+    secondaryTask.then((s) => {
+      if (!s.ok || !s.resp) return null;
+      if (isRetryable(s.resp.status)) {
+        secondaryBadResp = snapshotResp(s.resp);
+        s.resp.body?.cancel().catch(() => {});
+        return null;
+      }
+      return { lane: 'secondary', resp: s.resp };
+    }).catch(() => null),
   ]);
 
-  // 胜者已定：取消慢路
-  ctrl.abort();
-
   if (winner && winner.resp) {
-    const won = winner.lane === 'primary' ? primary : secondary;
+    // 胜者已定：取消慢路。
+    // 仅当胜者为第二路时才 abort —— ctrl 只关联首路，若首路是胜者，
+    // abort 会中断其正在传输的 body 流导致下游 502/500。
+    if (winner.lane === 'secondary') ctrl.abort();
+    const won = winner.lane === 'primary' ? primary : secOrigin;
+    ctx.debug.originId = won.id;
+    ctx.debug.originAddr = `${won.addr}:${won.port || (won.scheme === 'http' ? 80 : 443)}`;
+    if (winner.lane === 'secondary' && !ctx.debug.tried.includes(secOrigin.id)) {
+      ctx.debug.tried.push(secOrigin.id);
+    }
     return { ok: true, winner: won, resp: winner.resp, primaryFailed: false };
   }
 
-  // 两路都失败：收集失败信息（慢路成功分支不会到达此处）
+  // Promise.race 只反映「最先落地的那一路」。上面把错误响应映射成 null 后，
+  // 胜者可能为 null 而另一路其实仍在途且可能成功 —— 必须等两路都落地再判定，
+  // 否则会把「一路 404、另一路 200」误判为双失败。
+  // 注意：此处【不能】先 abort，否则会掐断仍在途的首路。
+  const [pSettled, sSettled] = await Promise.all([
+    primaryTask.catch(() => null),
+    secondaryTask.catch(() => ({ ok: false })),
+  ]);
+  // 复检：若某一路最终拿到了非错误响应，直接采用（避免误判为双失败）。
+  // 首路优先（与非竞速语义一致：能用首路就不换源）。
+  if (pSettled && !isRetryable(pSettled.status) && !primaryBadResp) {
+    return { ok: true, winner: primary, resp: pSettled, primaryFailed: false };
+  }
+  if (sSettled && sSettled.ok && sSettled.resp && !secondaryBadResp
+      && !isRetryable(sSettled.resp.status)) {
+    ctx.debug.originId = secOrigin.id;
+    ctx.debug.originAddr = `${secOrigin.addr}:${secOrigin.port || (secOrigin.scheme === 'http' ? 80 : 443)}`;
+    if (!ctx.debug.tried.includes(secOrigin.id)) ctx.debug.tried.push(secOrigin.id);
+    return { ok: true, winner: secOrigin, resp: sSettled.resp, primaryFailed: false };
+  }
+
+  // 两路都失败（含「两路都是 404 等错误响应」）：收集失败信息。
+  // lastResponse 优先取被判为可换源的错误响应快照，让外层在耗尽源站后
+  // 能把真实状态码（而非笼统 502）返回给客户端。
   let lastResponse = null;
   let lastError = null;
-  if (primaryErr) lastError = primaryErr;
+  if (primaryBadResp) lastResponse = primaryBadResp;
+  else if (secondaryBadResp) lastResponse = secondaryBadResp;
   else if (primaryResp && primaryResp.body) lastResponse = snapshotResp(primaryResp);
+  if (primaryErr && !lastResponse) lastError = primaryErr;
+  // 第二路已实际拨号过：并入 tried，使外层换源不再重复选中它。
+  if (!ctx.debug.tried.includes(secOrigin.id)) ctx.debug.tried.push(secOrigin.id);
   return {
     ok: false,
-    primaryFailed: !!primaryErr || (primaryResp ? true : false),
-    secondary,
+    primaryFailed: !!primaryErr || !!primaryBadResp || (primaryResp ? true : false),
+    secondary: secOrigin,
     secondaryFailed: true,
     lastResponse,
     lastError,

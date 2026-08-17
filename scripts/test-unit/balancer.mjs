@@ -6,8 +6,9 @@
 import assert from 'node:assert';
 import { selectOrigin } from '../../src/balancer/strategy.js';
 import { isTripped, recordFailure, recordSuccess } from '../../src/balancer/circuit.js';
+import { requestWithFailover } from '../../src/balancer/failover.js';
 import { test, testA } from './_testkit.mjs';
-import { makeCtx, createMockKV } from './_testkit.mjs';
+import { makeCtx, createMockKV, withFakeFetch, mockResponse } from './_testkit.mjs';
 import { encodeKey } from '../../src/platform/keyCodec.js';
 
 function mkPool(strategy, origins) {
@@ -98,4 +99,132 @@ testA('circuit: 未失败不熔断', async (a) => {
   const ctx = mkCtxFor();
   ctx.env = { CDN_KV: createMockKV() };
   a.equal(await isTripped(ctx, 'p-new', 'o-new'), false, '初始未熔断');
+});
+
+/* ---------------------------------------------------------------------------
+ * 多源站「按源站求值规则」回归用例
+ * ---------------------------------------------------------------------------
+ * 复现并锁定曾导致「源站池启用 2 个源站后回源必然 404」的缺陷：
+ * 站点规则以 origin 为匹配条件，CNB 与 GitHub 的 raw 路径格式完全不同；
+ * 若规则只在请求级求值一次就冻结，换源 / 竞速时就会把 A 源站的路径打到
+ * B 源站域名上。这里断言 requestWithFailover 在每次尝试都按「本次实际
+ * 使用的源站」重新求值 rewrite，并断言 404 会触发换源。
+ */
+function mkOriginBoundSite() {
+  // 两条 rewrite 规则各自绑定一个源站（match.target='origin'），重写目标路径格式不同 ——
+  // 正是「CNB raw 路径 vs GitHub raw 路径」的最小复现。
+  return {
+    rules: [
+      {
+        // conditions 为二维数组（外 OR 内 AND）；写成一维会被 filter 丢弃而「匹配全部」。
+        id: 'r-cnb', priority: 100, enabled: true, stage: 'rewrite',
+        match: { conditions: [[{ target: 'origin', op: 'equal', values: ['o0'] }]] },
+        action: { rewrite: { type: 'regex', regexFrom: '^/img/(.*)$', regexTo: '/owner/repo/-/git/raw/main/$1' } },
+      },
+      {
+        id: 'r-gh', priority: 100, enabled: true, stage: 'rewrite',
+        match: { conditions: [[{ target: 'origin', op: 'equal', values: ['o1'] }]] },
+        action: { rewrite: { type: 'regex', regexFrom: '^/img/(.*)$', regexTo: '/owner/repo/main/$1' } },
+      },
+    ],
+  };
+}
+
+testA('failover: 每次尝试按 origin 重新求值 rewrite（多源站不再错配路径）', async (a) => {
+  const ctx = mkCtxFor();
+  ctx.url = new URL('https://example.com/img/a.webp');
+  ctx.request = { method: 'GET', url: ctx.url.toString(), headers: new Map() };
+  ctx.debug = { tried: [], notes: [] };
+  ctx.__globalStages = {};
+
+  const pool = {
+    id: 'p-multi',
+    strategy: 'chain',
+    // chain 策略下顺序取首个可用，便于确定性断言换源顺序
+    origins: [
+      { id: 'o0', enabled: true, healthy: true, weight: 1, addr: 'cnb.example', scheme: 'https', port: 443 },
+      { id: 'o1', enabled: true, healthy: true, weight: 1, addr: 'gh.example', scheme: 'https', port: 443 },
+    ],
+    failover: { enabled: true, maxRetries: 2, retryOn: ['4xx5xx'], timeoutMs: 5000 },
+  };
+
+  const seen = [];
+  await withFakeFetch(async (url) => {
+    seen.push(String(url));
+    // 首个源站（CNB 路径）一律 404 —— 模拟「该源站没有这个文件」，
+    // 第二个源站（GitHub 路径）才有文件。
+    if (String(url).includes('/-/git/raw/main/')) return mockResponse(404, 'nope');
+    return mockResponse(200, 'IMG');
+  }, async () => {
+    // hostHeader=inherit：回源 host 取 origin.addr，使「域名 + 路径」的配对可断言
+    const resp = await requestWithFailover(ctx, pool, null, { mode: 'inherit', custom: '' }, {
+      site: mkOriginBoundSite(),
+    });
+    a.equal(resp.status, 200, '404 触发换源后最终 200（而非把 404 返回客户端）');
+  });
+
+  a.equal(seen.length >= 2, true, '至少发生一次换源');
+  a.ok(seen.some((u) => u.includes('cnb.example') && u.includes('/-/git/raw/main/')),
+    'CNB 源站使用 CNB 规则的路径');
+  a.ok(seen.some((u) => u.includes('gh.example') && u.includes('/owner/repo/main/')),
+    'GitHub 源站使用 GitHub 规则的路径');
+  // 核心反向断言：绝不能出现「GitHub 域名 + CNB 路径」的错配组合
+  a.equal(seen.some((u) => u.includes('gh.example') && u.includes('/-/git/raw/main/')), false,
+    '不出现 GitHub 域名 + CNB 路径的错配');
+  a.equal(seen.some((u) => u.includes('cnb.example') && !u.includes('/-/git/raw/main/')), false,
+    '不出现 CNB 域名 + GitHub 路径的错配');
+});
+
+testA('failover: 单源站池 404 不换源（保持既有语义，零回归）', async (a) => {
+  const ctx = mkCtxFor();
+  ctx.url = new URL('https://example.com/img/a.webp');
+  ctx.request = { method: 'GET', url: ctx.url.toString(), headers: new Map() };
+  ctx.debug = { tried: [], notes: [] };
+  ctx.__globalStages = {};
+
+  const pool = {
+    id: 'p-single',
+    strategy: 'chain',
+    origins: [{ id: 'o0', enabled: true, healthy: true, weight: 1, addr: 'cnb.example', scheme: 'https', port: 443 }],
+    failover: { enabled: true, maxRetries: 3, retryOn: ['4xx5xx'], timeoutMs: 5000 },
+  };
+
+  let calls = 0;
+  await withFakeFetch(async () => { calls++; return mockResponse(404, 'nope'); }, async () => {
+    const resp = await requestWithFailover(ctx, pool, null, undefined, { site: mkOriginBoundSite() });
+    a.equal(resp.status, 404, '单源站 404 原样返回');
+  });
+  a.equal(calls, 1, '单源站只打一次（failover 强制关闭）');
+});
+
+testA('failover: 首选源站被复用，同一请求不重复推进 SWRR', async (a) => {
+  const ctx = mkCtxFor();
+  ctx.url = new URL('https://example.com/img/a.webp');
+  ctx.request = { method: 'GET', url: ctx.url.toString(), headers: new Map() };
+  ctx.debug = { tried: [], notes: [] };
+  ctx.__globalStages = {};
+
+  const pool = {
+    id: 'p-pref',
+    strategy: 'roundrobin',
+    origins: [
+      { id: 'o0', enabled: true, healthy: true, weight: 1, addr: 'a.example', scheme: 'https', port: 443 },
+      { id: 'o1', enabled: true, healthy: true, weight: 1, addr: 'b.example', scheme: 'https', port: 443 },
+    ],
+    failover: { enabled: true, maxRetries: 2, retryOn: ['4xx5xx'], timeoutMs: 5000 },
+  };
+
+  const hosts = [];
+  await withFakeFetch(async (url) => {
+    hosts.push(new URL(String(url)).hostname);
+    return mockResponse(200, 'OK');
+  }, async () => {
+    // 显式指定首选源站为 o1：首次尝试必须就用 o1，而不是再选一次源
+    const preferred = pool.origins[1];
+    const resp = await requestWithFailover(ctx, pool, null, { mode: 'inherit', custom: '' }, {
+      site: mkOriginBoundSite(), preferredOrigin: preferred,
+    });
+    a.equal(resp.status, 200, '回源成功');
+  });
+  a.equal(hosts[0], 'b.example', '首次尝试复用管线已选中的首选源站 o1');
 });

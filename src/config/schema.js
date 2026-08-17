@@ -819,6 +819,10 @@ export function normRule(input, idx) {
       note: str(input.note, '', 512),
       priority: int(input.priority, 0, -100000, 100000),
       enabled: bool(input.enabled, true),
+      // stage 必须落库：matchRuleByStage 按 rule.stage 分桶匹配，缺失则该规则
+      // 永远不会被任何阶段命中（表现为「站点重建后规则全部失效、回源 404」）。
+      // 口径与 buildActionByStage 保持一致：非法/缺省一律归一到 'cache'。
+      stage: normalizeStage(input.stage) || 'cache',
       match: {
         conditions: conds.value,
       },

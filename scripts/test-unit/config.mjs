@@ -40,6 +40,37 @@ testA('validateSite: host 通配 * 拒绝', (a) => {
   a.equal(validateSite({ host: '*' }).ok, false, 'host="*" 拒绝');
 });
 
+testA('validateSite: 规则 stage 必须落库（回归：删站重建后规则不失效）', (a) => {
+  // 曾经的缺陷：normRule 只读 input.stage 用于裁剪 action，却不把 stage 写回落库对象，
+  // 导致站点重建（PUT /sites/:host）后所有规则 stage 丢失、matchRuleByStage 永不命中、回源 404。
+  const res = validateSite({
+    host: 'a.test',
+    rules: [
+      { id: 'r1', stage: 'rewrite', enabled: true, priority: 10,
+        match: { conditions: [[{ target: 'path', op: 'prefix', values: ['/'] }]] },
+        action: { rewrite: { type: 'regex', regexFrom: '^(/.*)$', regexTo: '/x$1' } } },
+      { id: 'r2', stage: 'reqHeaders', enabled: true, priority: 10,
+        match: { conditions: [[{ target: 'path', op: 'prefix', values: ['/'] }]] },
+        action: { reqHeaders: { set: [{ name: 'X-A', value: '1' }], strip: [] } } },
+    ],
+  });
+  a.equal(res.ok, true, '站点校验通过');
+  const stages = (res.value.rules || []).map((r) => r.stage);
+  a.deepEqual(stages, ['rewrite', 'reqHeaders'], '每条规则的 stage 被原样持久化');
+});
+
+testA('validateSite: 缺省/非法 stage 归一到 cache（与 buildActionByStage 口径一致）', (a) => {
+  const res = validateSite({
+    host: 'a.test',
+    rules: [
+      { id: 'r1', enabled: true, priority: 10, match: { conditions: [] }, action: {} },
+      { id: 'r2', stage: 'not-a-stage', enabled: true, priority: 10, match: { conditions: [] }, action: {} },
+    ],
+  });
+  a.equal(res.ok, true, '站点校验通过');
+  a.deepEqual((res.value.rules || []).map((r) => r.stage), ['cache', 'cache'], '缺省/非法 stage 归一为 cache');
+});
+
 testA('validateSite: host 含端口拒绝', (a) => {
   a.equal(validateSite({ host: 'a.test:8080' }).ok, false, 'host 含端口拒绝');
 });
