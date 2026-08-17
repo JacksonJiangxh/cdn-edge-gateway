@@ -1,0 +1,39 @@
+services:
+  webdis:
+    image: nicolas/webdis:latest
+    container_name: webdis
+    restart: unless-stopped
+    # 覆盖官方默认 CMD：用自定义持久化 redis.conf 启动内置 redis，
+    # 再用自定义 webdis.prod.json 启动 webdis（不跑默认 /tmp 非持久配置）。
+    command: ["/bin/sh", "-c", "redis-server /etc/redis.conf && exec webdis /etc/webdis.prod.json"]
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      # 覆盖官方镜像内 /etc/redis.conf（/tmp 非持久）为持久化配置
+      - ./redis.conf:/etc/redis.conf:ro
+      # 覆盖官方默认 /etc/webdis.prod.json
+      - ./webdis.prod.json:/etc/webdis.prod.json:ro
+      # 持久化数据卷（AOF + RDB 落在这里）
+      - webdis-data:/data
+    networks:
+      - web
+    labels:
+      - traefik.enable=true
+      # 标准子域名暴露：给 webdis 分配独立子域名 webdis.example.com
+      - traefik.http.routers.webdis.rule=Host(`webdis.example.com`)
+      - traefik.http.routers.webdis.entrypoints=websecure
+      - traefik.http.routers.webdis.tls=true
+      - traefik.http.services.webdis.loadbalancer.server.port=7379
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "2"
+
+networks:
+  # 接入你自己的容器网络（请替换 web 为你实际运行反代/发现的网络名）
+  web:
+    external: true
+
+volumes:
+  webdis-data:
