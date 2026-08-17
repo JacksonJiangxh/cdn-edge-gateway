@@ -290,7 +290,13 @@ export function detectCaps(env) {
   const cacheSubreqLimit = platform === 'esa' ? 32 : Infinity;
   const cacheKeyHttpOnly = platform === 'esa';
 
-  const hasNativeKV = looksLikeKV(e.CDN_KV) || looksLikeKV(e.KV);
+  // EO Makers 的 KV 是「绑定时自定义名的运行时全局变量」，不通过 env 注入，
+  // 故 env.CDN_KV / env.KV 恒为 undefined；需与 kv.js 的 getKV() 对齐，同时查 globalThis。
+  const hasNativeKV =
+    looksLikeKV(e.CDN_KV) ||
+    looksLikeKV(e.KV) ||
+    looksLikeKV(safeGlobal('CDN_KV')) ||
+    looksLikeKV(safeGlobal('KV'));
 
   /** @type {import('../contracts.js').Caps} */
   const caps = Object.freeze({

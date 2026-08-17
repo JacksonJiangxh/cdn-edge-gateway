@@ -142,7 +142,10 @@ Makers 的 Edge Functions 跑在 V8，**没有 `node:crypto` 等 Node 内建模�
 管理面入口路径 `global.adminPath` 默认 `__panel`，可在管理面「系统」里改成任意随机前缀并写入 KV。由于部署时前缀未知，**无法靠静态目录覆盖**，改为：
 
 - **默认前缀 `__panel`**：由 `dist-eo/dist/public/__panel/index.html` 静态兜底（零函数执行）。
-- **自定义随机前缀**：请求落入函数层 `edge-functions/[[default]].js` 薄壳 → `_worker.js` 运行时读 KV 取 `adminPath` → `renderAdminPage` 动态渲染（注入 `window.__BASE__='/' + adminPath`），无需重新构建。
+- **自定义随机前缀**：请求落入函数层 `edge-functions/[[default]].js` 薄壳 → `_worker.js` 路由时从**内存配置快照**读取 `adminPath`（该快照在 isolate 冷启动时由 KV **全量加载一次进内存**，运行时数据面纯内存读取、`不再访问 KV`）→ `renderAdminPage` 动态渲染（注入 `window.__BASE__='/' + adminPath`）。
+
+> [!NOTE]
+> **改为前缀无需重新构建、也无需重启**：KV 是「启动初始数据源」。后台按 `cfg:version` 版本号做**分档线性回退**比对（2s 起、600s 封顶），只有版本号变化才整体重拉快照进内存，且并发去重——所以你在管理面改了 `adminPath` 写入 KV 后，各 isolate 会在版本号收敛窗口内自动感知新前缀，无需重新部署。详见 [架构 · 配置同步](/dev/11-architecture.md)。
 
 > 非 `adminPath` 路径（如随机探测 URL）会返回伪装页（见 [附录 · 502](/appendix/502.md)），**不泄露管理面存在**——与 CF 安全门语义一致，不是 bug。
 

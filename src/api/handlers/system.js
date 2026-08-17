@@ -283,7 +283,7 @@ function buildLimitations(ctx) {
     list.push({
       key: 'edgeCache',
       message:
-        'EdgeOne 的 caches.default 仅当前边缘节点本地有效、不跨节点复制。命中率随请求分散到不同节点而降低，必要时可用「同站 fetch 委托节点缓存」(路径 A) 提升命中。',
+        'EdgeOne 的 caches.default 仅当前边缘节点本地有效、不跨节点复制。命中率随请求分散到不同节点而降低，必要时可用「同站 fetch 委托节点缓存」（即 eoEdgeCache）提升命中。',
     });
   } else if (caps.cacheSingleInstance) {
     list.push({

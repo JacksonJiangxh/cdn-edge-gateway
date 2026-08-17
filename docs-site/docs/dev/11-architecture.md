@@ -102,6 +102,22 @@ EdgeOne **Makers** 的 Edge Functions 运行在 **V8 运行时**（与 Cloudflar
 
 ---
 
+## 配置同步：KV 冷启动全量加载 + 内存快照 + 版本感知重拉
+
+配置（含 `adminPath`、源站池、站点族、全局规则）持久化在 KV，但**运行时数据面几乎不碰 KV**（`src/config/store.js`）：
+
+1. **冷启动一次性全量加载**：isolate 首请求时 `loadConfigSnapshot` 把固定 5 个合并键（`cfg:version` / `cfg:global` / `cfg:global_rules` / `cfg:sites` / `cfg:pools`）全量读进内存 `_snapshotState`。之后数据面只读内存，**不再访问 KV**。
+2. **版本感知后台重拉**：每个请求末尾由 `ctx.waitUntil` 触发 `reconcileVersion`（不阻塞响应），按 `cfg:version` 版本号做比对：
+   - **分档线性回退**读版本号（2s 起步 → 600s 封顶，理想静态约 4 小时达上限；`expireAt` 未过期时直接短路、**零 KV 读**）。
+   - **仅版本号变化**才 `reloadConfigSnapshot` 整体重拉快照进内存；版本号不变则无事。
+   - **并发去重**（`_reconcileInFlight`）：同一 isolate 同一时刻只跑一次比对，避免打爆 KV 读额度。
+3. **影响**：在管理面改 `adminPath` 写入 KV（自动 `bumpVersion`）后，各 isolate 在版本号收敛窗口内自动感知新前缀——**无需重新部署、无需重启**。这与「自定义 adminPath 动态渲染、无需重新构建」的运行模型直接对应（见 [部署指南 · 路线 C](/user/03-deploy.md)）。
+
+> [!NOTE]
+> EO Makers 的 Edge Function 同样适用该机制：`cfg:version` 比对走的是 KV 读（受退避限流），重拉后的快照是 isolate 内存态，符合 EO「KV 仅在 Edge Functions 可用」的约束。
+
+---
+
 ## 内存预算（memBudget）
 
 `src/platform/memBudget.js` 把「缓存 + 队列 + 其它临时态」统一注册到一块内存预算里，
