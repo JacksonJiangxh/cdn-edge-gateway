@@ -324,7 +324,10 @@ async function speculativeRace(ctx, pool, excludeIds, primary, originUrl, header
     controller: ctrl,
   }).then(
     (r) => { primaryDone = true; primaryResp = r; return r; },
-    (e) => { primaryDone = true; primaryErr = e; throw e; }
+    // 捕获首路错误并记录到 primaryErr 即可；不得 rethrow，否则在 Promise.race 已
+    // 决出胜者、primaryTask 仍 pending 后被中止时，该 rejection 无人接管，会成为
+    // unhandled rejection，冒泡至 worker 运行时并导致整个请求 500。
+    (e) => { primaryDone = true; primaryErr = e; return null; }
   );
 
   // 启动竞速定时器：speculativeMs 无首字节 → 触发第二路
@@ -349,7 +352,9 @@ async function speculativeRace(ctx, pool, excludeIds, primary, originUrl, header
         lastError: primaryErr,
       };
     }
-    ctrl.abort();
+    // 首路成功：不能 abort 已返回响应的 fetch，否则会中断正在传输的响应
+    // body 流（与 ctrl.signal 关联），导致下游读取 AbortError / 502/500。
+    // 第二路尚未启动（primaryDone 时 raced 仍为 false），无需取消。
     return { ok: true, winner: primary, resp: primaryResp, primaryFailed: false };
   }
 
@@ -371,7 +376,7 @@ async function speculativeRace(ctx, pool, excludeIds, primary, originUrl, header
   );
 
   const winner = await Promise.race([
-    primaryTask.then((r) => ({ lane: 'primary', resp: r })),
+    primaryTask.then((r) => ({ lane: 'primary', resp: r })).catch(() => null),
     secondaryTask.then((s) => (s.ok ? { lane: 'secondary', resp: s.resp } : null)).catch(() => null),
   ]);
 
