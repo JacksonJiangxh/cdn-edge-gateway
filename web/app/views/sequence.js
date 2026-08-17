@@ -172,7 +172,7 @@ export   async function renderTrafficSequence() {
         () => openSecurityDrawer(site.host, 'sec-ratelimit'), '安全防护抽屉 · 请求限速'));
 
       // ── ③ 首要分流：由负载均衡实际选出一个具体临时回源对象 ───────
-      flow.appendChild(seqGroup('③', '首要分流：选出「本次回源对象」（真实推导的具体临时对象）', '不是虚拟占位：单源站 = 该源站本身；源站池 = 按负载均衡策略（chain/roundrobin/随机/加权/IP哈希）实际选出的某一个 oX。这个具体对象即后续 ⑤~⑱ 规则的「回源目标」匹配维度（target=origin / originAddr），可在一条线上用它做多分支。'));
+      flow.appendChild(seqGroup('③', '首要分流：选出「本次回源对象」（真实推导的具体临时对象）', '不是虚拟占位：单源站 = 该源站本身；源站池 = 按负载均衡策略（chain 严格串行 / weighted 平滑加权轮询 / iphash 一致性哈希）实际选出的某一个 oX。这个具体对象即后续 ⑤~⑱ 规则的「回源目标」匹配维度（target=origin / originAddr），可在一条线上用它做多分支。'));
       const defPool = APP_DATA.pools.find((p) => p.id === site.poolId);
       const defKind = defPool ? poolKind(defPool) : '';
       const originId = defPool && defKind === 'single'
@@ -183,7 +183,7 @@ export   async function renderTrafficSequence() {
           ? (defPool
             ? (defKind === 'single'
               ? `单一源站：${defPool.name || defPool.id} · ${originSummary(defPool)}（回源目标 id=${defPool.origins && defPool.origins[0] && defPool.origins[0].id}）`
-              : `源站池：${defPool.name || defPool.id} · 策略 ${defPool.strategy || 'roundrobin'} · ${(defPool.origins || []).length} 个源站（每次按策略选出一个 oX 作为回源目标）`)
+              : `源站池：${defPool.name || defPool.id} · 策略 ${defPool.strategy || 'chain'} · ${(defPool.origins || []).length} 个源站（每次按策略选出一个 oX 作为回源目标）`)
             : `源站已被删除或不可用：${site.poolId}`)
           : '未设置默认源站',
         site.poolId ? '推导' : '未配置', 'sec-origin',
@@ -257,7 +257,7 @@ export   async function renderTrafficSequence() {
         pool
           ? (poolKind(pool) === 'single'
             ? `单一源站 ${pool.name || pool.id} · ${originSummary(pool)} · ${retryText(pool)}${connRule || gConnRule ? '（受规则回源参数影响）' : ''}`
-            : `源站池 ${pool.name || pool.id} · 策略 ${pool.strategy || 'roundrobin'} · ${(pool.origins || []).length} 个源站 · ${retryText(pool)}${connRule || gConnRule ? '（受规则回源参数影响）' : ''}`)
+            : `源站池 ${pool.name || pool.id} · 策略 ${pool.strategy || 'chain'} · ${(pool.origins || []).length} 个源站 · ${retryText(pool)}${connRule || gConnRule ? '（受规则回源参数影响）' : ''}`)
           : '未配置源站',
         pool ? '已配置' : '未配置', null,
         pool ? () => openPoolDrawer(pool.id) : () => openInitialOriginDrawer(site.host, 'sec-origin'),

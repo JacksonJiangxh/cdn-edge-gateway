@@ -1587,7 +1587,7 @@ export function validatePool(input, caps) {
     ? 'chain'
     : enumOf(
       input.strategy,
-      ['chain', 'roundrobin', 'random', 'weighted', 'iphash'],
+      ['chain', 'weighted', 'iphash'],
       DEFAULT_POOL.strategy
     );
 

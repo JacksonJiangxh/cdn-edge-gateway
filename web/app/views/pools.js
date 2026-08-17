@@ -131,24 +131,28 @@ export
     const originList = el('div', { id: 'origin-list' });
     // 调度策略下拉需在 addOrigin 之前创建：源站行里的「权重」字段要按策略显隐
     const strategySel = select('', [], pool.strategy || 'chain', [
-      { value: 'chain', label: '链式回退 ·均衡（坏源站排除后剩余源站全部参与，order 派生权重）' },
-      { value: 'roundrobin', label: '平滑加权轮询（配 weight 生效，未配则轮流）' },
-      { value: 'random', label: '随机（配 weight 按权重随机，未配等概率）' },
-      { value: 'weighted', label: '平滑加权（严格按权重比例平滑分配）' },
-      { value: 'iphash', label: 'IP 一致性哈希（增删源站最小迁移；命中坏源站环内回退）' },
+      { value: 'chain', label: '链式回退（严格串行：按「顺序」1→2→3→4 依次回退，无权重）' },
+      { value: 'weighted', label: '加权轮询（按「权重」平滑分配；不填权重则按顺序派生）' },
+      { value: 'iphash', label: 'IP 一致性哈希（按客户端 IP 绑定源站；命中坏源站环内回退）' },
     ]);
     strategySel.className = 'input';
-    // 收集各源站的「权重」字段，调度策略变化时统一显隐。
-    // 加权类策略（chain 用 order 派生权重、roundrobin/weighted 用 weight）都需要权重列。
+    // 收集各源站的「权重」与「顺序」字段，调度策略变化时统一显隐：
+    //   · chain    → 显示「顺序」列（从 1 起，1 第一优先），隐藏「权重」列
+    //   · weighted → 显示「权重」列，隐藏「顺序」列
+    //   · iphash   → 两者皆隐藏
     const weightFields = [];
+    const orderFields = [];
     const syncWeight = () => {
-      const on = ['weighted', 'roundrobin', 'chain'].includes(strategySel.value);
-      weightFields.forEach((f) => { f.style.display = on ? '' : 'none'; });
+      const s = strategySel.value;
+      const showWeight = s === 'weighted';
+      const showOrder = s === 'chain';
+      weightFields.forEach((f) => { f.style.display = showWeight ? '' : 'none'; });
+      orderFields.forEach((f) => { f.style.display = showOrder ? '' : 'none'; });
     };
     strategySel.addEventListener('change', syncWeight);
     const addOrigin = (o) => {
       // 源站组只负责「地址 + 负载均衡」，回源 Host / 路径 / 请求头等一律在规则引擎里绑定
-      o = o || { id: '', enabled: true, order: 0, weight: 1, engine: 'fetch', scheme: 'https', addr: '', port: 443 };
+      o = o || { id: '', enabled: true, order: 1, weight: 1, engine: 'fetch', scheme: 'https', addr: '', port: 443 };
       const engineSel = select('', [], '', [
         { value: 'fetch', label: 'fetch（支持自定义 Host）' },
         { value: 'socket', label: 'socket（已弃用）', disabled: true },
@@ -235,8 +239,11 @@ export
       // 源站名称（折叠时显示在标题行；对标规则卡「规则名称」）
       const nameInput = el('input', { class: 'input o-name', value: o.name || '', placeholder: '如 主站 / 北京备份' });
       const nameField = field('源站名称', nameInput, '给这台源站起个一眼能看懂的名字，会显示在折叠后的标题行。');
+      // 顺序（仅 chain 策略显示，从 1 起；1 第一优先）：严格串行回退时按此值 1→2→3→4 依次选取
+      const orderField = field('顺序（链式回退用，从 1 起，越小越优先）', el('input', { class: 'input o-order', type: 'number', value: (Number(o.order) || 1) }), '仅「链式回退」策略生效，与权重无关。数字越小越先被选中；某源站回源失败时按此顺序自动换下一个（1→2→3→4）。默认按列表位置自动编号，拖拽即可重排。');
+      orderFields.push(orderField);
       // 权重仅在「加权」调度策略下生效，其余策略隐藏（syncWeight 在策略下拉建好后统一调用）
-      const weightField = field('权重（加权/轮询/链式策略生效）', el('input', { class: 'input o-weight', type: 'number', value: o.weight || 1 }), '默认 1 即可。weighted 严格按权重平滑分配；roundrobin 配了权重即生效；chain 用 order 派生权重、显式填了则优先按此权重。');
+      const weightField = field('权重（加权轮询用）', el('input', { class: 'input o-weight', type: 'number', value: o.weight || 1 }), '仅「加权轮询」策略生效。默认 1 即均分；权重越大分到越多请求，分配平滑无抖动。不填权重时按「顺序」自动派生权重。');
       weightFields.push(weightField);
       const syncEngine = () => {
         const eng = engineSel.value;
@@ -279,6 +286,7 @@ export
         hostNote,
         r2Fields,
         repoFields,
+        orderField,
         weightField,
         overrideHint,
       ]);
@@ -430,7 +438,7 @@ export
         const originId = `o_${poolSlug}_${backendName}`;
         origins.push({
           id: originId,
-          enabled: true, order: i, weight: Number($('.o-weight', row).value) || 1,
+          enabled: true, order: Number($('.o-order', row)?.value) || (i + 1), weight: Number($('.o-weight', row).value) || 1,
           name: ($('.o-name', row).value || '').trim(),
           // cnb/github 作为「预设型源站」引擎下拉值直接落库（UI 编辑时直读显示），
           // 底层回源由 fetch 引擎 + 预设规则承载，无需归一为 fetch。

@@ -363,7 +363,7 @@ async function runHttpFlow(mod, platform, mockKV, mockAssets, useAssets) {
     body: JSON.stringify({
       name: 'e2e-pool',
       kind: 'pool',
-      strategy: 'roundrobin',
+      strategy: 'weighted',
       origins: [
         { engine: 'fetch', scheme: 'https', addr: '10.0.0.1', port: 443, weight: 1 },
         { engine: 'fetch', scheme: 'https', addr: '10.0.0.2', port: 443, weight: 1 },

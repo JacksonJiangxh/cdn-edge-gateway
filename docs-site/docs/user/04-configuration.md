@@ -34,7 +34,7 @@ flowchart TD
 | `protocol` | | `http` / `https`，默认 `https` | `https` |
 | `port` | | 端口，默认按协议 | `443` |
 | `weight` | | 权重（配合 `weighted` 策略） | `1` |
-| `priority` | | 优先级（链式回退用，数字小优先） | `1` |
+| `order` | | 顺序（链式回退用，从 1 起，数字小优先；不填则按列表位置） | `1` |
 | `compress` | | 是否压缩，默认全局 | `true` |
 
 > [!TIP]
@@ -50,22 +50,20 @@ flowchart TD
 |---|---|---|---|
 | `id` | ✅ | 唯一标识 | `pool-main` |
 | `name` | | 显示名 | 主源站 |
-| `strategy` | | 调度策略，默认 `round_robin` | `round_robin` / `random` / `weighted` / `hash` / `least_conn` |
+| `strategy` | | 调度策略（决定「每次请求首选哪个源站」），默认 `chain` | `chain` / `weighted` / `iphash` |
 | `origins` | ✅ | 源站数组 | `[{id,address...}]` |
 | `healthCheck` | | 健康检查（被动为主） | `{enabled:true}` |
 | `circuitBreaker` | | 被动熔断参数 | `{enabled:true,threshold:5,resetMs:60000}` |
 
-**调度策略白话**：
+**调度策略白话**（策略层只管「选谁」，故障转移是横切层，对所有策略生效）：
 
-| 策略 | 怎么选源站 |
-|---|---|
-| `round_robin` | 轮流，A→B→A→B（默认，均衡） |
-| `random` | 随机 |
-| `weighted` | 按 `weight` 权重比例（性能好的多分） |
-| `hash` | 按请求特征（如 IP）哈希，同一用户总落同一源站（会话保持） |
-| `least_conn` | 选当前连接最少的源站 |
+| 策略 | 怎么选源站 | 前端字段 |
+|---|---|---|
+| `chain` | **严格串行**：按 `order` 升序（1 第一优先）取第一个可用源站；某源站失败时自动换下一个（1→2→3→4），无权重 | 顺序（从 1 起） |
+| `weighted` | **平滑加权轮询（SWRR）**：按 `weight` 平滑分配，权重越大分到越多；不填 weight 时按 `order` 自动派生权重（全相等即均分） | 权重 |
+| `iphash` | **一致性哈希**：按客户端 IP 绑定源站，同 IP 总落同一源站；命中坏源站走环内顺时针回退，增删源站迁移最小 | 无 |
 
-**链式回退**：当优先级最高的源站连不上，自动试下一个 `priority`；全失败才返回 502。
+**回退链（故障转移，横切层）**：无论选了哪种策略，只要某源站回源失败，就排除它、再按策略选下一个；全部失败才返回 502。这一步对所有策略都成立，与 `chain` 的串行顺序无关——`chain` 只是"首选顺序 + 换源顺序都按 order"。
 
 ---
 

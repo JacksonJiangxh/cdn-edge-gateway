@@ -4,7 +4,7 @@
  * src/balancer/{strategy,circuit}.js，断言行为而非内部字段。
  */
 import assert from 'node:assert';
-import { selectOrigin } from '../../src/balancer/strategy.js';
+import { selectOrigin, primeChainWeights } from '../../src/balancer/strategy.js';
 import { isTripped, recordFailure, recordSuccess } from '../../src/balancer/circuit.js';
 import { requestWithFailover } from '../../src/balancer/failover.js';
 import { test, testA } from './_testkit.mjs';
@@ -12,11 +12,13 @@ import { makeCtx, createMockKV, withFakeFetch, mockResponse } from './_testkit.m
 import { encodeKey } from '../../src/platform/keyCodec.js';
 
 function mkPool(strategy, origins) {
-  return {
+  const pool = {
     id: 'p1',
     strategy,
     origins: origins.map((o, i) => ({ id: 'o' + i, enabled: true, healthy: true, weight: 1, ...o })),
   };
+  primeChainWeights(pool); // 预计算 __maxOrder，使未填 weight 时 order 派生权重生效
+  return pool;
 }
 
 function mkCtxFor() {
@@ -27,11 +29,27 @@ function mkCtxFor() {
   return c;
 }
 
-testA('selectOrigin: roundrobin 轮询（连续不同）', (a) => {
-  const pool = mkPool('roundrobin', [{}, {}]);
+testA('selectOrigin: weighted 均分（权重相等即轮流，连续不同）', (a) => {
+  const pool = mkPool('weighted', [{}, {}]);
   const first = selectOrigin(pool, mkCtxFor());
   const second = selectOrigin(pool, mkCtxFor());
-  a.notEqual(first.id, second.id, '两次选择不同');
+  a.notEqual(first.id, second.id, '权重相等时两次选择不同（轮询）');
+});
+
+testA('selectOrigin: 未填 weight 时按 order 派生权重（chain 旧语义迁移）', (a) => {
+  // weighted 池不填 weight（注意：不能带 weight 字段，否则 weightOf 走显式分支），
+  // order=[1,5] 派生权重 [5,1]，long-run 倾向先选 o0
+  const pool = {
+    id: 'p1', strategy: 'weighted',
+    origins: [
+      { id: 'o0', enabled: true, healthy: true, order: 1 },
+      { id: 'o1', enabled: true, healthy: true, order: 5 },
+    ],
+  };
+  primeChainWeights(pool);
+  let first = 0;
+  for (let i = 0; i < 200; i++) if (selectOrigin(pool, mkCtxFor()).id === 'o0') first++;
+  a.equal(first > 100, true, 'order 小的源站被优先选中（派生权重更高）');
 });
 
 testA('selectOrigin: weighted 概率分布', (a) => {
@@ -41,9 +59,24 @@ testA('selectOrigin: weighted 概率分布', (a) => {
   a.equal(heavy > 50, true, '权重 9 占比 > 50%');
 });
 
-testA('selectOrigin: chain 顺序取首个健康', (a) => {
-  const pool = mkPool('chain', [{ healthy: true }, { healthy: false }]);
-  a.equal(selectOrigin(pool, mkCtxFor()).id, 'o0', 'chain 取首个健康');
+testA('selectOrigin: chain 严格串行 —— 按 order 升序取首个可用（无权重、非轮询）', (a) => {
+  // order=[2,1]：即使 o1 排在数组后面，也应选 order 最小的 o1（不是数组首位 o0）
+  const pool = mkPool('chain', [{ order: 2 }, { order: 1 }]);
+  a.equal(selectOrigin(pool, mkCtxFor()).id, 'o1', 'chain 取 order 最小者（o1）');
+});
+
+testA('selectOrigin: chain 排除坏源站后下一个 order 顶上（1→2→3→4 串行）', (a) => {
+  const pool = mkPool('chain', [{ order: 1 }, { order: 2 }, { order: 3 }]);
+  a.equal(selectOrigin(pool, mkCtxFor(), new Set(['o0'])).id, 'o1', '排除 order1 后选 order2');
+  a.equal(selectOrigin(pool, mkCtxFor(), new Set(['o0', 'o1'])).id, 'o2', '再排除后选 order3');
+});
+
+testA('selectOrigin: chain 多次选择固定为同一 order 最小者（非轮询）', (a) => {
+  // 与 weighted 不同：chain 不轮询，相同候选集下每次都选同一个
+  const pool = mkPool('chain', [{ order: 1 }, { order: 2 }]);
+  const a1 = selectOrigin(pool, mkCtxFor()).id;
+  const a2 = selectOrigin(pool, mkCtxFor()).id;
+  a.equal(a1, a2, 'chain 固定取 order 最小者，不轮询');
 });
 
 testA('selectOrigin: 跳过被排除（熔断）源站', (a) => {
@@ -206,7 +239,7 @@ testA('failover: 首选源站被复用，同一请求不重复推进 SWRR', asyn
 
   const pool = {
     id: 'p-pref',
-    strategy: 'roundrobin',
+    strategy: 'weighted',
     origins: [
       { id: 'o0', enabled: true, healthy: true, weight: 1, addr: 'a.example', scheme: 'https', port: 443 },
       { id: 'o1', enabled: true, healthy: true, weight: 1, addr: 'b.example', scheme: 'https', port: 443 },

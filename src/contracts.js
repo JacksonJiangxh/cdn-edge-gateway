@@ -320,7 +320,12 @@
  * @property {string}  name        用户友好名称（给人区分用的展示标签，可重复，可选）
  * @property {'single'|'pool'} [kind]  'single'=单一源站（恰好 1 个 origin，可由站点联动自动创建）；
  *                                     'pool'=源站池（多 origin + 负载均衡，只能在源站页手动新建）
- * @property {'chain'|'roundrobin'|'random'|'weighted'|'iphash'} strategy  kind='single' 时恒为 chain
+ * @property {'chain'|'weighted'|'iphash'} strategy  调度策略：
+ *                                                     · chain=严格串行，按 order 升序(1 第一优先)取源，无权重，配合 failover 实现 1→2→3→4 回退
+ *                                                     · weighted=平滑加权轮询(SWRR)，按 weight 选，未填 weight 时按 order 派生
+ *                                                     · iphash=一致性哈希环，按客户端 IP 绑定源站
+ *                                                     注：故障转移(failover)为横切层，对所有策略生效，与 strategy 无关。
+ *                                                     kind='single' 时恒为 chain
  * @property {Origin[]} origins
  * @property {Failover} failover
  * @property {string}  [createdBy] 由站点联动自动创建时记录来源站点 host，纯展示用
@@ -332,7 +337,7 @@
  * @typedef {Object} Origin
  * @property {string}  id
  * @property {boolean} enabled
- * @property {number}  order              chain 策略排序，升序
+ * @property {number}  order              chain 策略串行顺序(从 1 起，升序)，无权重
  * @property {number}  weight             weighted 策略权重
  * @property {string}  [name]             源站展示名称（纯展示标签，给人区分用；r2/cnb 等 addr 为空时必须填，否则列表显示「未命名源站」）
  * @property {'fetch'|'r2'|'cnb'|'github'} engine  fetch=灵活自定义公网回源（CF/EO/ESA 均支持，可自定义 Host 头）；r2 仅 CF 可用，回源到 R2 桶绑定（不走公网）；cnb=CNB 仓库 raw 预设源站（填仓库参数即自动生成关联规则，底层走 fetch 引擎 + 预设规则）；github=GitHub 仓库 raw 预设源站（同 cnb）。cnb/github 与 fetch 的区别在于「引擎预设」而非「独立回源实现」——回源 host/路径/鉴权均由预设规则承载，运行时走 fetchEngine。socket 不再是可选值。

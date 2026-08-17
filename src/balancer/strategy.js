@@ -1,8 +1,17 @@
 /**
  * 负载均衡策略
  * ----------------------------------------------------------------------------
- * 从源站池中挑选一个可用源站，支持 5 种策略，并内置「统一健康过滤 + fail-open
+ * 从源站池中挑选一个可用源站，支持 3 种策略，并内置「统一健康过滤 + fail-open
  * 智能放行 + 软恢复权重」横切逻辑。
+ *
+ * 两种层次（务必分清）：
+ *   - 策略层（本文件 strategy）：决定「每一次请求首选哪个源站」。
+ *       · chain    ：严格串行，按 order 升序（1 第一优先）取第一个可用源站，无权重。
+ *       · weighted ：平滑加权轮询（SWRR），按 weight 选；未填 weight 时按 order 派生。
+ *       · iphash   ：一致性哈希环，按客户端 IP 绑定源站，命中坏源站环内顺时针回退。
+ *   - 故障转移层（failover.js）：某源站回源失败 → 排除它 → 再问策略层要一个，
+ *     对所有策略生效。chain 的「1→2→3→4 串行回退」正是「策略取最小 order + 故障
+ *     转移排除已试」共同实现，本身与权重无关。
  *
  * 「可用」的定义（统一过滤，所有策略共享）：
  *   1. enabled !== false
@@ -90,50 +99,62 @@ export function selectOrigin(pool, ctx, excludeIds) {
  */
 function pickByStrategy(pool, ctx, candidates) {
   switch (pool.strategy) {
-    case 'roundrobin':
-      return pickSwrr(pool, candidates, weightOf);
-    case 'random':
-      return pickRandom(candidates);
     case 'weighted':
       return pickSwrr(pool, candidates, weightOf);
     case 'iphash':
       return pickIpHash(pool, ctx, candidates);
     case 'chain':
     default:
-      return pickSwrr(pool, candidates, chainWeightOf);
+      return pickStrictOrder(candidates);
   }
 }
 
 /**
  * 计算源站生效权重（软恢复试水期会 ×coeff）。
- *   - 显式配置了 weight → 用 weight
- *   - 否则 → 1（随机/轮询语义）
+ *   - 显式配置了 weight(>0) → 用 weight
+ *   - 否则 → 按 order 派生（order 从 1 起，越小权重越高，保留主备倾斜但非独占）：
+ *       defaultWeight = 池内最大 order − (order − 1) + 1
+ *     order 全相等时派生权重也相等 → 退化为均分（≈随机/轮询）。
  *   - 处于软恢复试水期 → 再 ×0.3
  *
+ * 该派生逻辑同时承接了原 chain 的「order 派生权重」语义，使未填 weight 的
+ * weighted 池与旧的 chain 池行为一致，无需额外分支。
+ *
  * @param {Object} origin 源站
- * @param {Object} pool 源站池（用于取 pool.id 计算试水系数）
+ * @param {Object} pool 源站池（用于取 pool.__maxOrder / pool.id 计算试水系数）
  * @returns {number} 生效权重（>=1）
  */
 function weightOf(origin, pool) {
-  const base = Number(origin.weight) > 0 ? Number(origin.weight) : 1;
+  let base;
+  if (Number(origin.weight) > 0) {
+    base = Number(origin.weight);
+  } else {
+    const maxOrder = pool.__maxOrder || 0;
+    base = Math.max(1, maxOrder - ((Number(origin.order) || 1) - 1) + 1);
+  }
   return base * softRecoverCoeff(pool.id, origin.id);
 }
 
 /**
- * chain 的「order 派生默认权重」：order 越小权重越高（保留主备倾斜但非独占），
- * 显式 weight 优先；试水期同样 ×coeff。
- *   defaultWeight = 池内最大 order − origin.order + 1
+ * chain 策略：严格串行，按 order 升序（1 第一优先）取候选集中最小者。
+ * 无权重、无轮询状态；与 failover 的「排除已试源站」配合即实现 1→2→3→4 串行回退。
+ * 并列 order 时取候选数组先出现者（即源站列表先出现者）。
  *
- * @param {Object} origin 源站
- * @param {Object} pool 源站池
- * @returns {number} 生效权重（>=1）
+ * @param {Object[]} candidates 候选源站（已过滤冷却/熔断）
+ * @returns {Object} 选中的源站
  */
-function chainWeightOf(origin, pool) {
-  // 显式 weight 优先
-  if (Number(origin.weight) > 0) return weightOf(origin, pool);
-  const maxOrder = pool.__maxOrder || 0;
-  const w = Math.max(1, maxOrder - (Number(origin.order) || 0) + 1);
-  return w * softRecoverCoeff(pool.id, origin.id);
+function pickStrictOrder(candidates) {
+  let best = candidates[0];
+  let bestOrder = Number(best.order) || 1;
+  for (let i = 1; i < candidates.length; i++) {
+    const o = candidates[i];
+    const ord = Number(o.order) || 1;
+    if (ord < bestOrder) {
+      best = o;
+      bestOrder = ord;
+    }
+  }
+  return best;
 }
 
 /**
@@ -171,30 +192,6 @@ function pickSwrr(pool, candidates, weightOfFn) {
 }
 
 /**
- * random：尊重 weight（有 weight 按权重随机，无 weight 等概率）。
- *
- * @param {Object[]} candidates 候选源站
- * @returns {Object} 选中的源站
- */
-function pickRandom(candidates) {
-  const hasWeight = candidates.some((o) => Number(o.weight) > 0);
-  if (!hasWeight) return candidates[Math.floor(Math.random() * candidates.length)];
-
-  const prefix = [];
-  let total = 0;
-  for (const o of candidates) {
-    const w = Number(o.weight) > 0 ? Number(o.weight) : 1;
-    total += w;
-    prefix.push(total);
-  }
-  const r = Math.random() * total;
-  for (let i = 0; i < prefix.length; i++) {
-    if (r < prefix[i]) return candidates[i];
-  }
-  return candidates[candidates.length - 1];
-}
-
-/**
  * iphash：一致性哈希环 + 虚拟节点，命中坏源站环内顺时针回退 + 软亲和缓存。
  *
  * @param {Object} pool 源站池
@@ -209,8 +206,8 @@ function pickIpHash(pool, ctx, candidates) {
     '';
 
   if (!ip) {
-    // 无 IP 退化 chain（可用集 SWRR）
-    return pickSwrr(pool, candidates, chainWeightOf);
+    // 无 IP 退化 weighted（按 weight 选，未填则按 order 派生）
+    return pickSwrr(pool, candidates, weightOf);
   }
 
   // 软亲和：环内曾回退到某备用源站，短期直接命中，避免每请求重复走回退路径。
@@ -360,12 +357,12 @@ function affinitySet(ip, originId) {
 }
 
 // ---------------------------------------------------------------------------
-// chain 最大 order 预计算（供 chainWeightOf 使用）
+// order 派生权重所需的「最大 order」预计算（供 weightOf 未填 weight 时派生）
 // ---------------------------------------------------------------------------
 
 /**
  * 在 selectOrigin 外暴露一个轻量预计算入口：给 pool 挂上 __maxOrder（仅本 isolate 复用）。
- * 由 failover 在调用前设置；缺失时 chainWeightOf 退化为 1（不影响正确性）。
+ * 由 failover 在调用前设置；缺失时 weightOf 退化为 1（不影响正确性）。
  * 这里提供导出函数以便 failover 统一调用。
  *
  * @param {Object} pool 源站池
@@ -373,7 +370,7 @@ function affinitySet(ip, originId) {
 export function primeChainWeights(pool) {
   const orders = (pool?.origins || [])
     .filter((o) => o && o.enabled !== false)
-    .map((o) => Number(o.order) || 0);
+    .map((o) => Number(o.order) || 1);
   pool.__maxOrder = orders.length ? Math.max(...orders) : 0;
 }
 

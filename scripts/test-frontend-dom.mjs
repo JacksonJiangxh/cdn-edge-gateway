@@ -158,7 +158,7 @@ function makeApiStub() {
     id: 'p1',
     name: '默认源站池',
     kind: 'http',
-    strategy: 'roundrobin',
+    strategy: 'weighted',
     origins: [{ id: 'o1', addr: '1.2.3.4', weight: 1 }],
   };
   return {
