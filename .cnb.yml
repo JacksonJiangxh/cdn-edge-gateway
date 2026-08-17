@@ -494,12 +494,26 @@ $:
             # 动画会被 runner 误判卡住；PAGES_SOURCE=skills 为官方要求的上下文变量。
             # 上传本地产物包 dist-eo/（含薄壳+_worker.js+静态资源+无 buildCommand 的精简
             # edgeone.json），CLI 直接上传、不再本地重新 build（npm run build 含 e2e 会退出）。
+            #
+            # 【隐私脱敏】edgeone CLI 的 stdout/--json 会回显两类隐私，决不能原样落日志：
+            #   1) 访问令牌：Deploy URL 里的 `eo_token=...`（32 位 hex）+ `eo_time=...`；
+            #   2) 资源标识：Project ID（makers-xxxxxxxx）、Deployment ID（dpxxxxxxxx）、
+            #      以及 Console URL 里的同款 ID（拼出腾讯云控制台可直达的私有链接）。
+            # 脱敏函数统一替换后再打印，避免 token / 控制台链接在发布日志里暴露。
+            redact() {
+              sed -E \
+                -e 's/eo_token=[0-9a-f]{32}/eo_token=<redacted-eo-token>/g' \
+                -e 's/eo_time=[0-9]+/eo_time=<redacted>/g' \
+                -e 's/makers-[0-9a-z]{12}/<redacted-project-id>/g' \
+                -e 's/dp[0-9a-z]{10}/<redacted-deployment-id>/g' \
+                -e 's#(https://console\.tencentcloud\.com/edgeone/pages/project/)[^ /]+#\1<redacted-project-id>#g'
+            }
             export PAGES_SOURCE=skills
             edgeone makers deploy dist-eo \
               -n "$PROJECT" \
               -t "$EO_SECRET" \
               -e "$TARGET_ENV" \
-              --json
+              --json 2>&1 | redact
             echo "✓ EO Pages 部署完成（项目: $PROJECT / 环境: $TARGET_ENV，本地构建产物上传，未触发云端构建）"
 
   # ---- 按钮：部署阿里云 ESA Pages ----
