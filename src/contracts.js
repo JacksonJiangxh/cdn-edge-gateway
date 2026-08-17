@@ -71,12 +71,13 @@
 /**
  * KV Key 命名规范 —— 所有模块必须遵守
  *
+ *   cfg:version               配置版本号（分钟级 UTC 时间戳，跨 isolate 广播位）
  *   cfg:global                全局配置 GlobalConfig
  *   cfg:global_rules          全站通用（兜底）规则 { stages: {阶段→默认动作} }
- *   site:{host}               站点配置 Site（host 全小写）
- *   site:_index               站点索引 { hosts: string[], wildcards: {pattern,host}[] }
- *   pool:{poolId}             源站池 OriginPool
- *   pool:_index               源站池索引 { ids: string[] }
+ *   cfg:sites                 站点族合并键 { hosts:[], wildcards:[{pattern,host}], byHost:{host:site} }
+ *                             （原 site:{host}×N + site:_index 合并为单键）
+ *   cfg:pools                 源站池族合并键 { ids:[], byId:{id:pool} }
+ *                             （原 pool:{id}×M + pool:_index 合并为单键）
  *   hc:{poolId}:{originId}    熔断标记（值为失败次数，TTL 60s）
  *   lock:{ip}                 登录失败锁定（TTL 900s）
  *   sync:token                配置同步接收开关：{ code, createdAt, expiresAt }

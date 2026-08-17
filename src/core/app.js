@@ -14,7 +14,7 @@
  * ============================================================================
  */
 
-import { getGlobal, ensureGlobalRulesSeeded } from '../config/store.js';
+import { getGlobal, ensureGlobalRulesSeeded, loadConfigSnapshot, reconcileVersion } from '../config/store.js';
 import { handleApi } from '../api/router.js';
 import { renderAdminPage, tryServePanelStatic } from '../api/adminPage.js';
 import { handleProxy } from '../proxy/pipeline.js';
@@ -29,6 +29,24 @@ import { flush } from '../stats/collector.js';
 export async function handleRequest(ctx) {
   const { url } = ctx;
   const pathname = url.pathname;
+
+  // ---- 冷启动全量快照加载（KV 仅作初始数据源）----
+  // 幂等：entry.js 已调用过则立即短路；此处作为冷启动兜底，保证管理面/数据面
+  // 首个请求前配置已就绪。之后运行时数据面纯内存读。
+  try {
+    await loadConfigSnapshot(ctx);
+  } catch (err) {
+    console.error('[app] loadConfigSnapshot failed:', err?.message);
+  }
+
+  // ---- 后台版本号比对（版本感知 + 全量快照）----
+  // 每个请求末尾由 waitUntil 触发，不阻塞响应；reconcileVersion 内部有并发去重
+  // 与分档线性回退限流，实际读 KV 频率受回退档位控制（稳态约 144 次/天/isolate）。
+  try {
+    ctx.waitUntil(reconcileVersion(ctx));
+  } catch {
+    /* 后台比对失败不影响主流程 */
+  }
 
   // ---- 冷启动主动播种：部署后 isolate 首请求时确保全站规则已在 KV 落盘内置默认 ----
   // fire-and-forget：不 await，避免拖慢首响；失败由 getGlobalRules 惰性兜底保障。

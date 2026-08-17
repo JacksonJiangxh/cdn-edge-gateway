@@ -20,11 +20,11 @@ async function main(){
   const gs=structuredClone(DEFAULT_GLOBAL_RULES);
   gs.reqHeaders={set:{'X-Custom':'gval'},remove:[]};
   await kv.put(encodeKey('cfg:global_rules'), JSON.stringify({stages:gs}));
-  // 站点 + 规则
-  await kv.put(encodeKey('site:_index'), JSON.stringify({hosts:['img.example.com'],wildcards:[]}));
-  await kv.put(encodeKey('pool:_index'), JSON.stringify({ids:['pool1']}));
-  await kv.put(encodeKey('site:img.example.com'), JSON.stringify({host:'img.example.com',enabled:true,poolId:'pool1',defaultHostHeader:{mode:'accel',custom:''},rules:[{id:'s1',stage:'reqHeaders',priority:100,match:{},action:{reqHeaders:{set:{'X-Custom':'sval'}}}}],security:{refererMode:'off',refererList:[],allowEmptyReferer:true,uaBlacklist:[],ipBlacklist:[],ipWhitelist:[],signedUrl:{enabled:false,secret:'',ttl:3600,param:'sign'},rateLimit:{enabled:false,rpm:600},botManagement:{enabled:false,mode:'blacklist',list:[]}},cacheGen:0}));
-  await kv.put(encodeKey('pool:pool1'), JSON.stringify({id:'pool1',name:'p',kind:'single',strategy:'chain',origins:[{id:'o1',enabled:true,order:1,weight:1,engine:'fetch',scheme:'https',addr:'origin1.example.net',port:443,pathPrefix:'',extraHeaders:{},hostHeader:{mode:'inherit',custom:''},sni:null,rewrite:{type:'none',value:'',regexFrom:'',regexTo:''},reqHeaders:{set:{},strip:[]},respHeaders:{set:{},strip:[]},cache:{enabled:false,mode:'ttl',edgeTtl:0,browserTtl:0},followRedirect:false,clientIpHeader:{enabled:false,name:'X-Forwarded-For'}}],failover:{enabled:true,retryOn:[500,502,503,504,522,524],maxRetries:2,timeoutMs:10000}}));
+  // 站点 + 规则（键合并后站点族/源站池族分别落盘 cfg:sites / cfg:pools 单键）
+  const site = {host:'img.example.com',enabled:true,poolId:'pool1',defaultHostHeader:{mode:'accel',custom:''},rules:[{id:'s1',stage:'reqHeaders',priority:100,match:{},action:{reqHeaders:{set:{'X-Custom':'sval'}}}}],security:{refererMode:'off',refererList:[],allowEmptyReferer:true,uaBlacklist:[],ipBlacklist:[],ipWhitelist:[],signedUrl:{enabled:false,secret:'',ttl:3600,param:'sign'},rateLimit:{enabled:false,rpm:600},botManagement:{enabled:false,mode:'blacklist',list:[]}},cacheGen:0};
+  const pool = {id:'pool1',name:'p',kind:'single',strategy:'chain',origins:[{id:'o1',enabled:true,order:1,weight:1,engine:'fetch',scheme:'https',addr:'origin1.example.net',port:443,pathPrefix:'',extraHeaders:{},hostHeader:{mode:'inherit',custom:''},sni:null,rewrite:{type:'none',value:'',regexFrom:'',regexTo:''},reqHeaders:{set:{},strip:[]},respHeaders:{set:{},strip:[]},cache:{enabled:false,mode:'ttl',edgeTtl:0,browserTtl:0},followRedirect:false,clientIpHeader:{enabled:false,name:'X-Forwarded-For'}}],failover:{enabled:true,retryOn:[500,502,503,504,522,524],maxRetries:2,timeoutMs:10000}};
+  await kv.put(encodeKey('cfg:sites'), JSON.stringify({hosts:['img.example.com'],wildcards:[],byHost:{'img.example.com':site}}));
+  await kv.put(encodeKey('cfg:pools'), JSON.stringify({ids:['pool1'],byId:{pool1:pool}}));
   const { getGlobalRules } = await import('../src/config/store.js');
   const gr = await getGlobalRules({env});
   console.log('global gx reqHeaders=', JSON.stringify(gr.stages.reqHeaders));

@@ -14,6 +14,7 @@
 
 import { detectCaps } from './platform/caps.js';
 import { preloadKV } from './platform/kv.js';
+import { loadConfigSnapshot } from './config/store.js';
 import { initMemBudget } from './platform/memBudget.js';
 import { handleRequest } from './core/app.js';
 import { resolveRequestId, REQUEST_ID_HEADER } from './utils/reqid.js';
@@ -102,6 +103,15 @@ async function dispatch(request, env, waitUntilFn) {
     reqId,
     debug: {},
   };
+
+  // 启动时全量快照加载（KV 仅作初始数据源）：首个请求前尽量把固定 5 键
+  // （cfg:version/cfg:global/cfg:global_rules/cfg:sites/cfg:pools）一次性读入内存，
+  // 之后运行时数据面纯内存读。幂等、fire-and-forget，失败由读取路径兜底。
+  try {
+    await loadConfigSnapshot(ctx);
+  } catch (e) {
+    console.error('[entry] loadConfigSnapshot 失败（配置存储降级为按需读）:', e?.message);
+  }
 
   try {
     const response = await handleRequest(ctx);

@@ -90,10 +90,9 @@ function buildPool() {
 
 async function seedSiteAndPool(kv, site, pool) {
   const h = site.host || HOST;
-  await kv.put(encodeKey('site:_index'), JSON.stringify({ hosts: [h], wildcards: [] }));
-  await kv.put(encodeKey('pool:_index'), JSON.stringify({ ids: [POOL_ID] }));
-  await kv.put(encodeKey('site:' + h), JSON.stringify(site));
-  await kv.put(encodeKey('pool:' + POOL_ID), JSON.stringify(pool));
+  // 键合并后站点族/源站池族分别落盘 cfg:sites / cfg:pools 单键（物理键经 encodeKey）
+  await kv.put(encodeKey('cfg:sites'), JSON.stringify({ hosts: [h], wildcards: [], byHost: { [h]: site } }));
+  await kv.put(encodeKey('cfg:pools'), JSON.stringify({ ids: [POOL_ID], byId: { [POOL_ID]: pool } }));
 }
 
 function makeCtx(env, urlStr) {

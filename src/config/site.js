@@ -164,7 +164,7 @@ export const POOL_KINDS = Object.freeze(['single', 'pool']);
 // ----------------------------------------------------------------------------
 
 /**
- * 默认站点索引（对应 KV key `site:_index`）。
+ * 默认站点索引（键合并后站点族落盘 cfg:sites，此结构仅作空索引兜底语义）。
  * @type {Readonly<{hosts:string[], wildcards:{pattern:string,host:string}[]}>}
  */
 export const DEFAULT_SITE_INDEX = Object.freeze({
@@ -173,7 +173,7 @@ export const DEFAULT_SITE_INDEX = Object.freeze({
 });
 
 /**
- * 默认源站池索引（对应 KV key `pool:_index`）。
+ * 默认源站池索引（键合并后源站池族落盘 cfg:pools，此结构仅作空索引兜底语义）。
  * @type {Readonly<{ids:string[]}>}
  */
 export const DEFAULT_POOL_INDEX = Object.freeze({

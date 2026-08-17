@@ -26,8 +26,6 @@ import { encryptSecret } from '../utils/cipher.js';
 import { BAKE_DEFAULTS } from './baked.defaults.js';
 import {
   DEFAULT_GLOBAL,
-  DEFAULT_SITE_INDEX,
-  DEFAULT_POOL_INDEX,
   DEFAULT_GLOBAL_RULES,
   cloneGlobal,
   cloneGlobalRules,
@@ -62,17 +60,22 @@ import { registerDomain, allocBytes, releaseBytes, syncEntries } from '../platfo
 const K_VERSION = 'cfg:version';
 
 /**
- * 版本号本地再缓存时长（毫秒）——采用「指数动态退避」三档，而非固定值。
- * 三档间隔 [2s, 60s, 180s]：检测到配置变更时进入激进档（2s）保持若干轮快速
- * 收敛，连续未变更则逐步退避到更高档。三个部署平台（CF Workers / EdgeOne /
- * 阿里云 ESA）统一以 KV 免费读 10 万/天为额度上限：
- *   - 稳态（180s 档）：每 isolate ≈ 86400/180 ≈ 480 次/天；
- *     即便 30 个常驻 isolate 也仅 ≈ 1.44 万/天，远低于 10 万上限。
- *   - 变更后：2~6s 内全站生效（比「必须重新部署」已是质的改善）。
+ * 版本号本地再缓存时长（毫秒）——采用「分档线性回退」，而非指数退避。
+ * 档位表（秒）：[2, 20, 60, 120, 200, 300, 400, 500, 600, 600]，共 10 档。
+ *   - 起步 2s 激进档，每档连续命中 VERSION_HOLD_ROUNDS 次版本号不变后才退到
+ *     下一档（步进恒为 1，不跳跃，符合「线性回退」）。
+ *   - 命中版本号变化立即回到 0 档（2s），全站快速收敛到新配置。
+ *   - 稳态封顶 600s：达上限后每 isolate ≈ 86400/600 ≈ 144 次/天，远低于额度。
+ * 达到 600s 上限的时间（理想静态、无版本变化，每档 hold=9 次）：
+ *   通过前 8 档（2/20/60/120/200/300/400/500s）即进入 600s 封顶档：
+ *     累计 = 9*(2+20+60+120+200+300+400+500) = 9*1602 = 14418s ≈ 4.0 小时。
+ *   满足「理想静态约 4 小时后才达到 600 秒上限」的约束。
+ * 常数可按需微调（HOLD 越小收敛越快、KV 读越多），但不改变
+ * 「2s 起、600s 封顶、约 4 小时达上限、每档触发 N 次」的约束。
  */
-const VERSION_POLL_LEVELS_MS = [2_000, 60_000, 180_000];
-/** 激进档（2s）连续保持的轮数：变更后以此高频轮询以便快速稳定，之后退避。 */
-const VERSION_RAPID_ROUNDS = 3;
+const VERSION_POLL_LEVELS_MS = [2_000, 20_000, 60_000, 120_000, 200_000, 300_000, 400_000, 500_000, 600_000, 600_000];
+/** 每档连续命中（版本号不变）多少次后才退避到下一档。 */
+const VERSION_HOLD_ROUNDS = 9;
 
 /**
  * 全局配置变更回调（如 statsDriver 切换需重建单例）。
@@ -90,25 +93,26 @@ export function onGlobalChange(fn) {
 }
 
 /**
- * 版本号读取（指数动态退避三档）：先走本地退避缓存，未命中才读 KV。
+ * 版本号读取（分档线性回退）：先走本地退避缓存，未命中才读 KV。
  * 返回 Promise<number>（无版本号时返回 0，表示「首次/未初始化」）。
  * 读取失败降级为 -1，调用方据此选择「保守：不失效」（宁可多等，绝不丢配置）。
  *
  * 退避状态机（详见 VERSION_POLL_LEVELS_MS 注释）：
- *   - 本次读到的版本号与上次不同（检测到配置变更）→ 重置到激进档（2s），
- *     并保持 VERSION_RAPID_ROUNDS 轮高频，使全站快速收敛到新值。
- *   - 本次读到的版本号与上次相同（空闲）→ 若仍在激进轮数内保持 2s，
- *     否则向更高档（60s→180s）退避，最大程度省 KV 读额度。
+ *   - 本次读到的版本号与上次不同（检测到配置变更）→ 回到 0 档（2s），
+ *     并把 holdLeft 重置为 VERSION_HOLD_ROUNDS，全站快速收敛到新值。
+ *   - 本次读到的版本号与上次相同（空闲）→ holdLeft 减 1；
+ *       若仍 > 0 则维持当前档位，否则退到下一档并重置 holdLeft（每档触发
+ *       VERSION_HOLD_ROUNDS 次后才回退，步进恒为 1，符合「分档线性回退」）。
  * @param {import('../contracts.js').Ctx} ctx
  * @returns {Promise<number>}
  */
 let _verState = {
   // 最近一次从 KV 读到的版本号
   value: 0,
-  // 当前轮询档位下标（0=2s, 1=60s, 2=180s）
+  // 当前轮询档位下标（0=2s, …, 8/9=600s 封顶）
   level: 0,
-  // 激进档（2s）剩余保持轮数
-  rapidLeft: 0,
+  // 当前档剩余保持轮数（每档触发 VERSION_HOLD_ROUNDS 次后才退到下一档）
+  holdLeft: VERSION_HOLD_ROUNDS,
   // 本地退避缓存过期时间（ms 时间戳）
   expireAt: 0,
 };
@@ -120,16 +124,16 @@ async function readVersion(ctx) {
   const v = typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
 
   if (_verState.value !== v) {
-    // 版本号变化：进入激进档，保持若干轮 2s 高频以便快速稳定全站
+    // 版本号变化：回到激进档（2s），满 hold，快速稳定全站
     _verState.level = 0;
-    _verState.rapidLeft = VERSION_RAPID_ROUNDS;
-  } else if (_verState.rapidLeft > 0) {
-    // 仍在激进轮数内：维持 2s 高频
-    _verState.rapidLeft -= 1;
-    _verState.level = 0;
+    _verState.holdLeft = VERSION_HOLD_ROUNDS;
+  } else if (_verState.holdLeft > 1) {
+    // 空闲且当前档未触发满：维持当前档，hold 减 1
+    _verState.holdLeft -= 1;
   } else {
-    // 空闲且已过激进期：向更高档退避（60s → 180s → 封顶）
+    // 当前档已触发满：线性退到下一档（步进 1，不跳跃），并重置 hold
     _verState.level = Math.min(_verState.level + 1, VERSION_POLL_LEVELS_MS.length - 1);
+    _verState.holdLeft = VERSION_HOLD_ROUNDS;
   }
 
   _verState.value = v;
@@ -165,7 +169,7 @@ async function bumpVersion(ctx) {
     // 使本 isolate 后续请求快速稳定（其它 isolate 经 KV 版本号同步后各自收敛）。
     _verState.value = next;
     _verState.level = 0;
-    _verState.rapidLeft = VERSION_RAPID_ROUNDS;
+    _verState.holdLeft = VERSION_HOLD_ROUNDS;
     _verState.expireAt = Date.now() + VERSION_POLL_LEVELS_MS[0];
   } catch (err) {
     console.error('[store] 刷新配置版本号失败（已忽略，写入本身已落库）:', err?.message);
@@ -192,10 +196,20 @@ function emitGlobalChange(next, prev) {
 // ----------------------------------------------------------------------------
 
 const K_GLOBAL = 'cfg:global';
-const K_SITE_INDEX = 'site:_index';
-const K_POOL_INDEX = 'pool:_index';
-const kSite = (host) => `site:${host}`;
-const kPool = (id) => `pool:${id}`;
+
+/**
+ * 站点族合并键：原「site:_index + site:<host>×N」散乱多键合并为单键。
+ * 结构 = { hosts:[], wildcards:[{pattern,host}], byHost:{ host:site } }。
+ * 使全量快照加载只读固定 5 键（cfg:version / cfg:global / cfg:global_rules /
+ * cfg:sites / cfg:pools），读键数不随站点/源站池数量增长。
+ */
+const K_SITES = 'cfg:sites';
+
+/**
+ * 源站池族合并键：原「pool:_index + pool:<id>×M」散乱多键合并为单键。
+ * 结构 = { ids:[], byId:{ id:pool } }。理由同 K_SITES。
+ */
+const K_POOLS = 'cfg:pools';
 
 /**
  * 配置同步「接收开关」键。
@@ -324,6 +338,251 @@ const MIN_MEM_TTL_MS = 1_000;
  * 设置的更大值。
  */
 const EO_MIN_CONFIG_TTL_MS = 120_000;
+
+// ----------------------------------------------------------------------------
+// 启动时全量快照加载
+// ----------------------------------------------------------------------------
+//
+// KV 定位：持久化静态配置文件存储，仅作为「启动时的初始数据源」。系统启动后
+// 通过 loadConfigSnapshot 一次性把固定 5 键（cfg:version / cfg:global /
+// cfg:global_rules / cfg:sites / cfg:pools）全量读入内存，之后运行时数据面
+// 只读内存，不再访问 KV。KV 仅在开发期/部署初期由后台管理写入，运行时无写。
+//
+// 同步策略：「版本感知 + 全量快照」。后台 reconcileVersion 定期比对 KV 版本号
+// 与本地 _cachedGlobalVersion，不一致则 reloadConfigSnapshot 整体重拉一遍，
+// 而不是按需逐键拉取。
+
+/** 快照是否已加载（本 isolate 生命周期内标志）。 */
+let _snapshotLoaded = false;
+/** 快照加载并发去重：同一 isolate 冷启动并发请求只打一次 KV。 */
+let _snapshotPromise = null;
+
+/**
+ * 全量快照的持久内存副本（无 TTL 引用，独立于 _mem 的 TTL/LRU 缓存）。
+ * 快照加载后运行时数据面一律从这里读，实现「启动加载后纯内存、不再访问 KV」。
+ * 结构：{ version:number, global:object, globalRules:{stages}, sites:object, pools:object }
+ */
+const _snapshotState = {
+  version: 0,
+  global: null,
+  globalRules: null,
+  sites: null,
+  pools: null,
+};
+
+/**
+ * 旧散乱键迁移 → 新合并键 cfg:sites。
+ * 当新键缺失但旧键（site:_index + 若干 site:<host>）存在时，一次性重建。
+ * 仅在快照加载阶段调用（非运行时写），避免破坏开发期已写入的存量数据。
+ * @param {import('../contracts.js').Ctx} ctx
+ * @returns {Promise<{hosts:string[], wildcards:Array<{pattern:string,host:string}>, byHost:Object<string,object>}|null>}
+ *  成功迁移返回新集合；无迁移必要返回 null。
+ */
+async function migrateLegacySiteKeys(ctx) {
+  const idx = await readJson(ctx, 'site:_index');
+  if (!idx || !Array.isArray(idx.hosts)) return null;
+  const hosts = idx.hosts.filter((h) => typeof h === 'string');
+  if (hosts.length === 0) return null;
+  const coll = { hosts: [], wildcards: [], byHost: {} };
+  for (const host of hosts) {
+    const h = host.toLowerCase();
+    const site = await readJson(ctx, `site:${h}`);
+    if (site && typeof site === 'object') {
+      coll.byHost[h] = site;
+      coll.hosts.push(h);
+      if (h.startsWith('*.')) coll.wildcards.push({ pattern: h, host: h });
+    }
+  }
+  if (coll.hosts.length > 0) {
+    await writeJson(ctx, K_SITES, coll);
+    return coll;
+  }
+  return null;
+}
+
+/**
+ * 旧散乱键迁移 → 新合并键 cfg:pools。
+ * @param {import('../contracts.js').Ctx} ctx
+ * @returns {Promise<{ids:string[], byId:Object<string,object>}|null>}
+ */
+async function migrateLegacyPoolKeys(ctx) {
+  const idx = await readJson(ctx, 'pool:_index');
+  if (!idx || !Array.isArray(idx.ids)) return null;
+  const ids = idx.ids.filter((x) => typeof x === 'string');
+  if (ids.length === 0) return null;
+  const coll = { ids: [], byId: {} };
+  for (const id of ids) {
+    const pool = await readJson(ctx, `pool:${id}`);
+    if (pool && typeof pool === 'object') {
+      coll.byId[id] = pool;
+      coll.ids.push(id);
+    }
+  }
+  if (coll.ids.length > 0) {
+    await writeJson(ctx, K_POOLS, coll);
+    return coll;
+  }
+  return null;
+}
+
+/**
+ * 全量加载配置快照进内存（启动时一次性）。
+ *
+ * 幂等、模块级去重：仅在 _snapshotLoaded 为假时执行，冷启动一次性读 KV 的
+ * 固定 5 键（cfg:version / cfg:global / cfg:global_rules / cfg:sites /
+ * cfg:pools），校验/规范化后写入 _mem 缓存，并刷新 _cachedGlobalVersion 与
+ * _ttlMs。任何单项读取失败不阻塞整体（能读多少算多少，缺失项由 defaults 兜底），
+ * 保证可用性优先。旧散乱键（site:_index/site:*、pool:_index/pool:*）若存在则
+ * 在此阶段迁移为合并键。
+ *
+ * @param {import('../contracts.js').Ctx} ctx
+ * @returns {Promise<void>}
+ */
+export async function loadConfigSnapshot(ctx) {
+  if (_snapshotLoaded) return;
+  if (_snapshotPromise) return _snapshotPromise;
+
+  _snapshotPromise = (async () => {
+    // 烘焙模式（ESA 静态壳）不读 KV，无需快照，直接标记就绪。
+    if (isBakedMode(ctx)) {
+      _snapshotLoaded = true;
+      return;
+    }
+
+    // 1. 版本号
+    const verRaw = await readJson(ctx, K_VERSION);
+    const ver = typeof verRaw === 'number' && Number.isFinite(verRaw) ? verRaw : 0;
+    _verState.value = ver;
+    _cachedGlobalVersion = ver;
+    _snapshotState.version = ver;
+
+    // 2. 全局配置
+    try {
+      const raw = await readJson(ctx, K_GLOBAL);
+      const cfg = raw ? validateGlobal(raw).value : cloneGlobal();
+      _ttlMs = Math.max(0, (cfg.configCacheTtl ?? 60) * 1000);
+      if (
+        (ctx?.caps?.platform === 'edgeone' || ctx?.caps?.platform === 'eo') &&
+        _ttlMs < EO_MIN_CONFIG_TTL_MS
+      ) {
+        _ttlMs = EO_MIN_CONFIG_TTL_MS;
+      }
+      _snapshotState.global = cfg;
+      memSet(K_GLOBAL, cfg);
+    } catch (err) {
+      console.error('[store] 快照加载全局配置失败（已降级为默认值）:', err?.message);
+    }
+
+    // 3. 全站规则（规范化后进内存，供 getGlobalRules 纯内存读）
+    try {
+      const rawRules = await readJson(ctx, K_GLOBAL_RULES);
+      const stages = _normalizeGlobalRulesInMemory(rawRules);
+      _snapshotState.globalRules = { stages };
+      memSet(K_GLOBAL_RULES, { stages });
+    } catch (err) {
+      console.error('[store] 快照加载全站规则失败（已降级为默认值）:', err?.message);
+    }
+
+    // 4. 站点族 + 5. 源站池族（含旧散乱键迁移）
+    try {
+      let coll = await readJson(ctx, K_SITES);
+      let siteColl = coll && typeof coll === 'object' ? normalizeSiteCollection(coll) : null;
+      if (!siteColl || (siteColl.hosts.length === 0 && !coll)) {
+        const migrated = await migrateLegacySiteKeys(ctx);
+        siteColl = siteColl || normalizeSiteCollection(null);
+        if (migrated) siteColl = migrated;
+      }
+      _snapshotState.sites = siteColl;
+      memSet(K_SITES, siteColl);
+    } catch (err) {
+      console.error('[store] 快照加载站点失败（已降级为空）:', err?.message);
+    }
+    try {
+      let coll = await readJson(ctx, K_POOLS);
+      let poolColl = coll && typeof coll === 'object' ? normalizePoolCollection(coll) : null;
+      if (!poolColl || (poolColl.ids.length === 0 && !coll)) {
+        const migrated = await migrateLegacyPoolKeys(ctx);
+        poolColl = poolColl || normalizePoolCollection(null);
+        if (migrated) poolColl = migrated;
+      }
+      _snapshotState.pools = poolColl;
+      memSet(K_POOLS, poolColl);
+    } catch (err) {
+      console.error('[store] 快照加载源站池失败（已降级为空）:', err?.message);
+    }
+
+    _snapshotLoaded = true;
+    console.log('[store] 配置快照已全量加载（cfg:version=' + ver + '）');
+  })().catch((err) => {
+    // 整体兜底：即使失败也标记已尝试，避免每请求重试；缺失项由读取路径兜底。
+    console.error('[store] 配置快照加载失败（已降级，读取路径将按需兜底）:', err?.message);
+    _snapshotLoaded = true;
+  }).finally(() => {
+    _snapshotPromise = null;
+  });
+
+  return _snapshotPromise;
+}
+
+/**
+ * 全量快照重载（版本号比对命中变化时调用）：清空 config 内存缓存后整体重拉。
+ * 这是「全量快照」的核心——版本号一变，一次性重拉全部配置，而非按需逐键更新。
+ * @param {import('../contracts.js').Ctx} ctx
+ * @returns {Promise<void>}
+ */
+export async function reloadConfigSnapshot(ctx) {
+  _snapshotLoaded = false;
+  invalidateMemCache();
+  await loadConfigSnapshot(ctx);
+}
+
+/**
+ * 本 isolate 是否已加载配置快照（供运行时读取函数判断纯内存读）。
+ * @returns {boolean}
+ */
+export function isSnapshotLoaded() {
+  return _snapshotLoaded;
+}
+
+/** reconcileVersion 并发去重：同一 isolate 同一时刻只跑一次版本比对。 */
+let _reconcileInFlight = false;
+
+/**
+ * 后台版本号比对（请求末尾由 ctx.waitUntil 触发，不阻塞响应）。
+ *
+ * 同步策略核心：「版本感知 + 全量快照」。按分档线性回退状态机周期性读取 KV
+ * 版本号（readVersion 内部由 expireAt 限流，实际读 KV 频率受回退档位控制），
+ * 与本地 _cachedGlobalVersion 比对：
+ *   - 不一致 → 配置变更，reloadConfigSnapshot 整体重拉全部配置进内存；
+ *   - 一致   → 无事，仅维持回退状态。
+ * 幂等去重：并发请求只执行一次比对，避免打爆 KV 读额度。
+ *
+ * @param {import('../contracts.js').Ctx} ctx
+ * @returns {Promise<void>}
+ */
+export async function reconcileVersion(ctx) {
+  if (_reconcileInFlight) return;
+  _reconcileInFlight = true;
+  try {
+    // 快照未加载（冷启动首个请求竞态）先补一次加载，保证后续比对有基准版本号。
+    if (!_snapshotLoaded) {
+      await loadConfigSnapshot(ctx);
+      return;
+    }
+    // 受回退状态机限流的版本号读取；未到轮询时刻时 expireAt 直接短路，零 KV 读。
+    const v = await readVersion(ctx);
+    if (v < 0) return; // 版本号读取失败，保守不失效（宁可多等，绝不丢配置）
+    if (v !== _cachedGlobalVersion) {
+      console.log(`[store] 检测到配置版本号变化（${_cachedGlobalVersion} → ${v}），全量重拉快照`);
+      await reloadConfigSnapshot(ctx);
+    }
+  } catch (err) {
+    // 后台任务失败不影响请求响应，仅记录
+    console.error('[store] reconcileVersion 失败（已忽略）:', err?.message);
+  } finally {
+    _reconcileInFlight = false;
+  }
+}
 
 /**
  * 读 L1 内存缓存。
@@ -530,21 +789,21 @@ export async function getGlobal(ctx) {
     return cfg;
   }
 
-  // —— ProxySQL 式版本号失效 ——
-  // 命中 L1 前先比对版本号：本地缓存的版本号与 KV 当前版本号一致，才信任 L1；
-  // 不一致（说明有 isolate 改过配置）则丢弃 L1、重拉 KV。版本号本地再缓存 2s，
-  // 最坏 2s 全站同步，且是「主动发现并失效」而非「盲等 TTL 过期」。
-  // 若 ctx.mgmt 要求直读（管理面写后立刻读），或版本号读取失败（保守：降级为不失效），
-  // 仍走原有 memGet 命中逻辑，保证可用性。
+  // —— 运行时纯内存读（启动时全量快照已加载）——
+  // KV 定位为「启动时的初始数据源」：快照加载后配置即持久使用，运行时不再读 KV。
+  // 版本号比对已从热路径移除，改由后台 reconcileVersion 周期性比对、命中变化
+  // 时 reloadConfigSnapshot 整体重拉。此处：
+  //   - 快照已加载：数据面直接读持久内存快照 _snapshotState.global，零 KV 读
+  //     （不依赖 TTL 缓存，彻底「启动加载后纯内存」）；
+  //     管理面（ctx.mgmt）仍绕过快照直读 KV，确保写后立刻读到最新值。
+  //   - 快照未加载（冷启动竞态）：回退到原 KV 直读路径，保证可用性。
+  if (_snapshotLoaded && !ctx?.mgmt && _snapshotState.global) {
+    return _snapshotState.global;
+  }
   const cached = memGet(ctx, K_GLOBAL);
-  if (!ctx?.mgmt && cached) {
-    // 失败返回 -1
-    const ver = await readVersion(ctx);
-    if (ver < 0 || ver === _cachedGlobalVersion) {
-      // 版本一致（或版本号读取失败保守放行）→ 直接用 L1
-      return cached;
-    }
-    // 版本号不一致：丢弃 L1，下方重拉 KV
+  if (_snapshotLoaded && cached) {
+    if (!ctx?.mgmt) return cached;
+    // 管理面要求直读最新 KV，丢弃快照缓存走下方 readJson
     memDel(K_GLOBAL);
   }
 
@@ -589,9 +848,12 @@ export async function getGlobal(ctx) {
   }
   _ttlMs = ttlMs;
 
-  // 记录本 isolate 当前生效的配置版本号快照（供下次进入时比对）
-  const newVer = await readVersion(ctx);
-  _cachedGlobalVersion = newVer >= 0 ? newVer : _cachedGlobalVersion;
+  // 快照未加载（冷启动兜底直读 KV）时，同步刷新本地版本号基准，
+  // 使后续后台 reconcileVersion 有正确的比对起点。
+  if (!_snapshotLoaded) {
+    const newVer = await readVersion(ctx);
+    _cachedGlobalVersion = newVer >= 0 ? newVer : _cachedGlobalVersion;
+  }
 
   // 检测「配置内容变更」并通知监听者（如 statsDriver 切换需重建单例）。
   // 仅在确实重拉了 KV（非 L1 命中）时发生，避免每次请求都触发监听器。
@@ -635,6 +897,8 @@ export async function putGlobal(ctx, global) {
   await writeJson(ctx, K_GLOBAL, value);
   memDel(K_GLOBAL);
   memSet(K_GLOBAL, value);
+  // 同步持久内存快照，使本 isolate 写后立即生效（数据面读 _snapshotState.global）
+  _snapshotState.global = value;
   _ttlMs = Math.max(0, (value.configCacheTtl ?? 30) * 1000);
 
   // —— ProxySQL 式写入协议：改本地内存(立即生效本 isolate) → 落库 KV → 自增版本号 ——
@@ -648,40 +912,106 @@ export async function putGlobal(ctx, global) {
 // 站点索引
 // ----------------------------------------------------------------------------
 
-async function getSiteIndex(ctx) {
-  const cached = memGet(ctx, K_SITE_INDEX);
-  if (cached) return cached;
+/**
+ * 规范化站点族集合：把任意历史形态的 cfg:sites 数据整理成稳定结构
+ * `{ hosts:[], wildcards:[{pattern,host}], byHost:{ host:site } }`。
+ * 幂等、纯函数，缺省回退到空索引语义（与 DEFAULT_SITE_INDEX 等价）。
+ * @param {any} raw readJson(K_SITES) 返回值（可能为 null/旧结构）
+ * @returns {{hosts:string[], wildcards:Array<{pattern:string,host:string}>, byHost:Object<string,object>}}
+ */
+function normalizeSiteCollection(raw) {
+  const coll = {
+    hosts: [],
+    wildcards: [],
+    byHost: {},
+  };
+  if (!raw || typeof raw !== 'object') return coll;
 
-  // 烘焙模式：索引由烤制的 sites 列表现场构建（一次即可，结果仍进 L1 缓存）。
-  if (isBakedMode(ctx)) {
-    const sites = await bakedGet('sites') || [];
-    const idx = {
-      hosts: sites.filter((s) => s && typeof s.host === 'string').map((s) => String(s.host).toLowerCase()),
-      wildcards: sites
-        .filter((s) => s && typeof s.host === 'string' && String(s.host).startsWith('*.'))
-        .map((s) => ({ pattern: String(s.host).toLowerCase(), host: String(s.host).toLowerCase() })),
-    };
-    memSet(K_SITE_INDEX, idx);
-    return idx;
+  // 优先按合并键结构（byHost）重建；兼容旧 {hosts, wildcards} 索引结构。
+  if (raw.byHost && typeof raw.byHost === 'object') {
+    for (const [host, site] of Object.entries(raw.byHost)) {
+      if (!site || typeof site !== 'object') continue;
+      const h = String(host).toLowerCase();
+      if (site.host !== undefined && String(site.host).toLowerCase() !== h) site.host = h;
+      coll.byHost[h] = site;
+      if (!coll.hosts.includes(h)) coll.hosts.push(h);
+      if (h.startsWith('*.')) coll.wildcards.push({ pattern: h, host: h });
+    }
+  } else if (Array.isArray(raw.hosts)) {
+    // 旧 {hosts, wildcards} 索引：仅能还原 host 列表，实体数据需要时逐条缺失。
+    coll.hosts = raw.hosts.filter((h) => typeof h === 'string').map((h) => h.toLowerCase());
+    coll.wildcards = Array.isArray(raw.wildcards)
+      ? raw.wildcards.filter((w) => w && typeof w.pattern === 'string')
+      : [];
+    // 由索引补齐 byHost 空壳，保证按 host 读取至少能命中列表。
+    for (const h of coll.hosts) coll.byHost[h] = coll.byHost[h] || null;
   }
-
-  const raw = await readJson(ctx, K_SITE_INDEX);
-  const idx =
-    raw && Array.isArray(raw.hosts)
-      ? {
-          hosts: raw.hosts.filter((h) => typeof h === 'string'),
-          wildcards: Array.isArray(raw.wildcards) ? raw.wildcards : [],
-        }
-      : deepClone(DEFAULT_SITE_INDEX);
-
-  memSet(K_SITE_INDEX, idx);
-  return idx;
+  return coll;
 }
 
+/**
+ * 加载站点族集合（cfg:sites 单键）。
+ * - 烘焙模式：由烤制的 sites 列表现场构建，结果进 L1 缓存。
+ * - 普通模式：读 KV 单键 cfg:sites，规范化后进 L1 缓存（整族一个缓存键）。
+ * @param {import('../contracts.js').Ctx} ctx
+ * @returns {Promise<{hosts:string[], wildcards:Array<{pattern:string,host:string}>, byHost:Object<string,object>}>}
+ */
+async function getSiteCollection(ctx) {
+  // 快照就绪后数据面直接读持久内存快照，零 KV 读（KV 仅是启动时初始数据源）。
+  if (_snapshotLoaded && !ctx?.mgmt && _snapshotState.sites) return _snapshotState.sites;
+
+  const cached = memGet(ctx, K_SITES);
+  if (cached) return cached;
+
+  let coll;
+  if (isBakedMode(ctx)) {
+    const sites = await bakedGet('sites') || [];
+    coll = { hosts: [], wildcards: [], byHost: {} };
+    for (const s of sites) {
+      if (!s || typeof s.host !== 'string') continue;
+      const h = String(s.host).toLowerCase();
+      coll.byHost[h] = s;
+      if (!coll.hosts.includes(h)) coll.hosts.push(h);
+      if (h.startsWith('*.')) coll.wildcards.push({ pattern: h, host: h });
+    }
+  } else {
+    const raw = await readJson(ctx, K_SITES);
+    coll = normalizeSiteCollection(raw);
+  }
+
+  memSet(K_SITES, coll);
+  return coll;
+}
+
+/**
+ * 读取站点索引（hosts + wildcards），供路由匹配与列表使用。
+ * 键合并后为 cfg:sites 集合的便捷视图。
+ * @param {import('../contracts.js').Ctx} ctx
+ */
+async function getSiteIndex(ctx) {
+  const coll = await getSiteCollection(ctx);
+  return { hosts: coll.hosts, wildcards: coll.wildcards };
+}
+
+/**
+ * 把更新后的站点族集合整体落盘 cfg:sites，并同步内存缓存。
+ * @param {import('../contracts.js').Ctx} ctx
+ * @param {{hosts:string[], wildcards:Array<{pattern:string,host:string}>, byHost:Object<string,object>}} coll
+ */
+async function putSiteCollection(ctx, coll) {
+  await writeJson(ctx, K_SITES, coll);
+  memDel(K_SITES);
+  memSet(K_SITES, coll);
+  // 同步持久内存快照，使本 isolate 写后立即生效（数据面读 _snapshotState.sites）
+  if (_snapshotLoaded) _snapshotState.sites = coll;
+}
+
+/** @deprecated 键合并后站点索引不再独立成键，写入统一走 putSiteCollection */
 async function putSiteIndex(ctx, idx) {
-  await writeJson(ctx, K_SITE_INDEX, idx);
-  memDel(K_SITE_INDEX);
-  memSet(K_SITE_INDEX, idx);
+  const coll = await getSiteCollection(ctx);
+  coll.hosts = idx.hosts || [];
+  coll.wildcards = idx.wildcards || [];
+  await putSiteCollection(ctx, coll);
 }
 
 /**
@@ -714,41 +1044,26 @@ function wildcardMatch(pattern, host) {
 export async function getSite(ctx, host, options = {}) {
   if (!host || typeof host !== 'string') return null;
   const h = host.toLowerCase();
-  const memKey = `${kSite(h)}${options.exact ? '#e' : ''}`;
+  const memKey = `${h}#s${options.exact ? 'e' : ''}`;
 
   const cached = memGet(ctx, memKey);
   if (cached !== undefined) return cached;
 
-  // ---- 1. 精确匹配 ----
-  let site;
-  // 烘焙模式：不读 KV，直接在内置 sites 里按 host 查（host 已小写化）。
-  if (isBakedMode(ctx)) {
-    const sites = await bakedGet('sites') || [];
-    site = sites.find((s) => s && typeof s.host === 'string' && String(s.host).toLowerCase() === h) || null;
-  }
+  // 键合并后：整个站点族在一个 cfg:sites 键里，单次读即覆盖全部站点。
+  const coll = await getSiteCollection(ctx);
 
-  if (!site && !isBakedMode(ctx)) {
-    site = await readJson(ctx, kSite(h));
-  }
+  // ---- 1. 精确匹配 ----
+  let site = coll.byHost[h] || null;
 
   // ---- 2. 泛域名回退 ----
   if (!site && !options.exact) {
-    const idx = await getSiteIndex(ctx);
     // 按 pattern 长度降序，保证 *.a.b.com 优先于 *.b.com（更具体的优先）
-    const sorted = [...(idx.wildcards || [])].sort(
+    const sorted = [...(coll.wildcards || [])].sort(
       (x, y) => (y.pattern?.length || 0) - (x.pattern?.length || 0)
     );
     for (const w of sorted) {
       if (w?.pattern && wildcardMatch(w.pattern, h)) {
-        if (isBakedMode(ctx)) {
-          const sites = await bakedGet('sites') || [];
-          site =
-            sites.find(
-              (s) => s && typeof s.host === 'string' && String(s.host).toLowerCase() === w.pattern.toLowerCase(),
-            ) || null;
-        } else {
-          site = await readJson(ctx, kSite(w.pattern));
-        }
+        site = coll.byHost[w.pattern] || null;
         break;
       }
     }
@@ -769,31 +1084,19 @@ export async function putSite(ctx, site) {
   if (isBakedMode(ctx)) throwBakedReadOnly(ctx);
   const host = String(site.host).toLowerCase();
 
-  // 【写入顺序】先索引、后数据。
-  // KV 无事务，两次写必有一次可能失败，只能选择「失败时留下哪种不一致」：
-  //   - 先数据后索引（旧实现）：索引写失败 → 站点已生效但管理面看不见、删不掉，
-  //     形成无法治理的「幽灵站点」，属于危险的不一致。
-  //   - 先索引后数据（现实现）：数据写失败 → 索引里多一个悬空条目，
-  //     listSites 读不到会跳过（见下方 filter），getSite 回落为未配置，
-  //     重试 putSite 即可自愈，属于安全的不一致。
-  const idx = await getSiteIndex(ctx);
+  // 键合并后站点族整体落盘 cfg:sites（单次 put），不再有「索引键 + 实体键」
+  // 两次写的跨键不一致窗口：要么整个族写成功，要么没写，天然原子。
+  const coll = await getSiteCollection(ctx);
   const isWildcard = host.startsWith('*.');
-  let changed = false;
+  if (!site.host || String(site.host).toLowerCase() !== host) site.host = host;
 
-  if (!idx.hosts.includes(host)) {
-    idx.hosts.push(host);
-    changed = true;
+  if (!coll.hosts.includes(host)) coll.hosts.push(host);
+  if (isWildcard && !(coll.wildcards || []).some((w) => w.pattern === host)) {
+    coll.wildcards.push({ pattern: host, host });
   }
-  if (isWildcard) {
-    const exists = (idx.wildcards || []).some((w) => w.pattern === host);
-    if (!exists) {
-      idx.wildcards = [...(idx.wildcards || []), { pattern: host, host }];
-      changed = true;
-    }
-  }
-  if (changed) await putSiteIndex(ctx, idx);
+  coll.byHost[host] = site;
 
-  await writeJson(ctx, kSite(host), site);
+  await putSiteCollection(ctx, coll);
 
   invalidateMemCache();
   // 广播版本号，使其它 isolate 在 2s 内重新拉取（ProxySQL 式生效）
@@ -808,19 +1111,14 @@ export async function putSite(ctx, site) {
 export async function deleteSite(ctx, host) {
   if (isBakedMode(ctx)) throwBakedReadOnly(ctx);
   const h = String(host).toLowerCase();
-  const kv = requireKV(ctx);
 
-  // 【删除顺序】先索引、后数据（与 putSite 相反，理由同样是「让失败态安全」）。
-  //   - 先数据后索引（旧实现）：索引写失败 → 站点数据已删但索引仍留条目，
-  //     且因为数据没了，用户在管理面「再删一次」也无法清掉悬空索引，永久泄漏。
-  //   - 先索引后数据（现实现）：数据删失败 → 站点立刻从路由与列表中消失
-  //     （符合用户预期），仅残留一份读不到的孤儿数据，重试删除即可清理。
-  const idx = await getSiteIndex(ctx);
-  idx.hosts = idx.hosts.filter((x) => x !== h);
-  idx.wildcards = (idx.wildcards || []).filter((w) => w.pattern !== h);
-  await putSiteIndex(ctx, idx);
+  // 键合并后：从整个 cfg:sites 集合中移除该站点，单次整体落盘，无跨键不一致窗口。
+  const coll = await getSiteCollection(ctx);
+  coll.hosts = coll.hosts.filter((x) => x !== h);
+  coll.wildcards = (coll.wildcards || []).filter((w) => w.pattern !== h);
+  delete coll.byHost[h];
 
-  await kv.delete(kSite(h));
+  await putSiteCollection(ctx, coll);
 
   invalidateMemCache();
   await bumpVersion(ctx);
@@ -837,33 +1135,24 @@ export async function deleteSite(ctx, host) {
  *   offset:number, truncated:boolean}>} truncated=true 表示还有后续页
  */
 export async function listSites(ctx, options) {
-  const idx = await getSiteIndex(ctx);
-  const allHosts = idx.hosts || [];
+  // 键合并后整个站点族在单个 cfg:sites 键里，读一次集合即可拿到全部站点，
+  // 不再对每个站点发一次 KV 读（消除了旧实现 N 次 subrequest 撞限的问题）。
+  const coll = await getSiteCollection(ctx);
+  const allHosts = coll.hosts || [];
   if (allHosts.length === 0) {
     return { sites: [], total: 0, offset: 0, truncated: false };
   }
 
-  // 【为什么必须分页】BATCH 只限制「并发度」，不限制「总读次数」。
-  // 旧实现对 N 个站点会发出 N 次 KV 读：200 个站点 = 200 次 subrequest，
-  // 必然撞上 Workers 单请求上限（免费版 50 / 付费版 1000）而整个管理面 500。
-  // 因此这里对单次调用的读取量设硬上限，超出部分由调用方翻页获取。
   const offset = Math.max(0, Math.floor(Number(options?.offset) || 0));
   const rawLimit = Math.floor(Number(options?.limit) || MAX_SITES_PER_LIST);
   const limit = Math.min(Math.max(rawLimit, 1), MAX_SITES_PER_LIST);
 
   const hosts = allHosts.slice(offset, offset + limit);
-
-  // 并发读取但限制批大小，避免瞬时打满连接
   const out = [];
-  const BATCH = 10;
-  for (let i = 0; i < hosts.length; i += BATCH) {
-    const batch = hosts.slice(i, i + BATCH);
-    const results = await Promise.all(batch.map((h) => readJson(ctx, kSite(h))));
-    for (const s of results) {
-      // 悬空索引，静默跳过
-      if (!s) continue;
-      out.push(s);
-    }
+  for (const h of hosts) {
+    // 悬空索引（索引有但实体缺失）静默跳过
+    const s = coll.byHost[h];
+    if (s && typeof s === 'object') out.push(s);
   }
 
   return {
@@ -909,22 +1198,92 @@ export async function listAllSites(ctx) {
 // 源站池
 // ----------------------------------------------------------------------------
 
-async function getPoolIndex(ctx) {
-  const cached = memGet(ctx, K_POOL_INDEX);
-  if (cached) return cached;
-  const raw = await readJson(ctx, K_POOL_INDEX);
-  const idx =
-    raw && Array.isArray(raw.ids)
-      ? { ids: raw.ids.filter((x) => typeof x === 'string') }
-      : deepClone(DEFAULT_POOL_INDEX);
-  memSet(K_POOL_INDEX, idx);
-  return idx;
+/**
+ * 规范化源站池族集合：把任意历史形态的 cfg:pools 数据整理成稳定结构
+ * `{ ids:[], byId:{ id:pool } }`。幂等、纯函数。
+ * @param {any} raw readJson(K_POOLS) 返回值（可能为 null/旧结构）
+ * @returns {{ids:string[], byId:Object<string,object>}}
+ */
+function normalizePoolCollection(raw) {
+  const coll = { ids: [], byId: {} };
+  if (!raw || typeof raw !== 'object') return coll;
+  if (raw.byId && typeof raw.byId === 'object') {
+    for (const [id, pool] of Object.entries(raw.byId)) {
+      if (!pool || typeof pool !== 'object') continue;
+      const pid = String(id);
+      if (pool.id !== undefined && String(pool.id) !== pid) pool.id = pid;
+      coll.byId[pid] = pool;
+      if (!coll.ids.includes(pid)) coll.ids.push(pid);
+    }
+  } else if (Array.isArray(raw.ids)) {
+    // 旧 {ids} 索引结构：仅能还原 id 列表。
+    coll.ids = raw.ids.filter((x) => typeof x === 'string');
+    for (const id of coll.ids) coll.byId[id] = coll.byId[id] || null;
+  }
+  return coll;
 }
 
+/**
+ * 加载源站池族集合（cfg:pools 单键）。
+ * - 烘焙模式：由烤制的 pools 列表现场构建，结果进 L1 缓存。
+ * - 普通模式：读 KV 单键 cfg:pools，规范化后进 L1 缓存。
+ * @param {import('../contracts.js').Ctx} ctx
+ * @returns {Promise<{ids:string[], byId:Object<string,object>}>}
+ */
+async function getPoolCollection(ctx) {
+  // 快照就绪后数据面直接读持久内存快照，零 KV 读（KV 仅是启动时初始数据源）。
+  if (_snapshotLoaded && !ctx?.mgmt && _snapshotState.pools) return _snapshotState.pools;
+
+  const cached = memGet(ctx, K_POOLS);
+  if (cached) return cached;
+
+  let coll;
+  if (isBakedMode(ctx)) {
+    const pools = await bakedGet('pools') || [];
+    coll = { ids: [], byId: {} };
+    for (const p of pools) {
+      if (!p || typeof p.id !== 'string') continue;
+      const pid = String(p.id);
+      coll.byId[pid] = p;
+      if (!coll.ids.includes(pid)) coll.ids.push(pid);
+    }
+  } else {
+    const raw = await readJson(ctx, K_POOLS);
+    coll = normalizePoolCollection(raw);
+  }
+
+  memSet(K_POOLS, coll);
+  return coll;
+}
+
+/**
+ * 读取源站池索引（ids 列表），供列表与管理面使用。
+ * 键合并后为 cfg:pools 集合的便捷视图。
+ * @param {import('../contracts.js').Ctx} ctx
+ */
+async function getPoolIndex(ctx) {
+  const coll = await getPoolCollection(ctx);
+  return { ids: coll.ids };
+}
+
+/**
+ * 把更新后的源站池族集合整体落盘 cfg:pools，并同步内存缓存。
+ * @param {import('../contracts.js').Ctx} ctx
+ * @param {{ids:string[], byId:Object<string,object>}} coll
+ */
+async function putPoolCollection(ctx, coll) {
+  await writeJson(ctx, K_POOLS, coll);
+  memDel(K_POOLS);
+  memSet(K_POOLS, coll);
+  // 同步持久内存快照，使本 isolate 写后立即生效（数据面读 _snapshotState.pools）
+  if (_snapshotLoaded) _snapshotState.pools = coll;
+}
+
+/** @deprecated 键合并后源站池索引不再独立成键，写入统一走 putPoolCollection */
 async function putPoolIndex(ctx, idx) {
-  await writeJson(ctx, K_POOL_INDEX, idx);
-  memDel(K_POOL_INDEX);
-  memSet(K_POOL_INDEX, idx);
+  const coll = await getPoolCollection(ctx);
+  coll.ids = idx.ids || [];
+  await putPoolCollection(ctx, coll);
 }
 
 /**
@@ -935,21 +1294,16 @@ async function putPoolIndex(ctx, idx) {
  */
 export async function getPool(ctx, poolId) {
   if (!poolId || typeof poolId !== 'string') return null;
-  const key = kPool(poolId);
+  const memKey = `#pool:${poolId}`;
 
-  // 烘焙模式：直接从烤制的 pools 数组查（poolId 已小写化）。
-  if (isBakedMode(ctx)) {
-    const pools = await bakedGet('pools') || [];
-    const pool = pools.find((p) => p && typeof p.id === 'string' && String(p.id).toLowerCase() === poolId) || null;
-    memSet(key, pool);
-    return pool;
-  }
-
-  const cached = memGet(ctx, key);
+  const cached = memGet(ctx, memKey);
   if (cached !== undefined) return cached;
 
-  let pool = (await readJson(ctx, key)) || null;
-  memSet(key, pool);
+  // 键合并后：整个源站池族在 cfg:pools 单键里，读一次集合即可按 id 取到。
+  const coll = await getPoolCollection(ctx);
+  const pool = coll.byId[poolId] || null;
+
+  memSet(memKey, pool);
   return pool;
 }
 
@@ -974,13 +1328,13 @@ export async function putPool(ctx, pool) {
       }
     }
   }
-  await writeJson(ctx, kPool(id), pool);
+  // 键合并后源站池族整体落盘 cfg:pools（单次 put），不再有「索引键 + 实体键」
+  // 两次写的跨键不一致窗口。
+  const coll = await getPoolCollection(ctx);
+  if (!coll.ids.includes(id)) coll.ids.push(id);
+  coll.byId[id] = pool;
 
-  const idx = await getPoolIndex(ctx);
-  if (!idx.ids.includes(id)) {
-    idx.ids.push(id);
-    await putPoolIndex(ctx, idx);
-  }
+  await putPoolCollection(ctx, coll);
 
   invalidateMemCache();
   await bumpVersion(ctx);
@@ -993,12 +1347,13 @@ export async function putPool(ctx, pool) {
  */
 export async function deletePool(ctx, poolId) {
   const id = String(poolId);
-  const kv = requireKV(ctx);
-  await kv.delete(kPool(id));
 
-  const idx = await getPoolIndex(ctx);
-  idx.ids = idx.ids.filter((x) => x !== id);
-  await putPoolIndex(ctx, idx);
+  // 键合并后：从整个 cfg:pools 集合中移除该池，单次整体落盘，无跨键不一致窗口。
+  const coll = await getPoolCollection(ctx);
+  coll.ids = coll.ids.filter((x) => x !== id);
+  delete coll.byId[id];
+
+  await putPoolCollection(ctx, coll);
 
   invalidateMemCache();
   await bumpVersion(ctx);
@@ -1010,19 +1365,16 @@ export async function deletePool(ctx, poolId) {
  * @returns {Promise<import('../contracts.js').OriginPool[]>}
  */
 export async function listPools(ctx) {
-  const idx = await getPoolIndex(ctx);
-  const ids = idx.ids || [];
+  // 键合并后整个源站池族在 cfg:pools 单键里，读一次集合即可拿到全部池，
+  // 不再对每个池发一次 KV 读。
+  const coll = await getPoolCollection(ctx);
+  const ids = coll.ids || [];
   if (ids.length === 0) return [];
 
   const out = [];
-  const BATCH = 10;
-  for (let i = 0; i < ids.length; i += BATCH) {
-    const batch = ids.slice(i, i + BATCH);
-    const results = await Promise.all(batch.map((id) => readJson(ctx, kPool(id))));
-    for (const p of results) {
-      if (!p) continue;
-      out.push(p);
-    }
+  for (const id of ids) {
+    const p = coll.byId[id];
+    if (p && typeof p === 'object') out.push(p);
   }
   return out;
 }
@@ -1237,6 +1589,11 @@ export async function getGlobalRules(ctx) {
     return merged;
   }
 
+  // 快照就绪后数据面直接读持久内存快照，零 KV 读（KV 仅是启动时初始数据源）。
+  if (_snapshotLoaded && !ctx?.mgmt && _snapshotState.globalRules) {
+    return { stages: deepClone(_snapshotState.globalRules.stages) };
+  }
+
   const data = await readJson(ctx, K_GLOBAL_RULES);
 
   // 关键修正：getGlobalRules 处于每个数据面请求的热路径，绝不能在这里写 KV。
@@ -1314,6 +1671,8 @@ export async function putGlobalRules(ctx, stages) {
   const { stages: normStages } = res.value;
   await writeJson(ctx, K_GLOBAL_RULES, { stages: normStages });
   invalidateMemCache();
+  // 同步持久内存快照，使本 isolate 写后立即生效（数据面读 _snapshotState.globalRules）
+  if (_snapshotLoaded) _snapshotState.globalRules = { stages: normStages };
   await bumpVersion(ctx);
   return { ok: true, value: { stages: normStages } };
 }

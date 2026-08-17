@@ -69,7 +69,9 @@ export const DEFAULT_GLOBAL = Object.freeze({
   passwordHash: '',
   passwordSalt: '',
   tokenTtl: 7200,
-  statsEnabled: true,
+  // 统计（D1）默认关闭：D1 存在每日写入额度限制，且仅在 Cloudflare 环境可用，
+  // 故默认不启用。用户可在管理面显式开启（statsEnabled=true 并确保平台绑定 D1）。
+  statsEnabled: false,
   statsDriver: 'd1',
   configCacheTtl: 60,
   /** 全局请求频率限制（req/s），0 表示不限制 */
