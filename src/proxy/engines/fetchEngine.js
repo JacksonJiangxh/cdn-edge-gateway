@@ -57,18 +57,19 @@ export async function fetchOrigin(ctx, origin, originUrl, headers, timeoutMs, op
   // 外部 cancel（竞速请求的慢路取消）：把「内部超时信号」与「外部取消信号」合并。
   // 优先用 AbortSignal.any（CF/EO/ESA 现代运行时均支持）；不支持时降级为事件桥接，
   // 任一信号 abort 即让内部 controller 取消，确保 fetch 一定能被取消、连接被释放。
-  // 注意：controller.abort() 只会 abort 内部原始 signal，因此合并信号时让定时器直接
-  // abort 合并信号本身，保证「内部超时」与「外部取消」任一触发都能取消 fetch。
+  // 注意：AbortSignal.any() 返回的是只读 AbortSignal，本身没有 abort() 方法（只有
+  // AbortController 才有）；但 controller.signal 是合并信号的成员，controller.abort()
+  // 会自动传播到 combined，fetch 同样被取消。因此超时仍由顶部 timer 触发内部
+  // controller.abort()；若合并信号已 abort（内部超时或外部取消任一触发），清理 timer
+  // 避免 Worker 实例被无谓保活。这与降级分支（事件桥接 ext.addEventListener）语义一致。
   let effectiveSignal = controller.signal;
   if (opts?.controller && opts.controller !== controller) {
     const ext = opts.controller.signal;
     if (typeof AbortSignal.any === 'function') {
       const combined = AbortSignal.any([controller.signal, ext]);
       effectiveSignal = combined;
-      clearTimeout(timer);
-      const t = setTimeout(() => combined.abort(), timeout);
-      // 合并信号已 abort 后清理定时器，避免 Worker 实例被无谓保活
-      combined.addEventListener('abort', () => clearTimeout(t), { once: true });
+      // 合并信号已 abort（内部超时或外部取消任一触发）后清理定时器，避免 Worker 实例被无谓保活
+      combined.addEventListener('abort', () => clearTimeout(timer), { once: true });
     } else {
       const onExternalAbort = () => controller.abort();
       if (ext.aborted) controller.abort();

@@ -233,7 +233,16 @@ export function buildOriginUrl(ctx, origin, rule, hostHeader) {
       authorityAddr = ctx.url.hostname;
     }
     // inherit / origin / 未配置 → 沿用源站 addr（origin 模式语义上等同 addr）
-    if (!authorityAddr) authorityAddr = ctx.url.hostname;
+    if (!authorityAddr) {
+      if (origin.engine === 'cnb' || origin.engine === 'github') {
+        // 仓库型源站若 addr 为空（历史存量数据，落库未回填），回源域名兜底到平台真实
+        // 上游而非加速域名自身，杜绝「回源打到自己」的无限回环（DNS/SNI 用真实上游域名）。
+        // 与 preset 规则的 hostHeader.custom 同源（均源自 repoUpstreamHost）。
+        authorityAddr = repoUpstreamHost(origin.engine, !!origin.repoPrivate);
+      } else {
+        authorityAddr = ctx.url.hostname;
+      }
+    }
   }
 
   // IPv6 字面量地址在 URL 中必须带方括号

@@ -40,6 +40,8 @@ import {
 import { STAGE_OPS, normalizeStage, STAGE_ORDER, GLOBAL_ONLY_STAGE_ORDER } from './stages.js';
 // 动态变量校验：规则动作值支持 ${var} 引用，校验变量名白名单
 import { validateVarNames, hasVars } from './vars.js';
+// 仓库型源站回源域名（DNS/SNI 用）的唯一真相源；与 repoPresets 预设规则 hostHeader.custom 同源。
+import { repoUpstreamHost } from './repoPresets.js';
 
 /**
  * op（STAGE_OPS.allowedOps 里的项）→ 落库 action 对象里的字段名。
@@ -1297,7 +1299,7 @@ function normR2Origin(input, idx, label, errors) {
  * @param {'cnb'|'github'} engine
  * @returns {{value: import('../contracts.js').Origin|null, errors: string[]}}
  */
-function normRepoOrigin(input, idx, label, errors, engine) {
+export function normRepoOrigin(input, idx, label, errors, engine) {
   const repoUser = str(input.repoUser, '', 128).trim();
   const repoName = str(input.repoName, '', 128).trim();
   const repoPrivate = bool(input.repoPrivate, false);
@@ -1315,7 +1317,12 @@ function normRepoOrigin(input, idx, label, errors, engine) {
 
   // 仓库型源站「不承载」任何流量序列字段（rewrite/头/cache/超时/跟随），这些全部由
   // 站点规则层（绑定源站到站点时按源站 id 生成的预设规则）承载，源站对象只保存回源元数据。
-  // 回源 host/scheme/port 统一为 https + 443（实际回源 authority 由规则 hostHeader.custom 决定）。
+  // 回源 scheme/port 统一为 https + 443；回源域名（DNS 解析与 SNI 用）落库即写入真实上游
+  // （区分 cnb 公开/私有与 github），防止「addr 留空 + hostHeader 规则未命中兜底成加速域名」
+  // 导致的回源到自身无限回环。该值与预设规则 hostHeader.custom 同源（均源自 repoUpstreamHost）。
+  // 用户显式传入非空 addr 时保留（兼容手动覆盖），否则回填真实上游。
+  const explicitAddr = str(input.addr, '', 253).trim();
+  const resolvedAddr = explicitAddr || repoUpstreamHost(engine, repoPrivate);
   return {
     value: {
       id: str(input.id, '', 64) || `o_${idx}_${Date.now().toString(36)}`,
@@ -1326,7 +1333,7 @@ function normRepoOrigin(input, idx, label, errors, engine) {
       // 引擎下拉值即 cnb/github（UI 直读显示；底层走 fetch 引擎 + 预设规则）。
       engine,
       scheme: 'https',
-      addr: '',
+      addr: resolvedAddr,
       port: 443,
       pathPrefix: '',
       extraHeaders: Object.freeze({}),

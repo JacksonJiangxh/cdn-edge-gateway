@@ -302,12 +302,18 @@ async function runPipeline(ctx) {
 
   let cacheKey = null;
   if (!bypass && ctx.caps?.hasEdgeCache) {
-    // 合并规则级 rewrite 用于构造缓存键（源站级 rewrite 已不再存在）
-    const mergedRewrite = mergeRewrite(undefined, rule?.action?.rewrite);
-    const keyUrl = buildOriginUrl(ctx, primaryOriginActual, { action: { rewrite: mergedRewrite } }, effectiveHostHeader);
-    // cacheGen 是站点级的「缓存代次」，管理面执行整站清除缓存时会 +1，
-    // 从而让所有旧缓存键失效（Cache API 没有按前缀批量删除的能力）
-    cacheKey = buildCacheKey(ctx, policy, keyUrl, { cacheGen: site.cacheGen || 0 });
+    try {
+      // 合并规则级 rewrite 用于构造缓存键（源站级 rewrite 已不再存在）
+      const mergedRewrite = mergeRewrite(undefined, rule?.action?.rewrite);
+      const keyUrl = buildOriginUrl(ctx, primaryOriginActual, { action: { rewrite: mergedRewrite } }, effectiveHostHeader);
+      // cacheGen 是站点级的「缓存代次」，管理面执行整站清除缓存时会 +1，
+      // 从而让所有旧缓存键失效（Cache API 没有按前缀批量删除的能力）
+      cacheKey = buildCacheKey(ctx, policy, keyUrl, { cacheGen: site.cacheGen || 0 });
+    } catch (e) {
+      // 缓存键仅为优化；构造失败（如回源 URL 异常）时跳过缓存，回源路径会再次构造并正常处理，
+      // 避免直接 500 绕过诊断。
+      ctx.debug.cacheKeyError = String(e?.message || e);
+    }
   }
 
   // ---- 6. 查缓存 ----

@@ -14,6 +14,7 @@ import {
   compileWildcard,
   validateRegex,
   normRewrite,
+  normRepoOrigin,
   validateGlobalRulesStages,
 } from '../../src/config/schema.js';
 import { DEFAULT_GLOBAL_RULES } from '../../src/config/stages-defaults.js';
@@ -69,6 +70,35 @@ testA('validateSite: 缺省/非法 stage 归一到 cache（与 buildActionByStag
   });
   a.equal(res.ok, true, '站点校验通过');
   a.deepEqual((res.value.rules || []).map((r) => r.stage), ['cache', 'cache'], '缺省/非法 stage 归一为 cache');
+});
+
+// ===== normRepoOrigin：落库强制写入回源域名 addr（防回环回归） =====
+// 仓库型源站（cnb/github）回源域名固定且已知，新建时即使 UI 不填 addr，落库也要写入
+// 对应平台真实上游（区分 cnb 公开/私有、github 同源），避免「addr 留空 + hostHeader
+// 规则未命中兜底成加速域名」导致的回源到自身无限回环。
+
+testA('normRepoOrigin: cnb 公开仓库落库 addr = cnb.cool', (a) => {
+  const { value, errors } = normRepoOrigin({ repoUser: 'u', repoName: 'r', repoPrivate: false }, 0, '源站[0]', [], 'cnb');
+  a.equal(errors.length, 0, '无错误');
+  a.equal(value.addr, 'cnb.cool', '公开 cnb 落库 addr 为 cnb.cool');
+  a.equal(value.engine, 'cnb', 'engine 保留 cnb');
+});
+
+testA('normRepoOrigin: cnb 私有仓库落库 addr = api.cnb.cool', (a) => {
+  const { value } = normRepoOrigin({ repoUser: 'u', repoName: 'r', repoPrivate: true, cnbTokenEnc: 'secret' }, 0, '源站[0]', [], 'cnb');
+  a.equal(value.addr, 'api.cnb.cool', '私有 cnb 落库 addr 为 api.cnb.cool');
+});
+
+testA('normRepoOrigin: github 落库 addr = raw.githubusercontent.com', (a) => {
+  const { value } = normRepoOrigin({ repoUser: 'u', repoName: 'r', repoPrivate: false }, 0, '源站[0]', [], 'github');
+  a.equal(value.addr, 'raw.githubusercontent.com', 'github 落库 addr');
+  const priv = normRepoOrigin({ repoUser: 'u', repoName: 'r', repoPrivate: true, githubTokenEnc: 't' }, 0, '源站[0]', [], 'github');
+  a.equal(priv.value.addr, 'raw.githubusercontent.com', 'github 私有同样落库 raw.githubusercontent.com');
+});
+
+testA('normRepoOrigin: 用户显式 addr 优先保留（兼容手动覆盖）', (a) => {
+  const { value } = normRepoOrigin({ repoUser: 'u', repoName: 'r', repoPrivate: true, cnbTokenEnc: 's', addr: 'my.proxy.example' }, 0, '源站[0]', [], 'cnb');
+  a.equal(value.addr, 'my.proxy.example', '尊重用户显式 addr');
 });
 
 testA('validateSite: host 含端口拒绝', (a) => {
