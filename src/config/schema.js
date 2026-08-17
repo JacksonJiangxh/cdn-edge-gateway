@@ -120,9 +120,13 @@ function buildActionByStage(a, normed, stage) {
   return out;
 }
 import { CONFIG_VERSION, STATUS_PATTERN_RE, ERROR_STATUS_RANGE } from '../contracts.js';
-// node:crypto 在 build.mjs 的 EXTERNAL_MODULES 中（CF/EO nodejs_compat 与 Node 均提供），
-// 用于 webcrypto.getRandomValues 兜底；edge worker 中优先用 globalThis.crypto（WebCrypto）。
-import { webcrypto as nodeWebcrypto } from 'node:crypto';
+// 随机源兜底：三平台（CF Workers / CF Pages / EO Edge Functions V8）均提供标准
+// WebCrypto 的 globalThis.crypto，故直接以其作为兜底，不再静态 import 'node:crypto'。
+// 原因：EO Edge Functions 运行于 V8，无 node:crypto 内建模块，顶层静态
+// `import ... from 'node:crypto'` 会在 Makers 构建期直接失败（Could not resolve
+// "node:crypto"），导致整个 edge function 层无法挂载、/{adminPath} 返回 404。
+// 下方 generateRandomId 已优先使用 globalThis.crypto，此处仅提供同一引用的兜底别名。
+const nodeWebcrypto = (typeof globalThis !== 'undefined' && globalThis.crypto) ? globalThis.crypto : null;
 
 // ----------------------------------------------------------------------------
 // 限制常量 —— 防止单个配置对象膨胀导致 KV 写入失败（CF KV 单值上限 25MB，

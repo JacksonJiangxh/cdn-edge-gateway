@@ -127,15 +127,24 @@ export async function exportAll(ctx) {
  *
  * @param {import('../../contracts.js').Ctx} ctx
  * @param {Object} body 镜像数据（形如 buildConfigMirror 的 payload）
- * @param {{includeGlobal?:boolean}} [options]
+ * @param {{includeGlobal?:boolean|{global?:boolean,globalRules?:boolean}}} [options]
  *        includeGlobal 是否一并导入 global / globalRules。
- *        默认 false：手工导入沿用旧行为（仅站点+源站），避免用户误把
- *        备份里的 adminPath 等全局项覆盖掉当前环境而把自己锁在管理面之外。
- *        配置同步要求「完整镜像」，故由 sync.js 显式传 true。
+ *        - 布尔 true：同时导入二者（配置同步使用，要求「完整镜像」）。
+ *        - 布尔 false / 缺省：手工导入沿用旧行为（仅站点+源站），避免用户误把
+ *          备份里的 adminPath 等全局项覆盖掉当前环境而把自己锁在管理面之外。
+ *        - 对象 {global, globalRules}：分别控制（手工导入 UI 的两个开关），
+ *          缺省每个子项均为 false（即默认不恢复全局与全站规则，兼顾安全）。
  * @returns {Promise<{imported:{sites:number,pools:number,global:boolean,globalRules:boolean}, errors:string[]}>}
  */
 export async function applyConfigMirror(ctx, body, options = {}) {
-  const includeGlobal = options.includeGlobal === true;
+  // includeGlobal 支持两种形态：
+  //   布尔 true  → 同时导入 global + globalRules（配置同步的完整镜像）
+  //   对象 {global, globalRules} → 分别控制（手工导入 UI 的两个开关）
+  //   缺省/布尔 false → 仅站点+源站，避免误覆盖本机 adminPath 而锁死管理面
+  const inc = options.includeGlobal;
+  const isObj = typeof inc === 'object' && inc !== null;
+  const includeGlobalFlag = inc === true || (isObj && !!inc.global);
+  const includeGlobalRulesFlag = inc === true || (isObj && !!inc.globalRules);
 
   const sites = Array.isArray(body.sites) ? body.sites : [];
   const pools = Array.isArray(body.pools) ? body.pools : [];
@@ -175,7 +184,7 @@ export async function applyConfigMirror(ctx, body, options = {}) {
     }
   }
 
-  if (includeGlobal && body.global && typeof body.global === 'object') {
+  if (includeGlobalFlag && body.global && typeof body.global === 'object') {
     try {
       // 关键：镜像中不含密码哈希（导出时已剥离），必须保留**本机**的密码凭据，
       // 否则同步一次就会把接收方管理员密码清空、任何人都能登录（或谁都登不进去）。
@@ -192,7 +201,7 @@ export async function applyConfigMirror(ctx, body, options = {}) {
     }
   }
 
-  if (includeGlobal && body.globalRules && typeof body.globalRules === 'object') {
+  if (includeGlobalRulesFlag && body.globalRules && typeof body.globalRules === 'object') {
     try {
       const r = await putGlobalRules(ctx, body.globalRules.stages);
       if (r.ok) {
@@ -230,11 +239,27 @@ export async function importAll(ctx) {
     return fail(ERROR_CODES.BAD_REQUEST, '配置中没有可导入的站点或源站', 400);
   }
 
-  const { imported, errors } = await applyConfigMirror(ctx, body);
+  // 版本兼容校验：导出文件结构版本与当前节点不一致时给出明确告警，
+  // 不静默丢字段（旧格式可能缺字段，新字段被忽略）。
+  let versionWarning = '';
+  if (body.version && typeof body.version === 'string') {
+    if (body.version !== CONFIG_VERSION) {
+      versionWarning = `导出文件版本为 ${body.version}，当前节点为 ${CONFIG_VERSION}，结构可能不兼容，部分字段可能未被导入`;
+    }
+  } else {
+    versionWarning = `导出文件缺少 version 字段，当前节点为 ${CONFIG_VERSION}，结构可能不兼容，建议从同版本节点导出`;
+  }
+
+  // 透传 includeGlobal：支持布尔（true=完整镜像）或对象（分别控制全局/全站规则）。
+  // 缺省不恢复全局与全站规则，沿用旧行为以防误覆盖本机 adminPath 等把自己锁在管理面外。
+  const includeGlobal = body.includeGlobal;
+
+  const { imported, errors } = await applyConfigMirror(ctx, body, { includeGlobal });
 
   return ok({
     imported,
     errors,
+    versionWarning,
     message:
       errors.length > 0
         ? `部分导入成功，${errors.length} 项失败`

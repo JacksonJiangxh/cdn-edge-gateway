@@ -104,15 +104,12 @@ rm -rf dist node_modules && npm install && npm run build
 
 ---
 
-## 步骤 6（可选）：Wrangler
+## 步骤 6（可选）：Wrangler / EdgeOne CLI
 
-**只有走命令行部署（Cloudflare）才需要**。Wrangler 已在 devDependencies，`npx` 直接调用：
+- **Cloudflare 命令行部署**需要 Wrangler（已在 devDependencies，`npx` 直接调用）：`npx wrangler --version`。
+- **EdgeOne Makers 命令行部署**需要 `edgeone` CLI（本地直传 `dist-eo/` 用）：`npm i -g edgeone` 或随流水线用镜像自带版本。CNB / GitHub 流水线已内置，本地手动 deploy 才需自装。
 
-```bash
-npx wrangler --version
-```
-
-如果你打算用网页控制台 / Pages / EdgeOne 部署，跳过这步。
+如果你打算用网页控制台 / 流水线部署，跳过这步。
 
 ---
 

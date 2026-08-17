@@ -91,7 +91,7 @@
               }
             }
           ],
-          "description": "触发流水线���传入的环境变量（手动输入的，可覆盖 env）"
+          "description": "触发流水线时传入的环境变量（手动输入的，可覆盖 env）"
         },
         "permissions": {
           "$ref": "#/definitions/PermissionType",
@@ -138,12 +138,12 @@
         },
         "type": {
           "type": "string",
-          "enum": ["select", "input", "textarea", "switch", "radio"],
+          "enum": ["select", "input", "textarea", "switch", "radio", "date", "datetime", "daterange"],
           "description": "输入框类型，默认为 input"
         },
         "default": {
           "type": "string",
-          "description": "默认值"
+          "description": "默认值。date / datetime 填写符合 format 的日期字符串（如 '2026-08-01'）；daterange 使用英文逗号分隔的起止日期（如 '2026-08-01,2026-08-31'）。均需加引号，避免被 YAML 解析为 Date 对象"
         },
         "options": {
           "type": "array",
@@ -151,6 +151,18 @@
             "$ref": "#/definitions/WebTriggerOption"
           },
           "description": "type 为 select、switch 类型时，可选项"
+        },
+        "format": {
+          "type": "string",
+          "description": "日期系类型（date / datetime / daterange）专用：格式化模板。默认：date=YYYY-MM-DD，datetime=YYYY-MM-DD HH:mm:ss，daterange=YYYY-MM-DD"
+        },
+        "min": {
+          "type": "string",
+          "description": "日期系类型专用：允许选择的最早日期（含边界），日期字符串如 '2026-01-01'"
+        },
+        "max": {
+          "type": "string",
+          "description": "日期系类型专用：允许选择的最晚日期（含边界），日期字符串如 '2026-12-31'"
         }
       },
       "required": ["name"],

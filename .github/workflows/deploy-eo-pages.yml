@@ -1,14 +1,14 @@
-# 部署到 EdgeOne Pages —— 仅手动触发
+# 部署到 EdgeOne Makers —— 仅手动触发
 #
 # 【铁律】没有 push / pull_request 触发器，只有 workflow_dispatch。
 #
 # 需要的仓库 Secret（Settings → Secrets and variables → Actions）：
-#   EO_SECRET          —— EdgeOne API Token（EO Pages 控制台 → API Token 新建）
+#   EO_SECRET          —— EdgeOne API Token（EO Makers 控制台 → API Token 新建）
 #                       注意：字段名与 CNB 密钥仓库保持一致，方便共用同一份密钥文件。
 # 可选仓库 Variable：
 #   EO_PAGES_PROJECT   —— 项目名，留空则用默认 cdn-edge-gateway
 #
-# 部署后需在 EdgeOne 控制台（Pages 项目 → 设置 → 环境变量）补充【运行期环境变量】：
+# 部署后需在 EdgeOne 控制台（Makers 项目 → 设置 → 环境变量）补充【运行期环境变量】：
 #   REDIS_URL      —— 必填（仅当不用 EO KV 时）。持久化后端，指向自建 Webdis/Redis。
 #   ADMIN_PASSWORD —— 可选。首次初始化管理面密码。
 #   JWT_SECRET     —— 可选但强烈建议。独立高熵密钥（≥8 位），用于登录态签名。
@@ -18,10 +18,19 @@
 # 说明：流水线里 -e "${{ inputs.env_target }}" 把「目标环境」传给 edgeone CLI，
 #       对应 EO 的 preview / production 环境，不是需要用户手填的变量。
 #
-# 部署目录说明：本项目部署的是仓库根目录，不是 dist/public。
+# 部署目录说明：本项目部署的是仓库根目录（含 edge-functions/[[default]].js + edgeone.json），不是 dist/public。
 #   EO Makers 需要根目录的 edge-functions/[[default]].js 承载全部动态请求，
-#   并自动托管 dist/public/ 静态资源（与函数路由冲突时静态优先）。
+#   并自动托管 edgeone.json 中 outputDirectory 指定的 EO 专用静态根 dist/eo-public/
+#   （由 npm run build 生成，刻意只含 assets/、不含 index.html——避免 EO 静态层把 index.html
+#    挂到站点根 / 导致伪装页安全门失效；根 / 及非 adminPath 路径落到函数层走 renderDisguise）。
 #   只传 dist/public 会得到「静态页能开、API 全 404」的站点。
+#
+# 零云端构建额度：edgeone makers deploy 上传的是本地已构建产物（npm run build 已产出），
+#   云端不再 npm install / npm run build，免费版 500 次/月构建额度几乎不消耗，每次 deploy 仅计 1 次部署次数。
+#
+# V8 兼容（已修复）：_worker.js 已移除 node:crypto 静态 import（改 globalThis.crypto 兜底）
+#   并对 process 加 typeof 守卫，否则 Makers V8 构建期失败导致函数层不挂载、/{adminPath} 404。
+#   该修复对 Cloudflare 路径零回归。详见 docs-site/docs/user/03-deploy.md 路线 C。
 
 name: 部署 EdgeOne Pages（手动）
 
@@ -112,7 +121,7 @@ jobs:
           [ -n "$EO_SECRET" ] || { echo "✗ 未配置 Secret: EO_SECRET"; exit 1; }
           echo "✓ 凭据就绪"
 
-      - name: 发布到 EO Pages
+      - name: 发布到 EO Makers
         env:
           EO_SECRET: ${{ secrets.EO_SECRET }}
           INPUT_PROJECT: ${{ inputs.project_name }}
@@ -122,17 +131,19 @@ jobs:
           # 优先级：手动输入 > 仓库变量 > 默认值
           PROJECT="${INPUT_PROJECT:-${VAR_PROJECT:-cdn-edge-gateway}}"
           echo "项目: $PROJECT / 环境: ${{ inputs.env_target }}"
+          # V8 兼容：_worker.js 无 node:crypto 静态依赖、process 已 typeof 守卫，Makers 构建期可正常挂载函数层。
+          # 零云端构建额度：上传本地已构建产物，云端不重新 npm run build，每次 deploy 仅计 1 次部署次数。
           npx edgeone makers deploy . \
             -n "$PROJECT" \
             -t "$EO_SECRET" \
             -e "${{ inputs.env_target }}"
-          echo "✓ EO Pages 部署完成（项目: $PROJECT）"
+          echo "✓ EO Makers 部署完成（项目: $PROJECT）"
 
       - name: 部署摘要
         if: always()
         run: |
           {
-            echo "### EdgeOne Pages 部署"
+            echo "### EdgeOne Makers 部署"
             echo ""
             echo "- 触发人：\`${{ github.actor }}\`"
             echo "- 提交：\`${{ github.sha }}\`"

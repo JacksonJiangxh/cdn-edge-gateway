@@ -47,9 +47,9 @@ branch:
             required: false
             default: main
 
-      # ---------------- 部署 EdgeOne Pages ----------------
-      - name: 🚀 部署 EO Pages
-        description: 手动部署到 EdgeOne Pages（部署目录为仓库根）
+      # ---------------- 部署 EdgeOne Makers ----------------
+      - name: 🚀 部署 EO Makers
+        description: 手动部署到 EdgeOne Makers（本地构建 dist-eo/ 后直传，云端不重新构建、几乎不耗构建额度）
         event: web_trigger_deploy_eo_pages
         inputs:
           eo_env:

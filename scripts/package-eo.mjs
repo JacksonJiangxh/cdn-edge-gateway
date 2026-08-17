@@ -75,13 +75,26 @@ async function main() {
   await cp(join(ROOT, 'edge-functions', '[[default]].js'), join(OUT, 'edge-functions', '[[default]].js'));
   // 2) 已打包 worker 产物（薄壳 import 的目标）
   await cp(join(ROOT, '_worker.js'), join(OUT, '_worker.js'));
-  // 3) 静态资源：只拷贝 assets/，【刻意排除 dist/public/index.html】
-  //    index.html 是管理面页面本身（含 app.js 前端）。若把它放进 EO 静态根，EO 会把它
-  //    作为站点首页挂到 `/`，导致访问根路径直接暴露管理面登录页，绕过 core/app.js 的
-  //    adminPath 校验门（安全漏洞）。管理面 HTML 必须由 worker 在 /{adminPath} 动态渲染
-  //    （renderAdminPage → ui.gen.js 内联生成），assets 走 EO 静态托管即可。
+  // 3) 静态资源：拷贝 assets/，并把管理面页面 index.html 放到 /__panel/ 下
+  //    （而非站点根 `/`）。
+  //
+  //    为什么放 /__panel/ 而不是根：
+  //      - EO 静态托管层在 edge function 之前运行，且【无 Cloudflare html_handling="none"
+  //        等价物】。若 /__panel 在静态根无任何文件，EO 静态层找不到文件直接返回 404，
+  //        请求永不进入 [[default]].js → worker → 管理面（即本次 /__panel 404 的根因）。
+  //      - 把 dist/public/index.html（引用固定 /assets/* 的管理面页面）放到
+  //        dist-eo/dist/public/__panel/index.html，EO 静态层会把 /__panel 当作目录索引
+  //        命中并返回该页面（零函数执行），从而绕过「静态层 404 兜底」的坑。
+  //      - 前端 api.js 的 apiBase() 在缺少 window.__BASE__ 时，会自动取
+  //        location.pathname 第一段（即 __panel）作为 BASE，因此静态页无需运行时注入
+  //        即可正确拼出 /__panel/api/* 接口前缀。
+  //      - 刻意【不】把 index.html 放到站点根 `/`：根 / 与任意非 adminPath 路径在 EO
+  //        静态层仍无文件 → 落到 [[default]].js → app.js 走 renderDisguise 伪装页，
+  //        adminPath 校验门语义与 CF 完全一致，不会暴露管理面登录页（安全门保留）。
   await mkdir(join(OUT, 'dist', 'public', 'assets'), { recursive: true });
   await cp(join(ROOT, 'dist', 'public', 'assets'), join(OUT, 'dist', 'public', 'assets'), { recursive: true });
+  await mkdir(join(OUT, 'dist', 'public', '__panel'), { recursive: true });
+  await cp(join(ROOT, 'dist', 'public', 'index.html'), join(OUT, 'dist', 'public', '__panel', 'index.html'));
   // 4) 精简 edgeone.json（无 buildCommand）
   await writeFile(join(OUT, 'edgeone.json'), JSON.stringify(EO_JSON, null, 2) + '\n', 'utf8');
 

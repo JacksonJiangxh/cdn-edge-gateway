@@ -79,7 +79,9 @@ import { PLATFORM_ALIASES } from './caps.js';
 const BINDING_NAMES = ['CDN_KV', 'KV'];
 
 /** ESA（阿里云边缘安全加速）EdgeKV 命名空间：控制台创建、函数内 new EdgeKV 引用 */
-const ESA_KV_NAMESPACE = (process && process.env && process.env.ESA_KV_NAMESPACE) || 'kv';
+// 用 typeof 守卫读取，避免 EO Edge Functions（V8）无 process 全局时顶层 ReferenceError。
+const ESA_KV_NAMESPACE =
+  (typeof process !== 'undefined' && process.env && process.env.ESA_KV_NAMESPACE) || 'kv';
 
 /** isolate 级适配器缓存，key 为原始绑定对象，避免每次请求重复包装 */
 const _adapterCache = new WeakMap();

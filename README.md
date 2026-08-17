@@ -2,7 +2,7 @@
 
 > 一个跑在**边缘节点**上的 CDN 反向代理网关：你访问加速域名，它在边缘决定「回哪个源站、路径怎么改、响应头怎么改、要不要缓存」，把对象存储 / Git 静态资源 / 自建源站一键套上 CDN 加速。
 >
-> 支持多域名、多源站池、负载均衡、链式回退与被动熔断，可部署到 **Cloudflare Workers / Cloudflare Pages / EdgeOne Pages / 阿里云 ESA**。
+> 支持多域名、多源站池、负载均衡、链式回退与被动熔断，可部署到 **Cloudflare Workers / Cloudflare Pages / EdgeOne Makers / 阿里云 ESA**。
 
 ---
 
@@ -145,15 +145,23 @@ npm run deploy:cf           # build + 生成临时 toml（保留远程绑定/变
 不想用命令行部署？CF 粘贴 / Pages、EdgeOne、以及流水线发版，全部操作步骤见
 **[部署指南 docs-site/docs/user/03-deploy.md](./docs-site/docs/user/03-deploy.md)**。
 
-> **输出目录务必填 `.`（仓库根），不要填 `dist/public`**：Pages 需要根目录的 `_worker.js`
+> **输出目录务必填 `.`（仓库根），不要填 `dist/public`**：这仅针对 **Cloudflare Pages**——Pages 需要根目录的 `_worker.js`
 > 承载数据面代理与 `/__panel/api/*`。只部署 `dist/public` 会得到一个「管理面能打开、
 > 但代理和接口全部 404」的站点。静态资源省额度靠的是长缓存响应头 + Pages 的
 > Fetch handler 缓存开关，与输出目录无关，详见 [FAQ](./docs-site/docs/user/08-faq.md)。
+>
+> **EdgeOne 走 Makers，不是 Pages**：EO 部署用本地构建好的 `dist-eo/`（`node scripts/package-eo.mjs` 生成）直传 `edgeone makers deploy dist-eo`，**不在云端重新构建**，几乎不耗构建额度。详见 [部署指南 · 路线 C](./docs-site/docs/user/03-deploy.md)。
 
-**本质说明**：本项目是运行在边缘平台（CF Workers/Pages、EO Pages）上的一段处理代码，自身**无持久硬盘、内存极小**，不具备真实的本地缓存/存储。它的缓存、配置、统计全部依托底层平台能力：
+**本质说明**：本项目是运行在边缘平台（CF Workers/Pages、EO Makers）上的一段处理代码，自身**无持久硬盘、内存极小**，不具备真实的本地缓存/存储。它的缓存、配置、统计全部依托底层平台能力：
 - 配置/统计 → 绑定平台的 **KV**（CF）/ **EdgeOne KV** 托管存储；
 - 缓存 → Cloudflare 用 `caches.default` API，EdgeOne 没有该 API，改由响应头 `CDN-Cache-Control` 让 EO 边缘按头缓存；
-- **单运行时收口** → EdgeOne（新版 Makers）全部请求走 Edge Function（`edge-functions/[[default]].js` → `_worker.js`），不拆 Cloud Function（因 EO KV 仅在 Edge Functions 可用）；管理面 UI 静态资源由 Pages 静态托管，命中缓存后零函数执行次数。
+- **单运行时收口** → EdgeOne（新版 Makers）全部请求走 Edge Function（`edge-functions/[[default]].js` → `_worker.js`），不拆 Cloud Function（因 EO KV 仅在 Edge Functions 可用）；管理面 UI 静态资源由 Makers 静态层托管，命中缓存后零函数执行次数。
+
+**EdgeOne Makers 运行要点（已修复 V8 兼容）**：
+- **零云端构建额度**：关键是**本地先 `npm run build` + `node scripts/package-eo.mjs` 生成 `dist-eo/`**，再 `edgeone makers deploy dist-eo` 上传本地产物——云端不再 `npm run build`，免费版 500 次/月构建额度几乎不消耗，每次 deploy 仅计 1 次部署次数。若直接 `deploy .` 未先本地 build，CLI 会自动云端构建、仍耗额度。
+- **V8 兼容**：Makers Edge Functions 跑在 V8，无 `node:crypto` 内建、且不保证 `process` 全局。已移除 `_worker.js` 顶层 `import 'node:crypto'`（改 `globalThis.crypto` 兜底）并对 `process` 加 `typeof` 守卫，否则构建期失败会导致函数层不挂载、`/{adminPath}` 404。该修复对 CF 路径零回归。
+- **自定义 adminPath 动态渲染**：默认 `__panel` 由静态层兜底；在管理面改成随机前缀并写入 KV 后，请求落入函数层运行时动态渲染（`renderAdminPage` 注入 `window.__BASE__`），无需重新构建。非 adminPath 路径返回伪装页（[502 附录](./docs-site/docs/appendix/502.md)），不泄露管理面存在。
+- 完整部署步骤见 [部署指南 · 路线 C](./docs-site/docs/user/03-deploy.md)。
 
 **配置要点**：站点的「回源来源」二选一——**选已有源站组**（多站点复用）或**直接填写源站**（无需先建池），不再强制先建源站池。规则按 `priority` 从高到低匹配、命中即停。
 

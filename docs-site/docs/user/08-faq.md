@@ -11,8 +11,8 @@
 **Q：必须买服务器吗？**
 A：不用。它跑在 Cloudflare / EdgeOne / 阿里云 ESA 的边缘上，用它们的免费额度。
 
-**Q：部署到 EdgeOne 一直报错？**
-A：99% 是没设 `CLOUD_PLATFORM=eo`。设了再 `npm run build && edgeone pages deploy .`。
+**Q：部署到 EdgeOne（Makers）怎么弄？**
+A：走 Makers 本地构建直传，不用手动设 `CLOUD_PLATFORM`（`npm run build` 已内嵌）：`npm run build && node scripts/package-eo.mjs && edgeone makers deploy dist-eo -n <项目名> -t $EO_SECRET -e production --json`。详见 [部署指南 · 路线 C](/user/03-deploy.md)。注意是 **Makers** 不是旧版 Pages，且本地构建直传**几乎不耗云端构建额度**。
 
 **Q：`npm run deploy:cf` 卡在登录？**
 A：首次需浏览器登录 Cloudflare。登录后重跑即可。也可在控制台粘贴 `_worker.js`（路线 A.1，零工具）。
@@ -46,6 +46,9 @@ A：检查规则 `stages.cache.enabled=true`；确认没缓存带 Set-Cookie 的
 **Q：EdgeOne 清了缓存还是旧的？**
 A：EO 节点本地缓存，`delete` 只清当前节点。改 `global.cacheGen` +1 让旧键整体失效。
 
+**Q：EdgeOne 每次 deploy 消耗构建额度吗？**
+A：本项目走 **Makers 本地构建直传**（`edgeone makers deploy dist-eo`），上传的是本地已构建产物，**不在云端重新构建**，因此不直接消耗「构建次数」。免费版 500 次/月是构建额度；本地直传模式每次 deploy 仅计 **1 次部署次数**，与构建次数解耦。避免反复 deploy 即可。
+
 **Q：缓存键太多份（命中低）？**
 A：关掉无意义查询参数（`cacheKey.includeQuery=false`），别让同一内容按参数存成几百份。
 
@@ -61,6 +64,12 @@ A：开了被动熔断（`enableCircuitBreaker`）。熔断是保护机制，源
 
 **Q：管理面打不开？**
 A：路径默认 `__panel`；确认 `adminPath`；登录后查看管理面「平台能力」面板确认 `caps` 是否正常。
+
+**Q：EdgeOne 上 `/{adminPath}` 返回 404？**
+A：旧版 `_worker.js` 顶层静态 `import 'node:crypto'` 在 Makers V8 构建期失败，导致函数层不挂载。已修复（改用 WebCrypto + `process` 守卫）。若仍 404，重新 `npm run build && node scripts/package-eo.mjs` 生成最新 `dist-eo/` 再 deploy。详见 [部署指南 · 路线 C · V8 兼容](/user/03-deploy.md)。
+
+**Q：EdgeOne 上 `/{adminPath}` 返回 401（Tencent Edgeone 页）？**
+A：这是 **EO 平台「访问保护」** 在应用层之前的鉴权拦截，不是应用 bug。带有效 `eo_token`（首跳 `Set-Cookie` 后以 cookie 随请求发送）即可进入管理面。与本项目函数层无关。
 
 **Q：怎么确认平台能力探测对不对？**
 A：在管理面「平台能力」面板查看 `caps` 字段（是否有 KV、能否 TCP 回源等），无需公开健康检查接口。

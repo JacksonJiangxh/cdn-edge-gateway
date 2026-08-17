@@ -212,11 +212,11 @@ export   async function renderSystem() {
     return wrap;
   }
 
-  // 导入配置：读本地 JSON 文件后调 /system/import 整体恢复（备份恢复手段）
+  // 导入配置：读本地 JSON 文件 → 预览 → 调 /system/import 整体恢复（备份恢复手段）
 export   async function importConfig() {
     const ok = await confirmDialog(
       '导入配置',
-      '导入将覆盖当前全部站点/源站池/全局规则/全局配置等，且不可恢复。确认继续？',
+      '导入将覆盖当前站点/源站池（默认不含全局配置与全站规则），且不可恢复。确认继续？',
       { confirmText: 'IMPORT' }
     );
     if (!ok) return;
@@ -231,15 +231,91 @@ export   async function importConfig() {
         toast('配置文件不是合法的 JSON', 'err');
         return;
       }
-      try {
-        const res = await API.system.import(cfg);
-        const msg = res && res.message ? res.message : '配置已导入';
-        const errs = res && Array.isArray(res.errors) && res.errors.length ? `，${res.errors.length} 项失败` : '';
-        toast(msg + errs, res && res.errors && res.errors.length ? 'warn' : 'ok');
-        await loadAll();
-      } catch (e) { toast(e.message, 'err'); }
+      if (!cfg || typeof cfg !== 'object' || (!Array.isArray(cfg.sites) && !Array.isArray(cfg.pools))) {
+        toast('配置文件格式不正确（缺少 sites/pools）', 'err');
+        return;
+      }
+      // 版本兼容校验：与后端双重保险，前端先给明确提示
+      const localVersion = APP_DATA.info && APP_DATA.info.version;
+      if (cfg.version && localVersion && cfg.version !== localVersion) {
+        toast(`导出文件版本 ${cfg.version} 与当前节点 ${localVersion} 可能不兼容`, 'warn');
+      }
+      openImportPreview(cfg);
     };
     input.click();
+  }
+
+  // 导入预览：展示待导入统计 + 两个默认不勾选开关（一并导入全局配置 / 全站规则），
+  // 确认后才真正调用 /system/import，并把 includeGlobal 随配置体上传。
+export   function openImportPreview(cfg) {
+    const siteCount = Array.isArray(cfg.sites) ? cfg.sites.length : 0;
+    const poolCount = Array.isArray(cfg.pools) ? cfg.pools.length : 0;
+    const hasGlobal = !!(cfg.global && typeof cfg.global === 'object');
+    const hasGlobalRules = !!(cfg.globalRules && typeof cfg.globalRules === 'object');
+    const incomplete = !!cfg.incomplete;
+
+    const globalChk = el('input', { type: 'checkbox' });
+    const rulesChk = el('input', { type: 'checkbox' });
+
+    const stat = (label, value) => field(label, el('span', { text: value }));
+
+    const warnRow = incomplete
+      ? el('div', {
+          class: 'modal-text',
+          style: 'color:var(--warn,#c0843e);',
+          text: '⚠ 该导出为不完整镜像（站点超出单次扫描上限），仅含可枚举站点。',
+        })
+      : null;
+
+    const mask = el('div', { class: 'modal-mask', style: 'display:flex;' }, [
+      el('div', { class: 'modal' }, [
+        el('h3', { class: 'modal-title', text: '导入预览' }),
+        el('div', { class: 'modal-text', text: '以下内容将被写入当前节点（覆盖同名项，不删除未包含项）：' }),
+        el('div', { class: 'modal-extra' }, [
+          stat('站点数量', String(siteCount)),
+          stat('源站池数量', String(poolCount)),
+          stat('含全局配置', hasGlobal ? '是' : '否'),
+          stat('含全站规则', hasGlobalRules ? '是' : '否'),
+          ...(warnRow ? [warnRow] : []),
+        ]),
+        // 默认不勾选：避免误把备份里的 adminPath 等覆盖本机而把自己锁在管理面外
+        hasGlobal || hasGlobalRules
+          ? el('div', { class: 'modal-extra', style: 'margin-top:8px;border-top:1px solid var(--border);padding-top:8px;' }, [
+              el('div', { class: 'modal-text', text: '可选：一并导入以下全局项（默认不导入，安全起见）' }),
+              ...(hasGlobal ? [field('一并导入全局配置', globalChk)] : []),
+              ...(hasGlobalRules ? [field('一并导入全站规则', rulesChk)] : []),
+            ])
+          : null,
+        el('div', { class: 'modal-foot', style: 'margin-top:16px;display:flex;gap:8px;justify-content:flex-end;' }, [
+          el('button', { class: 'btn', text: '取消', onclick: () => mask.remove() }),
+          el('button', {
+            class: 'btn btn-primary',
+            text: '确认导入',
+            onclick: async () => {
+              const includeGlobal = {
+                global: hasGlobal && globalChk.checked,
+                globalRules: hasGlobalRules && rulesChk.checked,
+              };
+              const submitBtn = mask.querySelector('.btn-primary');
+              submitBtn.disabled = true;
+              try {
+                const res = await API.system.import({ ...cfg, includeGlobal });
+                const msg = res && res.message ? res.message : '配置已导入';
+                const errs = res && Array.isArray(res.errors) && res.errors.length ? `，${res.errors.length} 项失败` : '';
+                const warns = res && res.versionWarning ? `（${res.versionWarning}）` : '';
+                toast(msg + errs + warns, res && res.errors && res.errors.length ? 'warn' : 'ok');
+                mask.remove();
+                await loadAll();
+              } catch (e) {
+                submitBtn.disabled = false;
+                toast(e.message, 'err');
+              }
+            },
+          }),
+        ]),
+      ]),
+    ]);
+    document.body.appendChild(mask);
   }
 
   // 修改密码：自建轻量 modal 表单收集旧/新密码，校验后调 /auth/password。
@@ -285,7 +361,7 @@ export
       const resp = await API.system.export();
       const blob = await resp.blob();
       const url = URL.createObjectURL(blob);
-      const a = el('a', { href: url, download: 'edgecdn-config.json' });
+      const a = el('a', { href: url, download: 'cdn-edge-gateway-config.json' });
       document.body.appendChild(a);
       a.click();
       a.remove();

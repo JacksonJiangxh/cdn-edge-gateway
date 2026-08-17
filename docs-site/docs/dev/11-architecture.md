@@ -79,6 +79,29 @@ flowchart TD
 
 ---
 
+## EO Makers V8 运行时约束
+
+EdgeOne **Makers** 的 Edge Functions 运行在 **V8 运行时**（与 Cloudflare Workers 同代），与 Node.js 有本质差异，代码必须规避两类陷阱：
+
+1. **没有 `node:` 内建模块**
+   - ❌ 错误：`import { webcrypto } from 'node:crypto'`（顶层静态 import）。V8 无 `node:crypto`，Makers 构建期直接 `Could not resolve "node:crypto"`，**整个 edge function 层无法挂载**，`/{adminPath}` 返回 404 网关页。
+   - ✅ 正确：用标准 WebCrypto `globalThis.crypto`（`crypto.subtle` / `getRandomValues`），三平台（CF / EO / ESA）均原生提供。`src/config/schema.js` 的 `generateRandomId` 已优先使用它，随机源兜底不再静态 import `node:crypto`。
+
+2. **`process` 全局不一定存在**
+   - ❌ 错误：顶层裸 `const x = process.env.ESA_KV_NAMESPACE`。V8 未定义 `process` 时直接 `ReferenceError: process is not defined`，同样导致函数层不挂载。
+   - ✅ 正确：用 `typeof process !== 'undefined'` 守卫读取（或 `src/platform/caps.js` 的 `safeGlobal('process')`）。`src/platform/kv.js` 已改为该写法，CF 下仍照常读取 `process.env`。
+
+3. **单运行时收口全请求**
+   - 因 **EO KV 仅在 Edge Functions 可用**，全部请求（数据面代理 + 管理面 `/{adminPath}`）都走 Edge Function（`edge-functions/[[default]].js` 薄壳 → `_worker.js`），不拆 Cloud Function。管理面 UI 静态资源由 Makers 静态层托管，命中缓存后零函数执行。
+
+> [!NOTE]
+> **构建额度提示**：`edgeone makers deploy <目录>` 默认会对该目录**云端重新构建**并消耗构建额度。本项目通过「本地 `npm run build` + `package-eo.mjs` 先生成 `dist-eo/` 产物，再 `edgeone makers deploy dist-eo` 上传」规避云端 rebuild，从而几乎不耗构建额度。若图省事直接 `deploy .`，CLI 会自动云端构建、仍耗额度。
+
+> [!NOTE]
+> 这些约束的修复对 Cloudflare 路径**零回归**：CF Workers 同样支持 WebCrypto，`process` 守卫在 CF 下正常生效。验证见 [部署指南 · 路线 C](/user/03-deploy.md)。
+
+---
+
 ## 内存预算（memBudget）
 
 `src/platform/memBudget.js` 把「缓存 + 队列 + 其它临时态」统一注册到一块内存预算里，
