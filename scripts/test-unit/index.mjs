@@ -17,6 +17,7 @@ import './matcher.mjs';
 import './rewrite.mjs';
 import './cachekey.mjs';
 import './headers.mjs';
+import './resp-headers.mjs';
 import './balancer.mjs';
 import './security.mjs';
 import './platform.mjs';

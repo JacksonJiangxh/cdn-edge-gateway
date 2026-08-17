@@ -382,7 +382,9 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
       'X-Rule-Id': '__rule_id__',          // 命中的全站/站点规则 id
       'X-Retry-Count': '__retry_count__',  // 本次请求回源失败重试次数
       'X-Edge-Time': '__edge_time__',      // 边缘处理耗时（毫秒，便于定位慢链路）
-      'X-Site-Id': '__site_id__',          // 命中站点 id
+      // 注意：不再下发 X-Site-Id。其占位符 __site_id__ 在内部数据模型里等于站点 host
+      // （真实接入域名，如 img.a.com），原样透传给浏览器会暴露站点拓扑。调试场景改用
+      // X-Origin-Id / X-Rule-Id / X-Tried-Origins 等内部标记定位即可，无需泄露域名。
       'X-Tried-Origins': '__tried_origins__', // 实际尝试过的源站清单（逗号分隔）
       // —— 边缘缓存控制头（固定部分 + 关联取值，全部可自定义）——
       // 缓存 TTL 来自 cache 段的 edgeTtl/browserTtl/staleWhileRevalidate，
@@ -422,12 +424,29 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
       // 上游源站的 CORS 策略（CNB 写死 https://docs.cnb.cool；GitHub 写死 *），对你的用户
       // 是错误且无效的；两者实测都有，全站统一剥离（后续可由网关统一主动下发正确 CORS 策略）。
       Object.freeze({ type: 'exact', value: 'access-control-allow-origin' }),
-      // —— 以下均为【仓库接口特有头】，已下沉到仓库预设的站点规则（见 src/config/repoPresets.js）——
+      // —— S3 兼容源站（实测 o_img_s3 等）专属调试头：对所有源站都该剥，全站兜底 ——
+      Object.freeze({ type: 'exact', value: 'opc-request-id' }),        // 华为云 OBS 请求追踪 id
+      Object.freeze({ type: 'exact', value: 'x-amz-request-id' }),      // AWS S3 请求 id
+      Object.freeze({ type: 'exact', value: 'x-amz-id-2' }),            // AWS S3 扩展 id（仓库预设已有，全站再兜底一次无副作用）
+      Object.freeze({ type: 'exact', value: 'x-amz-version-id' }),      // S3 对象版本 id
+      Object.freeze({ type: 'exact', value: 'x-amz-server-side-encryption' }), // 服务端加密标识
+      Object.freeze({ type: 'exact', value: 'x-api-id' }),              // 源站自报接口 id
+      // —— 跨源站通用的上游调试 / 平台注入头（CNB/GitHub/S3 均有出现）——
+      Object.freeze({ type: 'exact', value: 'x-request-id' }),          // 源站请求 id（内部定位用，无需透浏览器）
+      // 注意：不要在此 strip 网关自身注入的调试头。Headers API 对 key 大小写不敏感，
+      // 上游自带的 x-cache / x-trace-id 会被全站默认 set 的 X-Cache / X-Trace-Id 同名覆盖，
+      // 无需 strip（strip 反而会误删网关注入值）。
+      Object.freeze({ type: 'exact', value: 'x-cache-hits' }),          // 源站命中计数
+      Object.freeze({ type: 'exact', value: 'x-served-by' }),           // 源站节点标识
+      Object.freeze({ type: 'exact', value: 'x-timer' }),               // Fastly 计时头
+      Object.freeze({ type: 'exact', value: 'source-age' }),            // Fastly 源站年龄
+      Object.freeze({ type: 'exact', value: 'content-md5' }),           // 对象 MD5（网关不校验，无需透浏览器）
+      Object.freeze({ type: 'prefix', value: 'x-fastly-' }),            // Fastly 系列（x-fastly-request-id 等）
+      // —— 以下【仓库接口特有头】下沉到仓库预设站点规则（见 src/config/repoPresets.js）——
       // CNB 特有：access-control-allow-credentials / access-control-expose-headers /
-      //   referrer-policy / traceparent / x-trace-id / x-ratelimit-* / x-repo-commit
+      //   referrer-policy / traceparent / x-ratelimit-* / x-repo-commit / x-cnb
       // GitHub 特有：x-xss-protection / strict-transport-security / x-github-request-id /
-      //   x-github-edge-region / x-fastly-request-id / x-served-by / x-timer / x-cache /
-      //   x-cache-hits / source-age / via
+      //   x-github-edge-region / x-runtime / x-github-*
     ]),
   }),
 });

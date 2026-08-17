@@ -143,6 +143,9 @@ export function buildRepoPresetRules(engine, p = {}) {
   }
 
   // ④ 响应头剥离（仓库 raw 特有头，避免泄露源站实现）
+  // 仅剥离「仓库接口特有」的头，全站通用（CORS/CSP/Set-Cookie/不缓存信号/S3 兼容调试头等）
+  // 已由全站默认规则 stages.respHeaders.strip 兜底，这里不重复（normalizeStripRules
+  // 兼容纯字符串 exact 与 {type,value} 两种语法，前缀用 prefix）。
   rules.push({
     id: `repo-${engine}-${repoName}-resp`,
     name: '仓库特有响应头剥离',
@@ -153,8 +156,28 @@ export function buildRepoPresetRules(engine, p = {}) {
     action: {
       respHeaders: {
         strip: [
+          // —— CNB 与 GitHub 共有 / 引擎自报标识 ——
           'x-cnb', 'x-github', 'x-runtime', 'x-served-by',
-          'vary', 'access-control-allow-origin', 'x-amz-id-2', 'server',
+          'x-amz-id-2', 'server',
+          // vary 由全站默认已剥离；此处不再重复
+          // —— CNB 特有（实测 o_img_cnb）——
+          'access-control-allow-credentials',
+          'access-control-expose-headers',
+          'referrer-policy',
+          'traceparent',
+          'x-repo-commit',
+          // x-ratelimit-* 限流头（CNB 返回 x-ratelimit-limit/remaining/reset）
+          { type: 'prefix', value: 'x-ratelimit-' },
+          // —— GitHub 特有（实测 o_img_gh / Fastly 后端）——
+          'x-xss-protection',
+          'strict-transport-security',
+          'x-github-request-id',
+          'x-github-edge-region',
+          { type: 'prefix', value: 'x-github-' },
+          'x-fastly-request-id',
+          'x-timer',
+          'source-age',
+          'x-cache-hits',
         ],
       },
     },

@@ -224,6 +224,12 @@ export function applyHeaderOps(headers, ops, ctx, env) {
       // 3) 双下划线系统占位符展开：__edge_ttl__ / __cache__ 等项目内部值。
       //    与 ${} 用户变量完全隔离、独立求值；无 __ 时零开销。
       finalValue = expandSysVars(finalValue, ctx);
+      // 4) 展开后最终值为空则跳过写入：避免无意义「空头」下发到浏览器。
+      //    典型场景：Cloudflare-CDN-Cache-Control 在非 CF 平台（EO/ESA/本地 dev）
+      //    其占位符 __cf_cdn_cache_control__ 展开为空，若照常 set 会写出一个空值头，
+      //    既无意义也可能干扰下游缓存决策。空值跳过对正常头（Cache-Control 等
+      //    永远不会展开为空）无副作用；错误响应路径也一并受益。
+      if (finalValue === '') continue;
       headers.set(key, finalValue);
     }
   }

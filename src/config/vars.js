@@ -414,6 +414,10 @@ function resolveSysVar(ctx, name) {
         : '';
     }
     // ---- 跨平台差异（CF 双头）：仅 CF 平台展开为值，其余平台展开为空 ----
+    // 该头与 CDN-Cache-Control 同义、同值，仅被 Cloudflare 边缘读取消费；
+    // 其他 CDN（EO/ESA/本地 dev）读取的是 CDN-Cache-Control，故此处展开为空。
+    // 空值由 applyHeaderOps 的 set 分支判空跳过（不写出空头到浏览器）。
+    // 此处模板与 stages-defaults.js 的 CDN-Cache-Control 完全一致，保证语义统一。
     case 'cf_cdn_cache_control':
       return ctx && ctx.caps && ctx.caps.platform === 'cf'
         ? 'public, max-age=__edge_ttl__, s-maxage=__edge_ttl__, stale-while-revalidate=__swr__'
