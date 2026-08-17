@@ -75,28 +75,49 @@ export function buildRepoPresetRules(engine, p = {}) {
 
   // 命中条件：仅当请求落到该仓库源站时（originId 维度）才套用，
   // 避免同站点其它源站被错误套用 raw 路径格式而 404。
+  // 匹配条件统一用 conditions 二维数组（外 OR / 内 AND），与前端同源；
+  // 旧版快捷字段（originIds / pathRegex / pathPrefix）已废弃，normRule 不再识别。
   const match = originId
-    ? { originIds: originId, pathRegex: '^/.*' }
+    ? { conditions: [[{ target: 'origin', op: 'equal', values: [originId] }]] }
     : { conditions: [[{ target: 'path', op: 'regex', values: ['^/.*'] }]] };
 
   const rules = [];
 
-  // cnb / github 的 raw URL 路径格式不同，按平台走不同的重写规则（回源域名不同也同理）：
+  // cnb / github 的 raw URL 路径格式不同，按平台走不同的重写规则：
   //   · cnb：    /{user}/{repo}/-/git/raw/{branch}/{rest}
   //   · github： /{user}/{repo}/{branch}/{rest}（raw.githubusercontent.com 无 /raw/ 段）
-  // 旧版按「回源匹配 → 执行不同 URL 重写」正是此逻辑，这里按 engine 选不同 replacement。
   const rewriteReplacement =
     engine === 'cnb'
       ? `/${repoUser}/${repoName}/-/git/raw/${repoBranch}/$1`
       : `/${repoUser}/${repoName}/${repoBranch}/$1`;
 
-  // ① 回源 Host + 路径映射（同一条规则同时承载，避免两条规则各跑一次匹配）
+  // ① 固定回源 Host（指向仓库 raw API 上游）。单独成 origin 阶段规则：
+  //    origin 阶段的 allowedOps 含 hostHeader，normRule 按阶段裁剪会保留该字段，
+  //    落库后由运行时 pipeline 的 origin 阶段注入回源 Host。
+  //    注意：不能用 stage:'hostHeader'（系统无此阶段，normalizeStage 返回 null
+  //    会导致落库成死规则、回源 Host 永不生效）。
   rules.push({
+    id: `repo-${engine}-${repoName}-host`,
+    name: `仓库固定回源 Host（${upHost}）`,
+    enabled: true,
+    stage: 'origin',
+    priority: 10,
     match,
     action: {
-      // 固定回源 Host（替代旧引擎常量 repoUpstreamHost）
       hostHeader: { mode: 'custom', custom: upHost },
-      // URL 重写：按平台格式映射（见上方 rewriteReplacement）
+    },
+  });
+
+  // ② 路径映射（rewrite 阶段）。与回源 Host 拆开：rewrite 阶段只保留 rewrite
+  //    字段，若混放会丢失 hostHeader。
+  rules.push({
+    id: `repo-${engine}-${repoName}-rewrite`,
+    name: `仓库 raw 映射（${repoBranch}）`,
+    enabled: true,
+    stage: 'rewrite',
+    priority: 10,
+    match,
+    action: {
       rewrite: {
         type: 'regex',
         pattern: '^/(.*)$',
@@ -105,10 +126,15 @@ export function buildRepoPresetRules(engine, p = {}) {
     },
   });
 
-  // ② 鉴权请求头（仅私有仓库）：__cnb_token__ / __github_token__ 占位符
+  // ③ 鉴权请求头（仅私有仓库）：__cnb_token__ / __github_token__ 占位符
   if (repoPrivate) {
     const tokenVar = engine === 'cnb' ? '__cnb_token__' : '__github_token__';
     rules.push({
+      id: `repo-${engine}-${repoName}-auth`,
+      name: '私有仓库鉴权',
+      enabled: true,
+      stage: 'reqHeaders',
+      priority: 10,
       match,
       action: {
         reqHeaders: { set: { Authorization: tokenVar } },
@@ -116,8 +142,13 @@ export function buildRepoPresetRules(engine, p = {}) {
     });
   }
 
-  // ③ 响应头剥离（仓库 raw 特有头，避免泄露源站实现）
+  // ④ 响应头剥离（仓库 raw 特有头，避免泄露源站实现）
   rules.push({
+    id: `repo-${engine}-${repoName}-resp`,
+    name: '仓库特有响应头剥离',
+    enabled: true,
+    stage: 'respHeaders',
+    priority: 10,
     match,
     action: {
       respHeaders: {

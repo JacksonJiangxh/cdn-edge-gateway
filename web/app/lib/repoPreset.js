@@ -111,17 +111,20 @@ export function buildRepoPresetRules(engine, opts = {}) {
       },
       // 注意：回源 Host 不能与本规则混放在 action 里——normRule 按阶段裁剪
       // （rewrite 阶段只保留 rewrite 字段，会丢掉 hostHeader）。固定回源 Host
-      // 必须单独成一条 hostHeader 阶段的规则（见 hostHeaderRule）。
+      // 必须单独成一条规则，且归属 origin 阶段（见 hostHeaderRule），因为系统
+      // 合法阶段字典里没有 "hostHeader" 这个 stage（normalizeStage 会返回 null
+      // 致落库成死规则），回源 Host 本就属于 Origin Rules（origin 阶段）。
     },
   };
 
-  // 固定回源 Host（指向仓库 raw API 上游）。独立成 hostHeader 阶段规则，
-  // 与 rewrite 规则同为「回源前」阶段，避免被阶段裁剪吞掉。
+  // 固定回源 Host（指向仓库 raw API 上游）。独立成 origin 阶段规则：
+  // origin 阶段的 allowedOps 含 hostHeader，normRule 按阶段裁剪会保留该字段，
+  // 落库后由运行时 pipeline 的 origin 阶段注入回源 Host。
   const hostHeaderRule = {
     id: `repo-${engine}-${repoName}-host`,
     name: `${REPO_ENGINE_LABEL[engine]} 固定回源 Host（${upHost}）`,
     enabled: true,
-    stage: 'hostHeader',
+    stage: 'origin',
     priority: 10,
     match,
     action: {
