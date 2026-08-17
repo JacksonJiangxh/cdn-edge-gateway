@@ -229,6 +229,10 @@ export   async function openSiteDrawer(host, anchor) {
       const h = fHost.value.trim();
       if (!h) throw new Error('请填写 Host');
       const basics = { host: h, enabled: fEnabled.checked, ipv6Support: fIpv6.checked };
+      // 统一声明引擎/仓库型判断，供下方（填写域名/IP 校验、引擎预设规则铺写）共用，
+      // 避免选择「已有源站（池）」模式跳过 else 分支导致 isRepo 未定义。
+      const eng = fEngine ? fEngine.value : 'fetch';
+      const isRepo = eng === 'cnb' || eng === 'github';
       // 新建站点时整合源站信息：选「已有源站」则传 poolId；选「域名/IP」则传 origins + defaultHostHeader
       // 记录「选已有源站」模式下选中的池 id，供下方新建保存时识别 cnb/github 源站并铺预设规则。
       let selectedPoolId = '';
@@ -239,8 +243,6 @@ export   async function openSiteDrawer(host, anchor) {
           selectedPoolId = fPoolSel.value;
         } else {
           // 「填写域名/IP」：构建 origin 对象，后端 ensureSingleOrigin 自动查重/创建并回填 poolId
-          const eng = fEngine.value;
-          const isRepo = eng === 'cnb' || eng === 'github';
           if (eng === 'r2') {
             if (!(fR2Binding && fR2Binding.value.trim())) {
               throw new Error('引擎为 r2 时必须填写 R2 绑定名（如 CDN_R2）');
@@ -300,7 +302,6 @@ export   async function openSiteDrawer(host, anchor) {
           mergedRules.push(...rules);
         }
         // cnb/github 引擎：把关联的 rewrite + reqHeaders + respHeaders 预设规则并入
-        const eng = fEngine.value;
         if (isRepo && basics.origins && basics.origins[0]) {
           const origin = basics.origins[0];
           const preset = buildRepoPresetRules(eng, {
