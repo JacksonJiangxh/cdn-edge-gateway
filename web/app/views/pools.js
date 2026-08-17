@@ -413,12 +413,23 @@ export
           };
         }
 
+        // 源站 id 仅承载「内部标识」，绝不拼入真实地址（addr），否则会被
+        // 响应头 X-Origin-Id 回显、反推出真实后端域名（泄露风险）。
+        // 规范格式：o_<池name>_<后端name>（无后端名则回退序号），三引擎均只含内部名。
+        const slug = (s) => (s || '').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+        const poolSlug = slug($('p-name').value || pool.name) || 'pool';
+        // 后端名优先取用户填的「源站名称」；未填时按引擎回退到各自内部标识
+        // （r2→binding、cnb/github→repoName、fetch/socket→序号），保证任何引擎下
+        // id 都含语义、且绝不拼入真实 addr。
+        const fallbackName = engine === 'r2'
+          ? ($('.o-r2-binding', row).value.trim() || 'r2')
+          : isRepo
+            ? ($('.o-repo-name', row).value.trim() || engine)
+            : ('o' + i);
+        const backendName = slug($('.o-name', row).value) || slug(fallbackName);
+        const originId = `o_${poolSlug}_${backendName}`;
         origins.push({
-          id: 'o' + i + '_' + (engine === 'r2'
-            ? ($('.o-r2-binding', row).value.trim() || 'r2')
-            : isRepo
-              ? (engine + '_' + $('.o-repo-name', row).value.trim())
-              : addr),
+          id: originId,
           enabled: true, order: i, weight: Number($('.o-weight', row).value) || 1,
           name: ($('.o-name', row).value || '').trim(),
           engine,
