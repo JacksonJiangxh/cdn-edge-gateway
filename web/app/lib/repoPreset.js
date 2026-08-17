@@ -1,12 +1,18 @@
 // 仓库型源站（cnb / github）的「关联预设规则」生成器。
 //
-// 与后端 src/proxy/repoEngine.js / src/config/schema.js(normRule) 的契约严格对齐：
+// 与后端 src/config/repoPresets.js（buildRepoPresetRules）契约严格对齐：
+//   cnb/github 已去独立引擎，底层统一走 fetch 引擎，本生成器只产出标准站点规则：
+//     · hostHeader.custom → 固定回源 Host（仓库 raw API 上游）
+//     · rewrite            → /{path} 映射到 /{user}/{repo}/raw/{branch}/{path}
+//     · reqHeaders.set.Authorization → __cnb_token__ / __github_token__ 系统占位符
+//       （运行时由后端 vars.js 解析层从站点级密文解密注入，不进规则明文）
+//     · respHeaders.strip  → 仓库特有响应头剥离
 //   匹配条件：conditions 二维数组（外 OR / 内 AND），元素 { target, op, values }；
 //             target 取 'origin'（源站 id，池场景多源站区分用）或 'host'（单源站站点用）；
 //             op 取 'equal'（与后端 MATCH_OPERATORS 一致）。
 //   动作对象：action 为「阶段子对象」扁平结构——
 //             rewrite:{ type:'regex', regexFrom, regexTo, preserveQuery }
-//             hostHeader:{ mode:'custom', custom }（指向仓库 raw API 上游 host）
+//             hostHeader:{ mode:'custom', custom }
 //             reqHeaders:{ set, strip } / respHeaders:{ set, strip }。
 //
 // 产物是「站点规则数组形态」的对象（rewrite / respHeaders / 可选 reqHeaders），
@@ -36,19 +42,15 @@ export function repoUpstreamHost(engine, isPrivate) {
  * @returns {Array<{type:'exact',value:string}>}
  */
 function respRemoveHeaders(engine) {
-  if (engine === 'cnb') return [
-    { type: 'exact', value: 'x-cnb-request-id' },
-    { type: 'exact', value: 'x-cnb-region' },
-    { type: 'exact', value: 'x-gitlab-*`' },
-    { type: 'exact', value: 'gitlab-lb' },
+  // 与后端 repoPresets.js 对齐：移除仓库平台特有响应头，避免泄露源站实现。
+  // 这里用「前缀通配」形式，便于覆盖子级头（x-cnb-*、x-github-* 等）。
+  return [
+    { type: 'prefix', value: 'x-cnb' },
+    { type: 'prefix', value: 'x-github' },
+    { type: 'exact', value: 'x-runtime' },
+    { type: 'exact', value: 'x-served-by' },
+    { type: 'exact', value: 'x-amz-id-2' },
   ];
-  if (engine === 'github') return [
-    { type: 'exact', value: 'x-github-request-id' },
-    { type: 'exact', value: 'x-github-cache' },
-    { type: 'exact', value: 'x-ratelimit-limit' },
-    { type: 'exact', value: 'x-ratelimit-remaining' },
-  ];
-  return [];
 }
 
 /**
@@ -86,11 +88,12 @@ export function buildRepoPresetRules(engine, opts = {}) {
   const upHost = repoUpstreamHost(engine, isPrivate);
 
   // 重写路径：把站点路径 /{path} 映射到仓库 raw 文件 URL 的 path 部分。
-  // cnb 私有走 /-/git/raw/；github 走 /{user}/{repo}/{branch}/{path}（无 /raw 段）。
-  const regexTo =
-    engine === 'cnb'
-      ? `/${repoUser}/${repoName}/-/git/raw/${branch}/$1`
-      : `/${repoUser}/${repoName}/${branch}/$1`;
+  // cnb / github 的 raw URL 路径格式不同（按平台执行不同的 URL 重写）：
+  //   · cnb：    /{user}/{repo}/-/git/raw/{branch}/{path}
+  //   · github： /{user}/{repo}/{branch}/{path}（raw.githubusercontent.com 无 /raw/ 段）
+  const regexTo = engine === 'cnb'
+    ? `/${repoUser}/${repoName}/-/git/raw/${branch}/$1`
+    : `/${repoUser}/${repoName}/${branch}/$1`;
 
   const rewrite = {
     id: `repo-${engine}-${repoName}-rewrite`,
@@ -106,6 +109,22 @@ export function buildRepoPresetRules(engine, opts = {}) {
         regexTo,
         preserveQuery: true,
       },
+      // 注意：回源 Host 不能与本规则混放在 action 里——normRule 按阶段裁剪
+      // （rewrite 阶段只保留 rewrite 字段，会丢掉 hostHeader）。固定回源 Host
+      // 必须单独成一条 hostHeader 阶段的规则（见 hostHeaderRule）。
+    },
+  };
+
+  // 固定回源 Host（指向仓库 raw API 上游）。独立成 hostHeader 阶段规则，
+  // 与 rewrite 规则同为「回源前」阶段，避免被阶段裁剪吞掉。
+  const hostHeaderRule = {
+    id: `repo-${engine}-${repoName}-host`,
+    name: `${REPO_ENGINE_LABEL[engine]} 固定回源 Host（${upHost}）`,
+    enabled: true,
+    stage: 'hostHeader',
+    priority: 10,
+    match,
+    action: {
       hostHeader: { mode: 'custom', custom: upHost },
     },
   };
@@ -122,9 +141,10 @@ export function buildRepoPresetRules(engine, opts = {}) {
     },
   };
 
-  /** 私有仓库额外注入鉴权请求头（运行时由 repoEngine 用站点级 token 补实）。 */
+  /** 私有仓库额外注入鉴权请求头，值用系统占位符，运行时由后端解析层从站点级密文解密。 */
   let reqHeadersRule = null;
-  if (engine === 'cnb' && isPrivate) {
+  if (isPrivate) {
+    const tokenVar = engine === 'cnb' ? '__cnb_token__' : '__github_token__';
     reqHeadersRule = {
       id: `repo-${engine}-${repoName}-auth`,
       name: `${REPO_ENGINE_LABEL[engine]} 私有仓库鉴权`,
@@ -133,10 +153,10 @@ export function buildRepoPresetRules(engine, opts = {}) {
       priority: 10,
       match,
       action: {
-        reqHeaders: { set: { Authorization: '__REPO_ENGINE_INJECT__' }, strip: [] },
+        reqHeaders: { set: { Authorization: tokenVar }, strip: [] },
       },
     };
   }
 
-  return { rewrite, respHeaders: respRule, reqHeaders: reqHeadersRule };
+  return { rewrite, hostHeader: hostHeaderRule, respHeaders: respRule, reqHeaders: reqHeadersRule };
 }

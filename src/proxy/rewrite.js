@@ -11,7 +11,7 @@
  */
 
 import { expandVars } from '../config/vars.js';
-import { repoUpstreamHost } from './repoEngine.js';
+import { repoUpstreamHost } from '../config/repoPresets.js';
 
 /** 正则替换结果长度上限，超出回退原路径（防超长路径注入）。 */
 const REGEX_REPLACE_MAX_LEN = 8192;
@@ -203,18 +203,15 @@ export function buildOriginUrl(ctx, origin, rule, hostHeader) {
     (scheme === 'http' && Number(origin.port) === 80);
 
   // 回源 Host（authority）解析
-  // ── 引擎优先（single source of truth）──
-  // 回源 host 由「回源引擎」在代码层强制约定，用户不可在 UI 选择，
-  // 从而自动矫正已落盘的错误 hostHeader（如站点级 accel 兜底把仓库回源打回自己）。
-  //   · cnb / github：由引擎常量决定（api.cnb.cool / cnb.cool / raw.githubusercontent.com）
+  // 统一由规则/源站/站点三级 hostHeader 决定（不再按引擎常量硬编回源 host）。
+  //   · cnb / github：已去独立引擎，底层走 fetch；其回源 host（api.cnb.cool 等）
+  //     由「预设规则」的 action.hostHeader.custom 承载（见 config/repoPresets.js），
+  //     运行时经此处 custom 分支生效。
   //   · r2：无公网 host，交由 R2 binding 处理（addr 为空，走下方 R2 分支）
   //   · fetch / socket：回源 host = 表单填写的源站地址（origin.addr）
   let authorityAddr;
   let authorityPort = origin.port;
-  if (origin.engine === 'cnb' || origin.engine === 'github') {
-    // 仓库引擎：回源 host 完全由引擎常量决定，忽略任何 hostHeader 选择
-    authorityAddr = repoUpstreamHost(origin.engine, !!origin.repoPrivate);
-  } else if (origin.engine === 'r2') {
+  if (origin.engine === 'r2') {
     // R2 等「无公网地址」引擎：不构造公网 host，交由 R2 引擎处理。
     // 缓存键 / 回源 URL 的 host 回退到「客户端访问的站点域名」(ctx.url.hostname)，
     // 与 fetch 源站构造出的缓存键一致（addr='' 若不兜底会拼出无 host 的 URL → 500）。

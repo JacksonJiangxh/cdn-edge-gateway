@@ -393,6 +393,26 @@ function resolveSysVar(ctx, name) {
       return ctx && ctx.debug && Array.isArray(ctx.debug.tried)
         ? ctx.debug.tried.join(',')
         : '';
+    // ---- 仓库型源站鉴权 token（站点级加密落盘，运行时解密注入）----
+    // cnb / github 去独立引擎后，私有仓库的 Authorization 头由站点规则
+    // reqHeaders.set.Authorization = __cnb_token__ / __github_token__ 承载，
+    // token 明文不入规则库，运行时由本占位符解析层从 ctx.__siteSecrets 解密取出。
+    // 关键：__siteSecrets 以「源站 id」为 key（而非平台全局唯一值）——同一源站池内可存在
+    // 多个不同 cnb/github 仓库（各自秘钥不同），规则按 originId 匹配到具体仓库源站，
+    // 占位符解析时取「当前请求选中的源站」对应的 token（ctx.__siteSecrets[ctx.origin.id]），
+    // 从而同池内 5 个仓库各自用各自的解密秘钥，互不串号。
+    case 'cnb_token': {
+      const id = ctx && ctx.origin && ctx.origin.id;
+      return ctx && ctx.__siteSecrets && id != null && ctx.__siteSecrets[id] != null
+        ? String(ctx.__siteSecrets[id])
+        : '';
+    }
+    case 'github_token': {
+      const id = ctx && ctx.origin && ctx.origin.id;
+      return ctx && ctx.__siteSecrets && id != null && ctx.__siteSecrets[id] != null
+        ? String(ctx.__siteSecrets[id])
+        : '';
+    }
     // ---- 跨平台差异（CF 双头）：仅 CF 平台展开为值，其余平台展开为空 ----
     case 'cf_cdn_cache_control':
       return ctx && ctx.caps && ctx.caps.platform === 'cf'

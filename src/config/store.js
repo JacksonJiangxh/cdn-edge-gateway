@@ -1319,6 +1319,7 @@ export async function putPool(ctx, pool) {
   // 已加密（enc:）/降级明文（plain:）前缀的值跳过，避免重复加密。
   if (Array.isArray(pool.origins)) {
     for (const o of pool.origins) {
+      // 仓库型源站（cnb/github）：token 站点级加密落盘（明文或已加密串均处理）。
       if (o && (o.engine === 'cnb' || o.engine === 'github')) {
         const field = o.engine === 'cnb' ? 'cnbTokenEnc' : 'githubTokenEnc';
         const v = o[field];

@@ -335,7 +335,7 @@
  * @property {number}  order              chain 策略排序，升序
  * @property {number}  weight             weighted 策略权重
  * @property {string}  [name]             源站展示名称（纯展示标签，给人区分用；r2/cnb 等 addr 为空时必须填，否则列表显示「未命名源站」）
- * @property {'fetch'|'r2'|'cnb'|'github'} engine  fetch=默认公网回源（CF/EO/ESA 均支持，可自定义 Host 头）；r2 仅 CF 可用，回源到 R2 桶绑定（不走公网）；cnb=CNB 仓库 raw 引擎（回源 api.cnb.cool，token 站点级加密落盘）；github=GitHub 仓库 raw 引擎（回源 raw.githubusercontent.com，token 站点级加密落盘）。socket 不再是可选值。
+ * @property {'fetch'|'r2'|'cnb'|'github'} engine  fetch=灵活自定义公网回源（CF/EO/ESA 均支持，可自定义 Host 头）；r2 仅 CF 可用，回源到 R2 桶绑定（不走公网）；cnb=CNB 仓库 raw 预设源站（填仓库参数即自动生成关联规则，底层走 fetch 引擎 + 预设规则）；github=GitHub 仓库 raw 预设源站（同 cnb）。cnb/github 与 fetch 的区别在于「引擎预设」而非「独立回源实现」——回源 host/路径/鉴权均由预设规则承载，运行时走 fetchEngine。socket 不再是可选值。
  * @property {'http'|'https'} scheme
  * @property {string}  addr               域名或 IP（engine='r2' 时可留空）
  * @property {number}  port
@@ -346,10 +346,11 @@
  * @property {string}  [r2KeyPrefixRule]   r2KeyMode='prefix' 时加在前面的前缀；'strip' 时剥除的开头；'regex' 时的 regexFrom
  * @property {string}  [r2KeyRegexTo]      r2KeyMode='regex' 时的 regexTo（替换值）
  * @property {string}  [r2ContentType]     R2 对象缺失 content-type 时的兜底类型，默认 'application/octet-stream'
- * —— engine='cnb' / engine='github' 专用字段 ——
- * 仓库型引擎：后端实际是仓库 raw API，回源 host 由引擎常量固定（对用户隐藏），
- * 鉴权 token 由平台主密钥（复用 env.JWT_SECRET 派生，AES-256-GCM）加密后落盘（站点级独立、灵活可配）。
- * 路径映射由自动生成的站点 rewrite 规则托管（见 src/proxy/repoEngine.js）。
+ * —— engine='cnb' / engine='github' 专用字段（仓库型预设源站）——
+ * 仓库型源站：回源 host 由预设规则 action.hostHeader.custom 承载，路径映射由预设 rewrite
+ * 规则承载，鉴权 token 由平台主密钥（复用 env.JWT_SECRET 派生，AES-256-GCM）加密后落盘
+ * （站点级独立、灵活可配），运行时经 __cnb_token__ / __github_token__ 占位符（按源站 id 取
+ * 对应解密 token）注入 Authorization 头（见 src/config/repoPresets.js / vars.js / pipeline.js）。
  * @property {string}  [repoUser]    仓库归属（cnb=组织/用户；github=owner）
  * @property {string}  [repoName]    仓库名（不含 .git 后缀；不含组织前缀）
  * @property {string}  [repoBranch]  分支名（默认 'main'）；映射到 raw URL 的 ref 段

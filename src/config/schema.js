@@ -1282,9 +1282,13 @@ function normR2Origin(input, idx, label, errors) {
 
 /**
  * 规范化仓库型源站（cnb / github）。
- * 后端实际是仓库 raw API：回源 host 由引擎常量固定（对用户隐藏），鉴权 token 站点级
- * 加密落盘（存储层异步加密；详见 src/utils/cipher.js 与 src/proxy/repoEngine.js）。
- * 此处仅做字段级校验与基础值组装，不在此处加密（保持 norm 同步、加密上移到存储层）。
+ * 这两类在引擎选择 UI 上作为「预设型源站」区别于 fetch（fetch 是灵活自定义回源，
+ * cnb/github 是填仓库参数即自动生成关联规则的标准模板）；但引擎下拉值仍是 cnb/github，
+ * 编辑时 UI 直读显示，落库 engine 即 'cnb'/'github'（不归一为 fetch）。
+ * 其底层回源实现完全等价于 fetch 引擎：回源域名（custom Host）、路径映射、鉴权头
+ * 均由「预设站点规则」承载，运行时走 fetchEngine 拨号路径。私有仓库 token 站点级加密
+ * 落盘（存储层异步加密；详见 src/utils/cipher.js），运行时由 __cnb_token__ / __github_token__
+ * 系统占位符解析层从 ctx.__siteSecrets[源站id] 解密注入。
  *
  * @param {any} input
  * @param {number} idx
@@ -1310,8 +1314,8 @@ function normRepoOrigin(input, idx, label, errors, engine) {
   if (!repoName) errors.push(`${label} engine='${engine}' 时必须填写仓库名（repoName）`);
 
   // 仓库型源站「不承载」任何流量序列字段（rewrite/头/cache/超时/跟随），这些全部由
-  // 站点规则层（新建站点时按源站 id 生成的 repo-* 规则）承载，源站对象只保存回源元数据。
-  // 回源 host/scheme/port 由引擎常量决定（repoEngine），此处填占位。
+  // 站点规则层（绑定源站到站点时按源站 id 生成的预设规则）承载，源站对象只保存回源元数据。
+  // 回源 host/scheme/port 统一为 https + 443（实际回源 authority 由规则 hostHeader.custom 决定）。
   return {
     value: {
       id: str(input.id, '', 64) || `o_${idx}_${Date.now().toString(36)}`,
@@ -1319,6 +1323,7 @@ function normRepoOrigin(input, idx, label, errors, engine) {
       order: int(input.order, idx, 0, 10000),
       weight: int(input.weight, DEFAULT_ORIGIN.weight, 0, 10000),
       name: str(input.name, '', 64),
+      // 引擎下拉值即 cnb/github（UI 直读显示；底层走 fetch 引擎 + 预设规则）。
       engine,
       scheme: 'https',
       addr: '',
@@ -1346,6 +1351,9 @@ function normRepoOrigin(input, idx, label, errors, engine) {
 
 /**
  * 规范化单个源站（fetch / socket 引擎通用；r2 / cnb / github 分流到专门函数）。
+ * 注意：cnb / github 作为「预设型源站」引擎下拉值直接落库（engine 即 'cnb'/'github'，
+ * 编辑时 UI 直读显示，不归一为 fetch）；其底层回源实现等价于 fetch 引擎，回源 host /
+ * 路径映射 / 鉴权由预设站点规则承载，运行时走 fetchEngine 拨号路径（见 repoPresets.js / vars.js）。
  * @param {any} input
  * @param {number} idx
  * @returns {{value: any, errors: string[]}}
@@ -1355,6 +1363,7 @@ function normOrigin(input, idx) {
   const label = `源站[${idx}]`;
   if (!isObj(input)) return { value: null, errors: [`${label} 不是合法对象`] };
 
+  // 枚举仍接受 cnb/github 以兼容历史数据，但会归一为 fetch（见 normRepoOrigin）
   const engine = enumOf(input.engine, ['fetch', 'socket', 'r2', 'cnb', 'github'], DEFAULT_ORIGIN.engine);
 
   // R2 回源：不需要 addr/scheme/port/hostHeader，只校验绑定与 key 配置
@@ -1362,10 +1371,9 @@ function normOrigin(input, idx) {
     return normR2Origin(input, idx, label, errors);
   }
 
-  // 仓库型回源（cnb / github）：后端实际是仓库 raw API，回源 host 由引擎常量固定（对用户隐藏），
-  // 鉴权 token 站点级加密落盘（详见 repoEngine）。只校验仓库元数据与 token 是否存在，
-  // token 的加密落盘在存储层（store.putPool / ensureSingleOrigin）异步完成；回源时由
-  // failover + repoEngine 解密注入 Authorization。
+  // 仓库型源站（cnb / github）：底层统一走 fetch 引擎，回源 host / 路径映射 / 鉴权
+  // 由预设站点规则承载；token 站点级加密落盘，运行时由 __cnb_token__ / __github_token__
+  // 占位符解析层解密注入 Authorization（见 vars.js）。归一输出 engine='fetch'。
   if (engine === 'cnb' || engine === 'github') {
     return normRepoOrigin(input, idx, label, errors, engine);
   }

@@ -432,6 +432,8 @@ export
           id: originId,
           enabled: true, order: i, weight: Number($('.o-weight', row).value) || 1,
           name: ($('.o-name', row).value || '').trim(),
+          // cnb/github 作为「预设型源站」引擎下拉值直接落库（UI 编辑时直读显示），
+          // 底层回源由 fetch 引擎 + 预设规则承载，无需归一为 fetch。
           engine,
           scheme: $('.o-scheme', row) ? $('.o-scheme', row).value : 'https',
           addr: (engine === 'r2' || isRepo) ? '' : addr,

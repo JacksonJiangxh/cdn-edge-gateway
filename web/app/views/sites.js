@@ -97,8 +97,8 @@ export   async function openSiteDrawer(host, anchor) {
         { value: 'fetch', label: 'fetch（标准回源，支持自定义 Host）' },
         { value: 'socket', label: 'socket（已弃用：自定义 Host 现由 fetch 支持，勿用）', disabled: true },
         { value: 'r2', label: 'r2（回源到 R2 桶，仅 CF）', disabled: !(APP_DATA.info && APP_DATA.info.caps && APP_DATA.info.caps.hasR2) },
-        { value: 'cnb', label: 'cnb（CNB 仓库 raw，自动生成关联规则）' },
-        { value: 'github', label: 'github（GitHub 仓库 raw，自动生成关联规则）' },
+        { value: 'cnb', label: 'cnb（CNB 仓库 raw 预设：底层 fetch + 自动关联规则）' },
+        { value: 'github', label: 'github（GitHub 仓库 raw 预设：底层 fetch + 自动关联规则）' },
       ]);
       fEngine.className = 'input';
       fHostMode = select('f-host-mode', [], 'origin', [
@@ -112,7 +112,7 @@ export   async function openSiteDrawer(host, anchor) {
       const addrField = field('源站地址（域名 / IP）', fAddr, '你的真实服务器地址。r2 / cnb / github 引擎不需要此字段。');
       const portField = field('端口', fPort, 'https 默认 443，http 默认 80。');
       const schemeField = field('回源协议', fScheme, '选择 https 则回源时走加密通道。');
-      const engineField = field('引擎', fEngine, 'fetch=标准回源（支持自定义 Host）；r2=回源到 R2 桶（仅 CF）；cnb/github=仓库型引擎（填仓库参数即可，自动生成 URL 重写 + 请求头 + 响应头 关联规则）。');
+      const engineField = field('引擎', fEngine, 'fetch=标准回源（支持自定义 Host）；r2=回源到 R2 桶（仅 CF）；cnb/github=仓库型源站预设（填仓库参数即可，底层统一走 fetch 引擎并自动生成 URL 重写 + 鉴权请求头 + 响应头剥离 关联规则）。');
       // R2 引擎必填的绑定名（与 wrangler.toml 的 [[r2_buckets]].binding 一致），仅在引擎选 r2 时显示
       fR2Binding = el('input', { class: 'input', id: 'f-r2-binding', value: '', placeholder: 'CDN_R2（必须与 wrangler.toml 的 R2 绑定名一致）' });
       const r2BindingField = field('R2 绑定名（r2Binding）', fR2Binding, 'wrangler.toml 里 [[r2_buckets]].binding 的值，如 CDN_R2。引擎选 r2 时必填，保存时自动创建「单一源站」。');
@@ -259,6 +259,8 @@ export   async function openSiteDrawer(host, anchor) {
             addr: (eng === 'r2' || isRepo) ? '' : fAddr.value.trim(),
             port: eng === 'r2' ? null : (Number(fPort.value) || 443),
             scheme: eng === 'r2' ? 'https' : fScheme.value,
+            // cnb/github 作为「预设型源站」引擎下拉值直接落库（UI 编辑时直读显示），
+            // 底层回源由 fetch 引擎 + 预设规则承载，无需归一为 fetch。
             engine: eng,
           };
           if (eng === 'r2') o.r2Binding = (fR2Binding && fR2Binding.value.trim()) || '';
@@ -273,7 +275,8 @@ export   async function openSiteDrawer(host, anchor) {
           }
           basics.origins = [o];
           // 仓库型（cnb/github）/ r2 引擎：回源 Host 由代码层引擎常量自动约定，强制 inherit
-          basics.defaultHostHeader = (eng === 'r2' || eng === 'cnb' || eng === 'github')
+          // 仓库型（cnb/github）/ r2 引擎：回源 Host 由规则 hostHeader.custom 或 R2 binding 承载，强制 inherit
+          basics.defaultHostHeader = (eng === 'r2' || isRepo)
             ? { mode: 'inherit', custom: '' }
             : {
                 mode: fHostMode.value,
@@ -298,7 +301,7 @@ export   async function openSiteDrawer(host, anchor) {
         }
         // cnb/github 引擎：把关联的 rewrite + reqHeaders + respHeaders 预设规则并入
         const eng = fEngine.value;
-        if ((eng === 'cnb' || eng === 'github') && basics.origins && basics.origins[0]) {
+        if (isRepo && basics.origins && basics.origins[0]) {
           const origin = basics.origins[0];
           const preset = buildRepoPresetRules(eng, {
             repoUser: origin.repoUser,
@@ -306,7 +309,7 @@ export   async function openSiteDrawer(host, anchor) {
             repoBranch: origin.repoBranch,
             repoPrivate: origin.repoPrivate,
           });
-          mergedRules.push(preset.rewrite, preset.respHeaders);
+          mergedRules.push(preset.rewrite, preset.hostHeader, preset.respHeaders);
           if (preset.reqHeaders) mergedRules.push(preset.reqHeaders);
         }
         // 选「已有源站（池）」模式：读取池内所有 cnb/github 源站，按各自真实 id
@@ -324,7 +327,7 @@ export   async function openSiteDrawer(host, anchor) {
                 repoPrivate: o.repoPrivate,
                 originId: o.id,
               });
-              mergedRules.push(preset.rewrite, preset.respHeaders);
+              mergedRules.push(preset.rewrite, preset.hostHeader, preset.respHeaders);
               if (preset.reqHeaders) mergedRules.push(preset.reqHeaders);
             }
           }

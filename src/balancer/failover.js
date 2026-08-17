@@ -38,7 +38,6 @@ import { buildOriginHeaders } from '../proxy/headers.js';
 import { DEFAULT_CLIENT_IP_HEADER } from '../config/stages-defaults.js';
 import { fetchOrigin } from '../proxy/engines/fetchEngine.js';
 import { fetchOrigin as r2FetchOrigin } from '../proxy/engines/r2Engine.js';
-import { fetchRepoOrigin } from '../proxy/repoEngine.js';
 
 /** 平台安全余量（毫秒）：留出响应序列化 / 缓存写入的空间，避免撞平台执行上限 */
 const SAFETY_RESERVE = Object.freeze({
@@ -586,8 +585,11 @@ async function dispatch(ctx, origin, originUrl, headers, timeoutMs, opts) {
     return r2FetchOrigin(ctx, origin, originUrl, headers, timeoutMs, opts);
   }
 
+  // cnb / github 仓库型回源：已去独立引擎，底层统一走 fetch 引擎。
+  // 回源域名（custom Host）、路径重写、鉴权头均由「预设站点规则」承载，
+  // 此处与 fetch 引擎走完全相同的拨号路径（originUrl 已由 buildOriginUrl 按规则构造）。
   if (origin.engine === 'cnb' || origin.engine === 'github') {
-    return fetchRepoOrigin(ctx, origin, originUrl, headers, timeoutMs, opts);
+    return fetchOrigin(ctx, origin, originUrl, headers, timeoutMs, opts);
   }
 
   if (origin.engine === 'socket') {

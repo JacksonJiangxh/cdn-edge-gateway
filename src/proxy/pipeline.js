@@ -35,10 +35,55 @@ import { eoEdgeFetch } from './engines/eoEdgeEngine.js';
 import { record } from '../stats/collector.js';
 import { selectOrigin } from '../balancer/strategy.js';
 import { expandVars } from '../config/vars.js';
+import { decryptSecret } from '../utils/cipher.js';
 
 /** 朴素的「是普通对象」判断（避免引入 schema 内部依赖）。 */
 function isObj(x) {
   return x !== null && typeof x === 'object' && !Array.isArray(x);
+}
+
+/**
+ * 仓库型源站（cnb / github）私有仓库鉴权 token 运行时注入。
+ * 把当前源站的加密 token 解密后，按「源站 id」放入 ctx.__siteSecrets[id]，
+ * 供规则 reqHeaders.set.Authorization = __cnb_token__ / __github_token__ 占位符解析。
+ * 按源站 id 维度（而非平台全局唯一值）区分：同一源站池内可存在多个不同仓库源站，
+ * 各自的秘钥不同，运行时按 ctx.origin.id 取对应 token，互不串号。
+ *
+ * @param {import('../contracts.js').Ctx} ctx
+ * @param {Object} origin 当前选中的源站
+ * @returns {Promise<void>}
+ */
+async function ensureSiteSecrets(ctx, origin) {
+  if (!origin || !origin.id) return;
+  if (origin.engine !== 'cnb' && origin.engine !== 'github') return;
+  const encField = origin.engine === 'cnb' ? 'cnbTokenEnc' : 'githubTokenEnc';
+  const stored = origin[encField];
+  if (stored == null || stored === '') return;
+  try {
+    const plain = await decryptSecret(stored, ctx);
+    if (!ctx.__siteSecrets) ctx.__siteSecrets = {};
+    ctx.__siteSecrets[origin.id] = plain;
+  } catch (e) {
+    // 解密失败时该源站的占位符解析为空串（鉴权头缺失 → 私有仓库回源 401），
+    // 记录调试信息但不阻断其余请求链路。
+    if (!ctx.__siteSecrets) ctx.__siteSecrets = {};
+    ctx.__siteSecrets[origin.id] = '';
+    if (ctx.debug) ctx.debug.secretError = e.message;
+  }
+}
+
+/**
+ * 预填充整条源站池内所有仓库型源站的 token（key=源站 id）。
+ * 一次请求只会落在一个 origin 上，但规则可按 originId 匹配到池中任一仓库源站，
+ * 故在管线开头把整池仓库 token 都解密好，避免回源换源时再补解密造成串号或缺值。
+ *
+ * @param {import('../contracts.js').Ctx} ctx
+ * @param {Object} pool 源站池（含 origins）
+ * @returns {Promise<void>}
+ */
+async function ensureSiteSecretsForPool(ctx, pool) {
+  if (!pool || !Array.isArray(pool.origins)) return;
+  await Promise.all(pool.origins.map((o) => ensureSiteSecrets(ctx, o)));
 }
 
 /**
@@ -173,6 +218,10 @@ async function runPipeline(ctx) {
   }
   // 注入规则引擎匹配维度
   ctx.origin = primaryOriginActual;
+  // 仓库型源站（cnb/github）私有仓库鉴权：预解密整池所有仓库源站的站点级密文，
+  // 按源站 id 放入 ctx.__siteSecrets，供规则 __cnb_token__ / __github_token__ 占位符按
+  // ctx.origin.id 取对应 token（同池多仓库互不串号）。
+  await ensureSiteSecretsForPool(ctx, defaultPool);
 
   // ---- 4. 匹配规则（此时 ctx.origin 已就绪，规则可匹配 origin / originAddr）----
 
@@ -229,6 +278,8 @@ async function runPipeline(ctx) {
     if (!pool || !Array.isArray(pool.origins) || pool.origins.length === 0) {
       return errorResponse(502, 'Config Error', `Origin "${poolId}" is empty or missing`, ctx);
     }
+    // 规则重选的源站池：补充解密该池内所有仓库源站的 token
+    await ensureSiteSecretsForPool(ctx, pool);
   }
   // 规则未指定 poolId → 沿用③的 defaultPool + primaryOrigin
 
@@ -241,6 +292,8 @@ async function runPipeline(ctx) {
     }
     ctx.origin = reSelected;
     primaryOriginActual = reSelected;
+    // 规则重选源站：补充解密该源站 token（若尚未预填充）
+    await ensureSiteSecrets(ctx, reSelected);
   }
   // 源站对象已不再承载 cache（全交给规则层）；仅用规则层 cache 叠加默认策略。
   const ruleCache = rule?.action?.cache || {};
@@ -299,9 +352,9 @@ async function runPipeline(ctx) {
     effectiveHostHeader?.mode === 'accel' && !effectiveHostHeader?.custom &&
     cacheKey &&
     safeIsCacheable(ctx, cacheKey, new Response(null, { status: 200 }), policy) &&
-    // 仓库引擎（cnb/github）/ r2 的回源 host 由代码层引擎常量决定（如 raw.githubusercontent.com），
+    // 仓库引擎（cnb/github）/ r2 的回源 host 由规则/代码层决定（如 raw.githubusercontent.com），
     // 与「同站加速域名」完全不同，绝不能走「同站 fetch 委托」——否则会回源打回自己导致死循环/超时。
-    // 这类引擎必须走 requestWithFailover 路径，由 buildOriginUrl 按引擎解析真实上游。
+    // 这类引擎必须走 requestWithFailover 路径，由 buildOriginUrl 按规则 hostHeader.custom 解析真实上游。
     !['cnb', 'github', 'r2'].includes(primaryOriginActual?.engine);
 
   let originResp;

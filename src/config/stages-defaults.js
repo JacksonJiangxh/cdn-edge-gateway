@@ -422,7 +422,7 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
       // 上游源站的 CORS 策略（CNB 写死 https://docs.cnb.cool；GitHub 写死 *），对你的用户
       // 是错误且无效的；两者实测都有，全站统一剥离（后续可由网关统一主动下发正确 CORS 策略）。
       Object.freeze({ type: 'exact', value: 'access-control-allow-origin' }),
-      // —— 以下均为【仓库接口特有头】，已下沉到对应引擎的站点规则（见 repoEngine.js）——
+      // —— 以下均为【仓库接口特有头】，已下沉到仓库预设的站点规则（见 src/config/repoPresets.js）——
       // CNB 特有：access-control-allow-credentials / access-control-expose-headers /
       //   referrer-policy / traceparent / x-trace-id / x-ratelimit-* / x-repo-commit
       // GitHub 特有：x-xss-protection / strict-transport-security / x-github-request-id /
