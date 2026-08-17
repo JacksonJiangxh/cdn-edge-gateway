@@ -364,16 +364,27 @@ export function expandSysVars(str, ctx) {
 function resolveSysVar(ctx, name) {
   const g = ctx && ctx.__globalStages;
   const cache = g && g.cache;
+  // 本次请求「规则引擎合并后的 cache 段」标量 TTL 快照（由 ruleEval.evalStagesForOrigin 挂载）。
+  // 命中站点规则覆盖全站后的值；未挂载时回退全站兜底 cache（向后兼容老调用路径）。
+  const eff = ctx && ctx.effCacheTtl;
   switch (name) {
-    // ---- 边缘缓存参数（来自 DEFAULT_GLOBAL_RULES.cache）----
+    // ---- 边缘缓存参数（优先取命中规则覆盖后的最终生效值，回退全站兜底）----
     case 'edge_ttl':
-      return cache && cache.edgeTtl != null ? String(cache.edgeTtl) : '';
+      return eff && eff.edgeTtl ? String(eff.edgeTtl)
+        : cache && cache.edgeTtl != null ? String(cache.edgeTtl) : '';
     case 'browser_ttl':
-      return cache && cache.browserTtl != null ? String(cache.browserTtl) : '';
+      return eff && eff.browserTtl ? String(eff.browserTtl)
+        : cache && cache.browserTtl != null ? String(cache.browserTtl) : '';
     case 'swr':
-      return cache && cache.staleWhileRevalidate != null ? String(cache.staleWhileRevalidate) : '';
-    case 'status_ttl':
-      return cache && cache.statusTtl != null ? String(cache.statusTtl) : '';
+      return eff && eff.staleWhileRevalidate ? String(eff.staleWhileRevalidate)
+        : cache && cache.staleWhileRevalidate != null ? String(cache.staleWhileRevalidate) : '';
+    case 'status_ttl': {
+      // statusTtl 为对象（按状态码分桶：{ '4xx': 0, '5xx': 0, '52x': 0 }），需对象感知展开。
+      const pick = eff && eff.statusTtl != null ? eff.statusTtl
+        : cache && cache.statusTtl != null ? cache.statusTtl : null;
+      if (pick == null) return '';
+      return typeof pick === 'object' ? JSON.stringify(pick) : String(pick);
+    }
     // ---- 调试 / 命中标记 ----
     case 'cache':
       return ctx && ctx.debug && ctx.debug.cache != null ? String(ctx.debug.cache) : '';

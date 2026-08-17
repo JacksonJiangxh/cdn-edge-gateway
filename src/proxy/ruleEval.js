@@ -99,6 +99,20 @@ export function evalStagesForOrigin(ctx, site, origin) {
     // 注：HeaderOps 段（reqHeaders/respHeaders）同样是整段 {set, strip} 存放，与此一致。
   }
 
+  // 缓存占位符唯一真相源：把本次请求「规则引擎合并后的 cache 段」（已含站点覆盖全站）快照到 ctx，
+  // 供 vars.js 的 __edge_ttl__/__browser_ttl__/__swr__/__status_ttl__ 展开时优先取用，回退全站兜底。
+  // 这样命中文件后缀等站点规则时，响应缓存头反映规则时长而非全站兜底。
+  // edgeTtl/browserTtl/staleWhileRevalidate 为标量（Number()||0 防御非数字配置）；
+  // statusTtl 为对象（按状态码分桶），保留原对象形态（对象感知展开在 vars.js 处理）。
+  // 仅取字段、不整段挂引用，避免下游误改。
+  const c = effAction.cache || {};
+  ctx.effCacheTtl = {
+    edgeTtl: Number(c.edgeTtl) || 0,
+    browserTtl: Number(c.browserTtl) || 0,
+    staleWhileRevalidate: Number(c.staleWhileRevalidate) || 0,
+    statusTtl: c.statusTtl != null ? c.statusTtl : 0,
+  };
+
   return effAction;
 }
 
