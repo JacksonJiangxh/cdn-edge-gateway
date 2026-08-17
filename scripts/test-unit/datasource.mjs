@@ -169,7 +169,7 @@ test('datasource: https 走全站兜底 7 阶段 + 响应头改写', async () =>
   }
 });
 
-test('datasource: http 触发全站兜底 forceHttps → 301', async () => {
+test('datasource: http 默认不强制 HTTPS（forceHttps 缺省关闭）→ 照常回源', async () => {
   const kv = createMockKV();
   await seedSiteAndPool(kv, buildSite(), buildPool());
   const env = { CLOUD_PLATFORM: PLATFORM, CDN_KV: kv };
@@ -178,9 +178,9 @@ test('datasource: http 触发全站兜底 forceHttps → 301', async () => {
   const capture = {};
   const restoreFetch = (() => {
     const prev = globalThis.fetch;
-    globalThis.fetch = async () => {
-      capture.url = 'should-not-happen';
-      return new Response('x', { status: 200 });
+    globalThis.fetch = async (url) => {
+      capture.url = String(url);
+      return new Response('<html>hello-from-origin</html>', { status: 200 });
     };
     return () => { globalThis.fetch = prev; };
   })();
@@ -189,11 +189,10 @@ test('datasource: http 触发全站兜底 forceHttps → 301', async () => {
   try {
     const ctx = makeCtx(env, `http://${HOST}/`);
     const resp = await handleProxy(ctx);
-    assert.strictEqual(capture.url, undefined, 'http 应被 terminate 拦截、不发生回源');
-    assert.strictEqual(resp.status, 301, 'forceHttps 默认 301');
-    assert.strictEqual(resp.headers.get('location'), `https://${HOST}/`, 'Location 应指向 https');
+    // forceHttps 缺省关闭：http 不再被 terminate 拦截跳转，照常回源
+    assert.strictEqual(resp.status, 200, 'http 不应被 301 拦截');
+    assert.ok(capture.url, '应发生回源 fetch');
     assert.strictEqual(resp.headers.get('server'), 'EdgeGateway', 'Server 应为 EdgeGateway');
-    assert.strictEqual(resp.headers.get('cache-control'), 'no-store', '301 应带 no-store');
   } finally {
     restoreFetch();
     restoreCaches();

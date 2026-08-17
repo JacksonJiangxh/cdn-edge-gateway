@@ -17,7 +17,7 @@
  *
  * forceHttps 双份默认值说明（消歧义）：
  *   - DEFAULT_RULE_ACTION.forceHttps = false  → 单条站点规则动作的初始值（见 site.js）。
- *   - DEFAULT_TERMINATE.forceHttps   = true   → 全站「终止阶段」的安全基线（见下）。
+ *   - DEFAULT_TERMINATE.forceHttps   = false  → 全站「终止阶段」默认不强制 HTTPS（见下）。
  *   二者属于不同层级、语义独立，**切勿合并**为一处；两处均有交叉引用锚点注释。
  * ============================================================================
  */
@@ -34,7 +34,9 @@ import { DEFAULT_HOST_HEADER } from './global.js';
  * @type {Readonly<import('../contracts.js').CacheKey>}
  */
 export const DEFAULT_CACHE_KEY = Object.freeze({
-  ignoreCase: false,
+  // 缓存键「不区分大小写」默认开启（/A.jpg 与 /a.jpg 命中同一缓存条目），
+  // 对齐全站兜底默认；站点/规则级与模板规则均以此为缺省。
+  ignoreCase: true,
   includeScheme: false,
   headers: Object.freeze([]),
   cookies: Object.freeze([]),
@@ -185,9 +187,12 @@ export const DEFAULT_CLIENT_IP_HEADER = Object.freeze({
  * 与 DEFAULT_REDIRECT 等同级模板统一风格，作为全站强制 HTTPS 的唯一真相源；
  * 单条站点规则动作的 forceHttps 初始值为 false（见 site.js 的 DEFAULT_RULE_ACTION），
  * 二者层级不同、**不合并**。
+ *
+ * forceHttps 默认关闭：http→https 重定向由用户按需显式开启（勾选），
+ * 不再作为全站缺省的安全基线强制打开。
  */
 export const DEFAULT_TERMINATE = Object.freeze({
-  forceHttps: true,
+  forceHttps: false,
   forceHttpsStatus: 301,
   directResponse: deepUnfreeze(DEFAULT_DIRECT_RESPONSE),
 });
@@ -200,7 +205,7 @@ export const DEFAULT_TERMINATE = Object.freeze({
  *
  * 设计原则（安全优先、保守默认）：
  *   - rewrite / redirect：默认不重写、不重定向（空操作）。
- *   - terminate：默认强制 HTTPS（301）——这是 CDN 网关的推荐安全基线，不改用户内容。
+ *   - terminate：默认不强制 HTTPS（forceHttps=false）——http→https 重定向由用户按需显式开启。
  *   - reqHeaders / respHeaders：默认不增删任何头部（空操作）。
  *   - origin：默认不改动回源 Host（inherit）、透传真实客户端 IP 关闭、沿用源站超时与重定向策略。
  *   - cache：默认不缓存（见 DEFAULT_CACHE_POLICY 说明，避免误缓存动态内容 / 登录态）。
@@ -329,8 +334,8 @@ export const DEFAULT_GLOBAL_RULES = Object.freeze({
     ignoreQuery: true,
     queryWhitelist: Object.freeze([]),
     // 全站缺省「缓存键不区分大小写」开启（/A.jpg 与 /a.jpg 命中同一缓存条目）。
-    // 注意：仅全站兜底如此，站点/规则级默认仍跟随 DEFAULT_CACHE_KEY（false）。
-    key: Object.assign(deepUnfreeze(DEFAULT_CACHE_KEY), { ignoreCase: true }),
+    // 站点/规则级与模板规则默认亦跟随 DEFAULT_CACHE_KEY（已统一为 true）。
+    key: deepUnfreeze(DEFAULT_CACHE_KEY),
     // 错误码缓存 TTL：命中状态码 → 缓存秒数；0 = no-store（不写缓存 + 下发 no-store 头）。
     // 默认 4xx / 5xx / 52x 不缓存（原 noCacheStatus 黑名单语义并入此处：TTL=0 即 no-store）。
     statusTtl: Object.freeze({ '4xx': 0, '5xx': 0, '52x': 0 }),

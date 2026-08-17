@@ -189,8 +189,8 @@ export const DEFAULT_POOL_INDEX = Object.freeze({
  * @type {Readonly<import('../contracts.js').RuleAction>}
  *
  * 注意 forceHttps：此处 = false，仅作「单条站点规则动作」的初始值。
- * 全站「终止阶段」的安全基线另见 DEFAULT_TERMINATE.forceHttps = true，
- * 二者属于不同层级、语义独立，**切勿合并**为一处。
+ * 全站「终止阶段」默认亦为 false（DEFAULT_TERMINATE.forceHttps = false，
+ * http→https 重定向由用户按需显式开启），二者层级不同、**不合并**。
  */
 export const DEFAULT_RULE_ACTION = Object.freeze({
   poolId: '',
