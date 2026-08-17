@@ -327,6 +327,14 @@ export function detectCaps(env) {
       (looksLikeR2(e.CDN_R2) ||
         looksLikeR2(e.R2) ||
         Object.values(e).some((v) => looksLikeR2(v))),
+    // 「边缘静态托管层」能力：具备则管理面前端资源（/assets/app.{css,js}）可命中
+    // 边缘静态层，浏览器重复访问零函数执行次数，最省额度。
+    //   - CF：Pages/Workers Static Assets（env.ASSETS 绑定），物理 /assets/* 按 URL 取；
+    //   - EO：Makers 静态目录托管（dist/eo-public/ 静态根），URL 物理 /assets/* 直接命中；
+    //   - ESA：当前无静态目录托管（函数/Pages 形态不同），故为 false。
+    // 注：EO 的静态资产对外路径是「与 adminPath 解耦的固定物理 /assets/*」（adminPath 为
+    // 运行时可变变量，不能写死进静态层路由），仅管理面根 HTML 入口走 /{adminPath}。
+    hasStaticHosting: platform === 'eo' || platform === 'cf',
     // 平台单次请求总执行上限（墙钟）：用于推导回源总时间预算硬顶。
     //   - ESA 函数单次执行响应时间上限 = 120s（阿里云官方《什么是函数和Pages》）；
     //     网关等待函数返回首个数据的首字节约束 = 10s，超时网关主动断连返回 504（firstByteMs）。

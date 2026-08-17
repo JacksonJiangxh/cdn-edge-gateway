@@ -77,6 +77,28 @@ export async function tryServePanelStatic(ctx, req, adminPath) {
         /* ASSETS 不可用则回退内联兜底 */
       }
     }
+    // EO 分支：无 env.ASSETS 绑定，但 Makers 静态目录托管物理 /assets/*。
+    // 用「同站 fetch 对外 /assets/*」委托 EO 静态层回源（命中 dist/eo-public/assets/），
+    // 浏览器请求 /{adminPath}/assets/* 经此处重写为固定物理 /assets/* 后由静态层直接返回。
+    // 注意：这是函数内兜底；最省额度的主路径是 renderAdminPage 直接注入 bare /assets/*，
+    // 浏览器不再经过本函数（app.js 仅把 /{adminPath} 根路径路由进管理面分支）。
+    if (ctx?.caps?.platform === 'eo') {
+      try {
+        const physResp = await fetch(new Request(url.origin + '/assets/' + file, {
+          method: req.method,
+          headers: req.headers,
+          redirect: 'follow',
+        }));
+        if (physResp && physResp.status < 400) {
+          const headers = new Headers(physResp.headers);
+          headers.set('cache-control', 'public, max-age=86400, immutable');
+          headers.set('x-content-type-options', 'nosniff');
+          return new Response(physResp.body, { status: physResp.status, headers });
+        }
+      } catch {
+        /* 静态层不可用则回退内联兜底 */
+      }
+    }
     // 回退：从 ui.gen.js 内联字节透传 CSS（无静态目录环境也完整可用）。
     // 注意：不再单独透传 app.js。管理面根路径走 UI_HTML 内联，其 <script> 已包含
     // 完整前端逻辑，浏览器不会再来请求 /assets/app.js，故此处对 JS 资源直接返回
@@ -130,21 +152,33 @@ export async function renderAdminPage(ctx, adminPath) {
 
   if (!html) html = FALLBACK_HTML;
 
-  // 具备 CF Workers Static Assets（env.ASSETS）时，把内联 CSS/JS 改为引用外部
-  // /{adminPath}/assets/*，让浏览器命中静态资产层（边缘缓存，重复访问零函数计费），
-  // 使 wrangler.toml 挂载的 dist/public/ 真正被用起来。
-  // 无 ASSETS（如纯 Dashboard 粘贴 worker）时保持完全内联兜底，功能不受影响。
+  // 具备「边缘静态托管层」时，把内联 CSS/JS 改为引用外部资产，让浏览器命中静态层
+  // （边缘缓存，重复访问零函数执行次数，最省额度）。判据需区分平台，避免误伤「无静态层」形态：
+  //   - CF：必须确有 env.ASSETS 绑定才切外部（纯 Dashboard 粘贴 worker 无 ASSETS，
+  //         保持完全内联兜底，否则外部引用会 404）；
+  //   - EO：Makers 静态目录托管恒存在（dist/eo-public/assets/ 静态根由 build.mjs 产出），
+  //         且对外用「与 adminPath 解耦的固定物理 /assets/*」——因 adminPath 是运行时
+  //         可变变量、EO 静态层路由无法感知，故不能写死前缀；bare /assets/* 天然匹配
+  //         静态根，零函数返回且不依赖 adminPath。
+  // 注意：caps.hasStaticHosting 表示「平台层具备静态托管能力」，但 CF 上仍需 env.ASSETS
+  // 实际绑定才可用，故此处不直接用 hasStaticHosting 作为 CF 的切外部判据。
   const assets = ctx?.env?.ASSETS;
-  if (assets && typeof assets.fetch === 'function') {
-    const prefix = '/' + adminPath;
-    // 内联 <style>…</style> → 外部 /{adminPath}/assets/app.css
+  const isEo = ctx?.caps?.platform === 'eo';
+  const useExternalAssets = isEo || (assets && typeof assets.fetch === 'function');
+  if (useExternalAssets) {
+    // 资产对外引用前缀：
+    //   - EO：固定物理 /assets（不带 adminPath，因 adminPath 运行时可变且 EO 静态层无法感知）；
+    //         bare /assets/* 天然匹配 dist/eo-public/assets/，由 EO 静态层零函数返回。
+    //   - CF：/{adminPath}/assets（与 env.ASSETS 物理 /assets/* 路由一致，含 /assets 段）。
+    const assetBase = isEo ? '/assets' : '/' + adminPath + '/assets';
+    // 内联 <style>…</style> → 外部 app.css
     html = html.replace(/<style[\s\S]*?<\/style>/i, () =>
-      `<link rel="stylesheet" href="${prefix}/assets/app.css">`
+      `<link rel="stylesheet" href="${assetBase}/app.css">`
     );
-    // 内联 <script>…</script> → 外部 /{adminPath}/assets/app.js
+    // 内联 <script>…</script> → 外部 app.js
     // 注意：buildInlineUI 只注入一个含全部前端逻辑的 <script>，替换它即切换到外部资源。
     html = html.replace(/<script[\s\S]*?<\/script>/i, () =>
-      `<script src="${prefix}/assets/app.js"></script>`
+      `<script src="${assetBase}/app.js"></script>`
     );
   }
 
