@@ -342,12 +342,14 @@ chmod 755 ./webdis-data
 
    ```bash
    printf 'esa:你的强密码' | base64
-   # 得到一串 base64，REDIS_TOKEN = "Basic " + 该串（例如 Basic xxxx，xxxx 即上一步输出）
+   # 得到一串 base64（如 ZXNhOe...），直接把这一整串填进 REDIS_TOKEN
    ```
 
-   > ⚠️ `REDIS_TOKEN` 必须是**最终发送的完整字面量**：把上面 `base64` 的输出（**不带换行**）
-   > 直接拼到 `Basic ` 后面整体填进环境变量，例如 `Basic ZXNhOe...`。
-   > **代码不会帮你再做一次 base64**——若填成 `Basic <base64("esa:你的强密码")>` 这种文本，
+   > ⚠️ `REDIS_TOKEN` **只需填 `base64` 输出这串凭证**（不带换行），代码会自动补 `Basic ` 前缀，
+   > 例如填 `ZXNhOe...` 实际发送 `Basic ZXNhOe...`。**不要再手动加 `Basic ` 前缀**——
+   > 尤其 EdgeOne 等「变量值禁止空格/换行」的平台，带 `Basic ` 前缀会因含空格报错无法保存。
+   > 若坚持写完整 `Basic xxx` / `Bearer xxx`，代码会识别已带前缀而原样使用，行为不变。
+   > **代码不会帮你再做一次 base64**——若填成 `Basic <base64("esa:你的强密码")>` 这种伪代码文本，
    > 服务端收到的凭据非法，会持续 401/403。
 
 3. **启动**：
@@ -398,7 +400,7 @@ curl -u 'esa:你的强密码' https://webdis.example.com/GET/esa:test
 | 变量 | 值 | 说明 |
 |---|---|---|
 | `REDIS_URL` | `https://webdis.example.com` | Webdis 根地址，注意**不带尾斜杠**。配上即启用 Webdis 后端 |
-| `REDIS_TOKEN` | `Basic ZXNhOv...`（见下方生成命令输出的整串） | `Authorization` 头值，**代码不二次 base64 编码**，须填「`Basic ` + 预先算好的 base64 串」这一**完整字面量** |
+| `REDIS_TOKEN` | `ZXNhOv...`（base64 串，见下方生成命令输出） | `Authorization` 头值。**只需填 base64 凭证串，代码自动补 `Basic ` 前缀**（也可填完整 `Basic xxx`/`Bearer xxx`，已带前缀则原样用）。**代码不二次 base64 编码**。EdgeOne 等禁空格平台务必只填 base64 串、不要带 `Basic ` 前缀 |
 | `REDIS_PREFIX` | `esa:`（可选） | 键前缀，便于识别 / 多项目共库。**未设置时按 `CLOUD_PLATFORM` 自适应默认前缀**（`cf:` / `eo:` / `esa:`）；显式设为空串 `""` 表示主动不要前缀 |
 | `REDIS_DB` | `0`–`15` | 多库隔离，见下 |
 | `REDIS_TIMEOUT_MS` | `5000` | 单次请求超时，默认 5000ms |

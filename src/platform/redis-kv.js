@@ -30,9 +30,10 @@
  *      不含 '?'。format/type 等用 query 参数时由 Webdis 客户端解析（本项目不用）。
  *   5) 鉴权：Webdis 自带 HTTP Basic Auth（src/acl.c，Authorization: Basic）；
  *      更常见是自部署套反向代理做 Bearer。本项目 REDIS_TOKEN **直接作为
- *      Authorization 头的值原样发送**，代码**不会对其做任何 base64 编码**——
- *      用户须自行用 `printf 'esa:密码' | base64` 算好 base64 串，把
- *      `Basic <已算好的串>`（或 `Bearer xxx`）这一完整字面量填进环境变量。
+ *      Authorization 头的值原样发送**，代码**不会对其做任何 base64 编码**。
+ *      token 归一（见 normalizeToken）：用户只需填凭证串（如 `printf 'esa:密码' | base64`
+ *      算出的 base64 后半段），代码自动补 `Basic ` 前缀；也可填完整 `Basic xxx` / `Bearer xxx`
+ *      （已带前缀则原样使用）。这样在 EdgeOne 等「变量值禁空格/换行」的平台也能直接填写。
  *      ⚠️ 切勿填 `Basic <base64("...")>` 这种伪代码文本，否则服务端收到的凭据非法。
  *
  * 设计要点（与 kv.js 的 CF/EO 适配器完全同构）：
@@ -87,6 +88,31 @@ function physKey(prefix, logicalKey) {
 function defaultPrefixFor(env) {
   const p = readPlatformSafe(env, '');
   return p ? `${p}:` : '';
+}
+
+/**
+ * 归一化 Webdis 鉴权 token，自动补全 `Basic ` 前缀。
+ *
+ * 背景：部分平台（如 EdgeOne）环境变量值禁止包含空格/换行/制表符，而
+ * `Basic <base64>` 中间有空格无法直接填写。故约定用户只填凭证串（通常是
+ * base64 后半段），由本函数自动补 `Basic ` 前缀。
+ *
+ * 规则：
+ *   - 先 trim（防手误换行/尾随空格）；
+ *   - 已以 `Basic ` / `Bearer ` 开头（大小写不敏感）→ 原样返回（向后兼容既有写法与 Bearer 反代）；
+ *   - 否则视为裸凭证串 → 返回 `Basic ${trimmed}`（项目默认固定 Basic 前缀）；
+ *   - 空串 / undefined / null → 返回空串（无鉴权，行为不变）。
+ *
+ * ⚠️ 代码**不**对值做任何 base64 编码，用户须自行用 `printf 'esa:密码' | base64` 算好 base64 串。
+ *
+ * @param {string|undefined|null} raw 环境变量 REDIS_TOKEN 的原始值
+ * @returns {string} 可直接作为 Authorization 头值的归一化 token
+ */
+function normalizeToken(raw) {
+  const trimmed = String(raw ?? '').trim();
+  if (!trimmed) return '';
+  if (/^(basic|bearer)\s+/i.test(trimmed)) return trimmed; // 已带前缀，原样使用
+  return `Basic ${trimmed}`; // 裸凭证串，自动补 Basic 前缀
 }
 
 /**
@@ -171,7 +197,9 @@ function unwrap(json, cmd) {
 export function createRedisKV(env) {
   const rawUrl = (env.REDIS_URL || env.REDIS_URL_KV || '').trim().replace(/\/+$/, '');
   const base = rawUrl || 'http://127.0.0.1:7379';
-  const token = typeof env.REDIS_TOKEN === 'string' && env.REDIS_TOKEN ? env.REDIS_TOKEN : '';
+  // REDIS_TOKEN：归一为 Authorization 头值。裸凭证串（如 base64 后半段）自动补 `Basic ` 前缀；
+  // 已带 Basic/Bearer 前缀的原样使用；代码不二次 base64 编码。绕过 EO 等禁空格变量限制。
+  const token = normalizeToken(env.REDIS_TOKEN);
   // REDIS_PREFIX：键前缀隔离。仅当变量**完全未定义**时套平台自适应默认（cf:/eo:/esa:）；
   // 显式设为空串 "" 表示用户主动不要前缀（与 REDIS_DB 的 undefined 判断行为对齐）。
   const prefix =

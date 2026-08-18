@@ -34,7 +34,7 @@
 | `ADMIN_PATH` | `__panel` | 可选 | 管理面路径；生效优先级：KV 全局配置 > 环境变量 > 内置 `__panel`。官方不推荐在变量页设，建议用管理面改 |
 | `KV_BACKEND` | `auto` | 可选 | `auto` / `native`(别名 `kv`/`platform`) / `redis`(别名 `webdis`)。`auto` = **Webdis 优先**：平台 KV 与 Webdis 并存时用 Webdis，不可用时降级到另一侧 |
 | `REDIS_URL` / `REDIS_URL_KV` | 无 | 可选 | 任一非空即启用 Webdis 后端。ESA 未配时薄壳默认注入 `STATIC_CONFIG=1`（只读烘焙） |
-| `REDIS_TOKEN` | 空串 | 可选 | **原样作为 `Authorization` 头值发送，代码不二次 base64**。填 `Basic <已算好的 base64>` 或 `Bearer xxx` 完整字面量（见 [Redis/Webdis 文档](/dev/13-redis-kv.md) 的生成命令） |
+| `REDIS_TOKEN` | 空串 | 可选 | **只需填 base64 凭证串，代码自动补 `Basic ` 前缀**；也可填完整 `Basic xxx`/`Bearer xxx`（已带前缀原样用）。代码不二次 base64。EdgeOne 等「变量值禁空格」平台**务必只填 base64 串、不要带 `Basic ` 前缀**（见 [Redis/Webdis 文档](../dev/13-redis-kv.md) 的生成命令） |
 | `REDIS_PREFIX` | 按平台自适应 | 可选 | 仅当变量**完全未设置**时套 `cf:` / `eo:` / `esa:`（取 `CLOUD_PLATFORM`）；显式设为空串 `""` = 主动不要前缀；多项目共库时隔离键 |
 | `REDIS_DB` | `0` | 可选 | Redis 逻辑库 0–15；非法/越界值忽略回退 0 |
 | `REDIS_TIMEOUT_MS` | `5000` | 可选 | 单次 Webdis 请求超时（毫秒） |
@@ -107,7 +107,7 @@
 
 - **`CLOUD_PLATFORM` 没设（EO/ESA 不用薄壳）** → 启动报错"必须设置环境变量 CLOUD_PLATFORM"。补 `eo` / `esa`。
 - **`JWT_SECRET` 没设或 <8 字符** → 降级到密码哈希派生，重启/无哈希时登录签名失败（500）。用 `openssl rand -hex 32` 设一个。
-- **`REDIS_TOKEN` 填成 `Basic <base64("...")>` 文本** → 服务端收到非法凭据，持续 401/403。要填 `Basic ` + 你已经算好的 base64 串（见 [Redis/Webdis 文档](/dev/13-redis-kv.md)）。
+- **`REDIS_TOKEN` 填成带 `Basic ` 前缀的文本或伪代码** → EdgeOne 等禁空格平台会直接报错无法保存；其它平台若填 `Basic <base64("...")>` 文本则服务端收到非法凭据、持续 401/403。**正确做法：只填 `base64` 算出的凭证串**（如 `ZXNhOe...`），代码自动补 `Basic ` 前缀（见 [Redis/Webdis 文档](/dev/13-redis-kv.md)）。
 - **`REDIS_PREFIX` 没设但多项目共库** → 自动套 `cf:`/`eo:`/`esa:` 前缀；若旧数据无前缀会读不到，显式设回原前缀即可。
 - **ESA 没配 `REDIS_URL`** → 自动进入静态烘焙只读（`STATIC_CONFIG=1`），管理面改配置不生效；想可写就配 `REDIS_URL` 或显式 `STATIC_CONFIG=0`。
 
