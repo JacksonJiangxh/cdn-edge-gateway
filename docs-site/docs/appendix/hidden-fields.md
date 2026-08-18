@@ -65,26 +65,13 @@
 
 ## 三、平台相关隐藏项（环境变量）
 
-这些不在配置 JSON 里，而是部署时设的环境变量（见 [部署 ESA](/dev/14-deploy-esa.md)）：
-
-| 变量 | 平台 | 说明 |
-|---|---|---|
-| `CLOUD_PLATFORM` | 全部 | `cf` / `eo` / `esa`，必填（EO 必填） |
-| `KV_BACKEND` | 全部 | KV 后端选型：`auto`（默认，**Webdis 优先**）/ `native`（平台 KV）/ `redis`（Webdis） |
-| `REDIS_URL` | 全部 | 自部署 Webdis 根地址（不带尾斜杠）；配上即启用 Webdis 后端 |
-| `REDIS_TOKEN` | 全部 | Webdis 鉴权头原样值，如 `Basic <base64>` |
-| `REDIS_PREFIX` | 全部 | 键前缀，便于多项目共库识别 |
-| `REDIS_DB` | 全部 | Redis 逻辑库号 `0`–`15`，非法值回退 `0` |
-| `REDIS_TIMEOUT_MS` | 全部 | Webdis 单次请求超时，默认 `5000` |
-| `STATIC_CONFIG` | 全部 | `1` 时走静态烘焙（只读，不依赖运行时 KV）；ESA 在未配 `REDIS_URL` 时默认为 `1` |
-| `MEM_BUDGET_BYTES` | 全部 | 覆盖内存预算（默认按 128MB 估算） |
-| `ADMIN_PATH` | 全部 | 覆盖管理面路径（也可写进 global） |
+这些不在配置 JSON 里，而是部署时设的环境变量。**完整清单（含默认值、必填性、各平台差异、绑定/工具）已集中到 [用户篇 · 部署变量与平台清单](/user/09-env-vars.md)，那是变量设置的唯一入口，本文不再重复罗列。**
 
 > [!IMPORTANT]
 > **所有平台**都支持外置自部署 Webdis，且可与平台级 KV 并存。两者都可用时**默认优先 Webdis**；
 > 设 `KV_BACKEND=native` 可切回平台 KV。该开关只能走环境变量（配置本身存在 KV 里，
 > 写进配置会造成循环依赖），管理面只读展示。**切换后端不会自动迁移数据，切换前请先导出配置。**
-> 详见 [Redis / Webdis 外置 KV](/dev/13-redis-kv.md)。
+> 变量取值与生成方法详见 [部署变量与平台清单](/user/09-env-vars.md) 与 [Redis / Webdis 外置 KV](/dev/13-redis-kv.md)。
 
 ---
 

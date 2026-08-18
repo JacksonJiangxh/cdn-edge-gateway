@@ -61,6 +61,7 @@ nav:
       - 环境准备: user/02-prerequisites.md
       - 部署指南: user/03-deploy.md
       - 配置详解: user/04-configuration.md
+      - 部署变量清单: user/09-env-vars.md
       - 管理面教程: user/05-user-guide.md
       - 缓存策略: user/06-cache-strategy.md
       - EO 回源 Host: user/07-eo-origin-host.md
