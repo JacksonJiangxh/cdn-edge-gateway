@@ -150,6 +150,77 @@ curl "https://你的网关域名/__panel/api/kv/ping" -H "cookie: ecw_token=$TOK
 
 ---
 
+## 数据迁移（厂商 KV ↔ 自部署 Webdis）
+
+当平台 KV 与自部署 Webdis **同时配置**时，可在管理面直接把一侧数据「倒」到另一侧，
+免去人工导出/导入。入口：**系统信息 → KV 存储后端 → 数据迁移**，选择方向后点「迁移数据」。
+
+> [!NOTE]
+> 迁移是**复制**，不是切换。**源数据保留、不删除**，可随时切回。若要让复制后的数据真正生效，
+> 仍需修改环境变量 `KV_BACKEND` / `KV_SOURCE` 并**重新部署**（见下「迁移后如何真正生效」）。
+
+### 支持的方向
+
+| 方向 | 含义 | 典型场景 |
+|---|---|---|
+| `平台 KV → 自部署 Webdis`（`native→redis`） | 把厂商 KV 全量复制到你的 Redis | 想摆脱平台 KV 锁定、把配置掌握在自己 Redis 里 |
+| `自部署 Webdis → 平台 KV`（`redis→native`） | 把 Redis 全量复制回厂商 KV | 临时把数据迁回平台 KV、或做兜底备份 |
+
+### 隔离如何被正确处理
+
+- **平台 KV（厂商）侧**：使用时**没有 db / 前缀隔离**，键以原始逻辑名直接存放。
+- **自部署 Webdis 侧**：写入时由适配器自动套用 `REDIS_PREFIX` 并选 `REDIS_DB`（路径段模拟 `SELECT`），读取时自动解回逻辑键。
+
+因此迁移层**只做「逐键 `get` → 逐键 `put`」透传，不手动编码/拼接键名**：
+源侧读出逻辑键原文，目标适配器在写入时自动加上自己的隔离。例：平台 KV 里的 `cfg:global`
+迁移到 Webdis 后变成 `cf:cfg_3Aglobal`（位于 `REDIS_DB` 指定的库），无需你插手。
+
+### API
+
+对应接口为 `POST /kv/migrate`（鉴权同管理面，请求体为 JSON）：
+
+```bash
+curl -X POST "https://你的网关域名/__panel/api/kv/migrate" \
+  -H "cookie: ecw_token=$TOK" -H "content-type: application/json" \
+  -d '{"direction":"native→redis","concurrency":4}'
+```
+
+| 字段 | 含义 |
+|---|---|
+| `direction` | 必填：`native→redis` 或 `redis→native` |
+| `concurrency` | 可选：写入并发度（1–16，默认 4） |
+
+返回示例：
+
+```json
+{
+  "ok": true,
+  "direction": "native→redis",
+  "copied": 42, "total": 42, "bytes": 13824,
+  "errors": [],
+  "notice": "迁移完成（源数据已保留，未删除）。本次为「复制」而非「切换」：若要真正让新数据生效，请将环境变量 KV_BACKEND / KV_SOURCE 指向目标后端，并重新部署 / 触发生效。"
+}
+```
+
+`errors` 非空时逐条列出失败键与原因，其余键仍照常复制完成（失败可审计、不中断）。
+
+> [!TIP]
+> 迁移前后端会先对两侧各做一次写入预检；任一侧不可写（如 Webdis 未放行 `PUT`、平台 KV 未绑定）
+> 会提前返回明确错误，不会复制到一半才发现目标不可达。
+
+### 迁移后如何真正生效
+
+迁移只是把数据复制到目标端，**并未改变「当前读取哪个后端」**。要让新数据生效：
+
+1. 修改平台环境变量 `KV_BACKEND`（必要时 `KV_SOURCE`）指向目标后端：
+   - 复制到 Webdis 后 → `KV_BACKEND=redis`；
+   - 复制回平台 KV 后 → `KV_BACKEND=native`。
+2. **重新部署 / 触发一次生效**（环境变量在部署时注入，`getKV()` 才会改用新后端）。
+3. 切换后新写入落在目标端；**源端仍保留旧数据**，两边并存期间请注意源端不再更新。
+   需要彻底切换时，确认目标端读取无误后，可手动清理源端（本项目不自动删除源）。
+
+---
+
 ## 运维要点
 
 | 场景 | 建议 |

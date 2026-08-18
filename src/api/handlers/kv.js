@@ -21,7 +21,7 @@
 
 import { ok, fail } from '../../utils/response.js';
 import { ERROR_CODES } from '../../contracts.js';
-import { getKV, getNativeKV } from '../../platform/kv.js';
+import { getKV, getNativeKV, getRedisKV } from '../../platform/kv.js';
 import { probeRedis, hasRedisConfig } from '../../platform/redis-kv.js';
 import { readKvBackendPreference, decideKvBackend } from '../../platform/caps.js';
 
@@ -168,4 +168,140 @@ export async function listKeys(ctx) {
   const limit = Math.min(Math.max(Number(new URL(ctx.request.url).searchParams.get('limit')) || 200, 1), 1000);
   const res = await kv.list({ prefix, limit });
   return ok({ keys: (res.keys || []).map((k) => (typeof k === 'string' ? k : k.name)), complete: res.list_complete });
+}
+
+/**
+ * 列举某个 KV 适配器中的全部逻辑键（自动翻页）。
+ *
+ * 厂商 KV 的 list 走分页（limit/cursor），自部署 Redis 的 list 一次返回全部
+ * （KEYS 无分页）。这里统一抽象成「全量列举」，供迁移逻辑遍历。
+ *
+ * @param {{list:(o:any)=>Promise<any>}} kv KVLike 适配器
+ * @param {number} [pageLimit=500] 单页上限（仅厂商 KV 分页生效）
+ * @returns {Promise<string[]>}
+ */
+async function listAllKeys(kv, pageLimit = 500) {
+  const names = [];
+  let cursor = undefined;
+  for (let guard = 0; guard < 1000; guard++) {
+    const page = await kv.list(cursor ? { cursor, limit: pageLimit } : { limit: pageLimit });
+    const keys = (page && page.keys) || [];
+    for (const k of keys) names.push(typeof k === 'string' ? k : k.name);
+    const complete = page && (page.list_complete === true || page.listComplete === true);
+    const next = page && (page.cursor || page.next_cursor);
+    if (complete || !next) break;
+    cursor = next;
+  }
+  return names;
+}
+
+/**
+ * POST /kv/migrate —— 在「平台 KV」与「自部署 Webdis/Redis」之间互迁数据。
+ *
+ * 设计要点：
+ *  - 双向：direction 取 'native→redis'（厂商→自部署）或 'redis→native'（自部署→厂商）。
+ *  - 保留源：仅复制，绝不删除源数据，可随时切回。
+ *  - 隔离自动处理：源/目标各自用其适配器，目标写入时自动套用自己的隔离
+ *    （自部署侧由 createRedisKV 加 REDIS_PREFIX 并选 REDIS_DB；厂商侧无隔离）。
+ *    因此迁移层只做「逐键 get → 逐键 put」透传，不手动编码键名。
+ *  - 健壮性：两侧先做轻量连通性预检，任一不可写则提前失败；源 list 全量翻页；
+ *    单键写失败计入 errors 并继续，保证「复制尽可能完整、失败可审计」。
+ *
+ * 入参（JSON body）：{ direction: 'native→redis' | 'redis→native', concurrency?: number }
+ * 返回：{ ok, direction, copied, bytes, errors:[{key,error}], notice }
+ *
+ * @param {import('../../contracts.js').Ctx} ctx
+ */
+export async function migrate(ctx) {
+  const env = ctx.env || {};
+
+  let body;
+  try {
+    const raw = await ctx.request.text();
+    body = raw ? JSON.parse(raw) : {};
+  } catch {
+    return fail(ERROR_CODES.BAD_REQUEST || 'BAD_REQUEST', '请求体需为 JSON', 400);
+  }
+  const direction = body && body.direction;
+  if (direction !== 'native→redis' && direction !== 'redis→native') {
+    return fail(ERROR_CODES.BAD_REQUEST || 'BAD_REQUEST', "direction 必须为 'native→redis' 或 'redis→native'", 400);
+  }
+
+  const native = getNativeKV(env);
+  const redis = getRedisKV(env);
+  if (!native) return fail(ERROR_CODES.STORAGE_UNAVAILABLE || 'STORAGE_UNAVAILABLE', '未检测到平台 KV 绑定，无法迁移', 503);
+  if (!redis) return fail(ERROR_CODES.STORAGE_UNAVAILABLE || 'STORAGE_UNAVAILABLE', '未检测到自部署 Redis(Webdis) 配置，无法迁移', 503);
+
+  // 连通性预检：确保两侧可写，避免复制中途才发现目标不可达。
+  const [nProbe, rProbe] = await Promise.all([probeNativeKV(env), probeRedis(env)]);
+  if (!nProbe.ok) {
+    return fail(ERROR_CODES.STORAGE_UNAVAILABLE || 'STORAGE_UNAVAILABLE', `平台 KV 不可写: ${nProbe.error || '探测失败'}`, 503);
+  }
+  if (!rProbe.ok) {
+    return fail(ERROR_CODES.STORAGE_UNAVAILABLE || 'STORAGE_UNAVAILABLE', `自部署 Redis 不可写: ${rProbe.error || '探测失败'}`, 503);
+  }
+
+  const src = direction === 'native→redis' ? native : redis;
+  const dst = direction === 'native→redis' ? redis : native;
+
+  let keys;
+  try {
+    keys = await listAllKeys(src);
+  } catch (err) {
+    return fail(ERROR_CODES.INTERNAL || 'INTERNAL', `列举源数据失败: ${err && err.message ? err.message : err}`, 500);
+  }
+  if (keys.length === 0) {
+    return ok({
+      ok: true,
+      direction,
+      copied: 0,
+      bytes: 0,
+      errors: [],
+      notice: '源 KV 没有数据，无需迁移。若要让新数据生效，请将环境变量 KV_BACKEND/KV_SOURCE 指向目标后端，并重新部署/触发生效。',
+    });
+  }
+
+  const concurrency = Math.min(Math.max(Number(body && body.concurrency) || 4, 1), 16);
+  const errors = [];
+  let copied = 0;
+  let bytes = 0;
+
+  // 小批量并发写入，遇错记录并继续。
+  for (let i = 0; i < keys.length; i += concurrency) {
+    const batch = keys.slice(i, i + concurrency);
+    const results = await Promise.all(
+      batch.map(async (key) => {
+        try {
+          const val = await src.get(key, 'text');
+          if (val == null) return { key, skipped: true };
+          await dst.put(key, val);
+          return { key, size: new TextEncoder().encode(val).length };
+        } catch (err) {
+          return { key, error: err && err.message ? err.message : String(err) };
+        }
+      })
+    );
+    for (const r of results) {
+      if (r.error) errors.push({ key: r.key, error: r.error });
+      else if (!r.skipped) {
+        copied++;
+        bytes += r.size || 0;
+      }
+    }
+  }
+
+  const notice =
+    '迁移完成（源数据已保留，未删除）。本次为「复制」而非「切换」：' +
+    '若要真正让新数据生效，请将环境变量 KV_BACKEND / KV_SOURCE 指向目标后端，并重新部署 / 触发生效。' +
+    '切换后新写入会落在目标端；两边并存期间请注意源端不再更新。';
+
+  return ok({
+    ok: true,
+    direction,
+    copied,
+    total: keys.length,
+    bytes,
+    errors,
+    notice,
+  });
 }

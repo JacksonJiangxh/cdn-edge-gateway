@@ -188,6 +188,56 @@ export   async function renderSystem() {
         '两者同时配置时默认优先使用 Webdis，可将 KV_BACKEND 设为 native 切回平台 KV。' +
         '⚠️ 切换后端不会自动迁移数据，切换前请先在系统设置中导出配置。' +
         '⚠️ Webdis 默认无鉴权，务必仅监听内网 / 套 TLS / 前置带 REDIS_TOKEN 的反向代理，切勿裸露公网。'),
+
+      // ---------- KV 数据迁移（双向，保留源） ----------
+      (() => {
+        const dirSel = select('kv-migrate-dir', [], 'native→redis', [
+          { value: 'native→redis', label: '平台 KV → 自部署 Webdis' },
+          { value: 'redis→native', label: '自部署 Webdis → 平台 KV' },
+        ]);
+        const out = el('div', { id: 'kv-migrate-out', class: 'muted small', style: 'margin-top:8px' },
+          '将一侧 KV 的全部数据复制到另一侧（源数据保留）。平台 KV 无前缀/db 隔离，自部署端会自动套用 REDIS_PREFIX / REDIS_DB 隔离。');
+        const btn = el('button', {
+          class: 'btn', text: '迁移数据',
+          onclick: async (ev) => {
+            const b = ev.currentTarget || ev.target;
+            b.disabled = true; b.textContent = '迁移中…';
+            out.className = 'muted small'; out.textContent = '正在复制数据（保留源，不删除）…';
+            try {
+              const r = await API.kv.migrate({ direction: dirSel.value });
+              if (!r || r.error) {
+                out.className = 'badge badge-danger';
+                out.textContent = '迁移失败: ' + ((r && r.error) || '未知错误');
+                return;
+              }
+              const copied = r.copied || 0;
+              const total = r.total || copied;
+              const kb = (r.bytes || 0) / 1024;
+              const errCount = (r.errors && r.errors.length) || 0;
+              const summary =
+                `✅ 已复制 ${copied}/${total} 个键（约 ${kb.toFixed(1)} KB）` +
+                (errCount ? `，失败 ${errCount} 个` : '，无失败');
+              out.className = 'badge badge-on'; out.textContent = summary;
+              // 环境变量切换提醒（高亮横幅）
+              toast(r.notice || '迁移完成，请修改环境变量并重新部署生效', 'success');
+              if (errCount) {
+                console.warn('[kv-migrate] 部分键失败:', r.errors);
+              }
+            } catch (e) {
+              out.className = 'badge badge-danger';
+              out.textContent = '请求失败: ' + (e && e.message ? e.message : e);
+            } finally {
+              b.disabled = false; b.textContent = '迁移数据';
+            }
+          },
+        });
+        return el('div', { class: 'section-head', style: 'display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px;border-top:1px solid var(--border, #e5e7eb);padding-top:12px' }, [
+          el('span', { class: 'muted small', style: 'min-width:64px' }, '数据迁移'),
+          dirSel,
+          btn,
+          out,
+        ]);
+      })(),
     ]);
     wrap.appendChild(kvCard);
 

@@ -259,6 +259,12 @@ const API = {
         body: value,
       }),
     del: (key) => request('/kv/' + encodeURIComponent(key), { method: 'DELETE' }),
+    migrate: (payload) =>
+      request('/kv/migrate', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      }),
   },
 
   rules: {
