@@ -417,6 +417,7 @@ curl -u 'esa:你的强密码' https://webdis.example.com/GET/esa:test
 - **Redis 起来了但 7379 连不上（curl 连接被重置 / Failed to connect）**：日志里能看到 `Ready to accept connections`、却始终没有 webdis 监听端口，根因几乎都是 `redis.conf` 里 `daemonize no`——`redis-server` 占住前台，`&&` 后的 `webdis` 永远执行不到。确认 `redis.conf` 的 `daemonize` 为 `yes`，然后 `docker compose down && docker compose up -d` 重建。
 - **反向代理路由不生效**：确认容器已接入你配置的网络（即 compose 里 `web` 对应的实际网络），且反代已正确设置 `Host(webdis.example.com)` 并指向容器 `:7379`；在反代面板看是否出现 `webdis` router。
 - **ESA 报 401/403**：`REDIS_TOKEN` 的 base64 与 `webdis.prod.json` 密码不一致；注意 base64 不要带换行。
+- **「测试连通性」报「读写回环不一致」/ Webdis 写入返回 `ERR unknown command '<值>'`**：这是**写方法用错**导致，不是反代丢 body，也不是解析问题。多数 Webdis 部署**只把 `PUT`（及 `GET`）当命令通道**，`POST` 的 body 会被畸形解析成命令名。本项目的 `put()` 已统一改用 `PUT + body`；如果你自行对接，务必用 `PUT`（或 `GET /SET/<key>/<value>` 走 path）而非 `POST`。用 `curl` 自测：`curl -X PUT -u 'esa:密码' --data 'hello' https://webdis.example.com/SET/esa:test` 应返回 `{"SET":[true,"OK"]}`。
 - **彻底移除**：`docker compose down -v`（连卷删除，数据清空）；仅停服务用 `docker compose down`（保留卷）。
 
 ---

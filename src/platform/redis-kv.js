@@ -15,9 +15,11 @@
  *   1) URL 即命令：GET /<CMD>/<arg1>/<arg2>...，path 段经 decode_uri 解码
  *      （注意：path 段里的 '+' 会被解码成空格，故 key 必须经 encodeURIComponent；
  *      本项目 key 走 encodeURIComponent，value 不走 path，规避此坑）。
- *   2) 请求体即最后一个参数：src/cmd.c:283 把 body 作为命令 argv 的最后一个
- *      参数，且不经过 decode_uri——即 body 原样透传。因此【写值一律走 POST +
- *      body】，杜绝 URL 编码黑洞与长度限制，也避免 '+'/'%' 被误解码。
+ *   2) 请求体即最后一个参数：Webdis 在 METHOD_PUT 分支把 body 作为命令 argv 的
+ *      最后一个参数，且不经过 decode_uri——即 body 原样透传。
+ *      ⚠️ 实测关键：多数 Webdis 部署**只把 PUT（及 GET）当命令通道**，POST 的 body
+ *      会被畸形解析成命令名（返回 ERR unknown command '<body>'）。因此【写值一律走
+ *      PUT + body】，杜绝 URL 编码黑洞与长度限制，也避免 '+'/'%' 被误解码。
  *   3) 响应结构（src/formats/json.c:380-446），按 Redis 返回类型分：
  *        - STRING（GET 命中）：{"GET":"value"}          值是【标量字符串】
  *        - NIL   （GET 缺失） ：{"GET":null}             【null，HTTP 200】
@@ -129,7 +131,12 @@ function readUrl(base, cmd, args, dbSeg = '') {
 
 /**
  * 统一的 fetch 封装：处理鉴权头、超时、文本/JSON 兼容。
- * Webdis 默认返回 JSON，但 raw/txt 格式或错误可能返回纯文本，这里尽量解析。
+ * Webdis 默认返回 JSON；这里解析后保留 status / contentType 便于诊断。
+ *
+ * Webdis 错误响应形如 `{"SET":[false,"ERR unknown command ..."]}`（命令字段是
+ * `[false, 消息]` 数组而非标量/成功数组）。为让调用方区分「写失败」与「读回环不一致」，
+ * 这里把这类错误数组标记为 `{ __cmd__, __status__:'ERR', __err__ }`，供 unwrap 识别。
+ *
  * @param {string} url 完整 URL
  * @param {Object} opts fetch 选项
  * @param {string} token 可选 Authorization 头值
@@ -147,13 +154,24 @@ async function webdisFetch(url, opts, token, timeoutMs) {
   try {
     const res = await fetch(url, { ...opts, headers, signal: ctrl ? ctrl.signal : undefined });
     const text = await res.text();
+    const contentType = res.headers && res.headers.get ? res.headers.get('content-type') : '';
     if (!text) return null;
+    let json;
     try {
-      return JSON.parse(text);
+      json = JSON.parse(text);
     } catch {
-      // 非 JSON（极少见，如前置代理返回的纯文本错误）
-      return { __raw__: text, __status__: res.status };
+      // 非 JSON（如前置代理返回的纯文本/HTML 错误页）
+      return { __raw__: text, __status__: res.status, __contentType__: contentType || '' };
     }
+    // 识别 Webdis 错误数组：任一命令字段为 [false, "..."]
+    if (json && typeof json === 'object' && !Array.isArray(json)) {
+      for (const [cmd, val] of Object.entries(json)) {
+        if (Array.isArray(val) && val[0] === false && typeof val[1] === 'string') {
+          return { __cmd__: cmd, __status__: 'ERR', __err__: val[1], __contentType__: contentType || '' };
+        }
+      }
+    }
+    return json;
   } catch (err) {
     if (err && err.name === 'AbortError') {
       throw new Error(`Webdis 请求超时（>${timeoutMs}ms）`);
@@ -162,6 +180,18 @@ async function webdisFetch(url, opts, token, timeoutMs) {
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * 判断 webdisFetch 结果是否为 Webdis 命令错误数组（写失败等）。
+ * @param {any} json
+ * @returns {string|null} 错误信息；非错误返回 null
+ */
+function webdisError(json) {
+  if (json && typeof json === 'object' && json.__cmd__ !== undefined && json.__err__ !== undefined) {
+    return `${json.__cmd__}: ${json.__err__}`;
+  }
+  return null;
 }
 
 /**
@@ -269,23 +299,29 @@ export function createRedisKV(env) {
           ? Math.max(1, Math.floor(opts.expirationTtl))
           : 0;
 
-      // 写命令走 POST + body（Webdis 把 body 作为命令最后一个 argv，原样透传）。
-      // SETEX 的 ttl 放 path，value 放 body。
+      // 写命令走 PUT + body。
+      // 关键：Webdis 仅在 PUT（及 GET）方法下把 body 当作命令最后一个 argv；
+      // 若用 POST，body 会被畸形解析为命令名（实测返回 ERR unknown command '<body>'）。
+      // 详见 webdis src/cmd.c 的 METHOD_PUT 分支。SETEX 的 ttl 放 path，value 放 body。
       const cmd = ttl > 0 ? 'SETEX' : 'SET';
       const pathArgs = ttl > 0 ? [phys, String(ttl)] : [phys];
       const url = `${base}${dbSegment}/${cmd}/${pathArgs.map((a) => encodeURIComponent(a)).join('/')}`;
 
       try {
-        await webdisFetch(
+        const res = await webdisFetch(
           url,
           {
-            method: 'POST',
+            method: 'PUT',
             body,
             headers: { 'content-type': 'application/octet-stream' },
           },
           token,
           timeoutMs
         );
+        const werr = webdisError(res);
+        if (werr) {
+          throw new Error(`Webdis 写入被拒绝: ${werr}`);
+        }
       } catch (err) {
         throw new Error(`Redis put failed for "${key}": ${err && err.message ? err.message : err}`);
       }
@@ -364,11 +400,16 @@ export async function probeRedis(env) {
     await adapter.delete(probeKey);
     const latencyMs = Date.now() - t0;
     if (got !== probeVal) {
+      // 写未抛错，但读回不一致：可能是 REDIS_DB / REDIS_PREFIX 不匹配导致读写落点不同，
+      // 或前置代理对 GET 响应体做了改写。给出具体差异便于定位。
+      const detail = got === null
+        ? '读回为 null（写入可能落到了不同的 db/前缀，或 TTL 立即过期）'
+        : `读回值不同（got=${JSON.stringify(got)} 期望=${JSON.stringify(probeVal)}）`;
       return {
         ok: false,
         latencyMs,
         backend: 'redis-webdis',
-        error: '读写回环不一致（写入后读回的值不匹配，请检查 Webdis 前置代理是否改写了响应结构）',
+        error: `读写回环不一致：${detail}。请检查 REDIS_DB / REDIS_PREFIX 与 Webdis 前端代理是否改写响应结构`,
       };
     }
     return { ok: true, latencyMs, backend: 'redis-webdis' };
