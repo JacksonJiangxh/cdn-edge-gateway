@@ -16,10 +16,10 @@ import {
   getGlobalRules,
   putGlobalRules,
   invalidateMemCache,
+  isBakedMode,
 } from '../../config/store.js';
 import { validateSite, validatePool } from '../../config/schema.js';
 import { getCacheStats } from '../../platform/cache.js';
-import { isBakedMode } from '../../config/store.js';
 
 /** GET /system/info */
 export async function info(ctx, global) {
@@ -29,7 +29,14 @@ export async function info(ctx, global) {
     version: CONFIG_VERSION,
     platform: ctx.caps.platform,
     caps: ctx.caps,
+    // 当前生效后端：baked（静态烘焙只读）/ native（平台 KV）/ redis（自部署 Webdis）/ none
     kvBackend: baked ? 'baked' : ctx.caps.kvBackend || 'none',
+    // 双后端各自的存在性 —— 供管理面分别展示可用性标记（两者可同时为 true）
+    kvNative: !!ctx.caps.kvNative,
+    kvRedis: !!ctx.caps.kvRedis,
+    // KV_BACKEND 偏好（auto=默认自部署 Webdis 优先）与是否覆盖了默认决策
+    kvBackendPreference: ctx.caps.kvBackendPreference || 'auto',
+    kvBackendOverridden: !!ctx.caps.kvBackendOverridden,
     redisConfigured: !!(ctx.env && (ctx.env.REDIS_URL || ctx.env.REDIS_URL_KV)),
     bakedMode: baked,
     // 配置来源形态：baked=静态烘焙（只读，来自主节点导出）、kv=运行时 KV/Redis、defaults=无配置回退。
@@ -307,19 +314,38 @@ function buildLimitations(ctx) {
         '当前平台未绑定 D1：统计落盘只支持 D1，无 D1 时统计功能不可用（不会回退 KV 写入）。如需统计请绑定 D1，或将 statsDriver 设为 none。',
     });
   }
-  if (!caps.hasKV) {
+  // 持久化可用性告警：区分「静态烘焙只读」「双后端并存」「仅其一」「都无」四种形态，
+  // 避免在已有可用后端（尤其是自部署 Webdis）时误报「未检测到 KV」。
+  const bakedRO = isBakedMode(ctx);
+  if (bakedRO) {
+    list.push({
+      key: 'kvBaked',
+      message:
+        '当前运行在「静态烘焙配置」只读模式（STATIC_CONFIG=1）：配置来自构建时内置的镜像，' +
+        '管理面无法保存修改。如需在本节点可写，请配置 REDIS_URL（自部署 Webdis）或显式设置 STATIC_CONFIG=0。',
+    });
+  } else if (!caps.hasKV) {
     list.push({
       key: 'kv',
       message:
-        '未检测到 KV 绑定，配置将无法持久化，当前运行在默认配置下。请先创建并绑定 KV Namespace',
+        '未检测到任何 KV 后端（平台 KV 绑定 或 自部署 Webdis 的 REDIS_URL），配置将无法持久化，' +
+        '当前运行在默认配置下。请创建并绑定 KV Namespace，或配置 REDIS_URL 指向自建 Webdis。',
     });
-  }
-  // 后端为自部署 Redis（Webdis）时，给出明确的部署形态说明，避免用户误以为缺失。
-  if (caps.kvBackend === 'redis') {
+  } else if (caps.kvNative && caps.kvRedis) {
+    // 双后端并存：明确告知谁在生效、如何切换，避免用户误判「平台 KV 失效」
+    list.push({
+      key: 'kvDual',
+      message:
+        `平台 KV 与自部署 Webdis 同时可用，当前生效后端为「${caps.kvBackend === 'redis' ? '自部署 Webdis' : '平台 KV'}」` +
+        `${caps.kvBackendOverridden ? '（由环境变量 KV_BACKEND 显式指定）' : '（默认优先自部署 Webdis）'}。` +
+        '如需切换，请将环境变量 KV_BACKEND 设为 native（平台 KV）或 redis（自部署 Webdis）后重新部署。' +
+        '注意：两端数据不会自动迁移，切换后原后端中的配置不可见。',
+    });
+  } else if (caps.kvBackend === 'redis') {
     list.push({
       key: 'kvRedis',
       message:
-        '当前使用自部署 Redis（Webdis）作为 KV 后端：未依赖平台 KV 绑定，配置持久化在您自己的 Redis 实例中。请在「系统信息 → Redis 存储」中测试连通性。',
+        '当前使用自部署 Redis（Webdis）作为 KV 后端：未依赖平台 KV 绑定，配置持久化在您自己的 Redis 实例中。请在「系统信息 → KV 存储后端」中测试连通性。',
     });
   }
   // JWT 密钥降级告警：未配置独立 JWT_SECRET 时，鉴权签名密钥将从 passwordHash 派生，

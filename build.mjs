@@ -847,8 +847,10 @@ async function main() {
   console.log('  Cloudflare Pages   → npx wrangler pages deploy .');
   console.log('  EdgeOne Makers     → npx edgeone makers deploy . -n <project> -t <token>');
   console.log('  阿里云 ESA Pages    → npm install esa-cli -g && esa-cli login && npm run build && esa-cli commit && esa-cli deploy');
-  console.log('                        （ESA 默认走「静态烘焙配置」：构建时加 --bake <导出配置.json> 即可，完全不依赖 KV；');
-  console.log('                         若改用外置 Redis，需在 ESA 控制台把 STATIC_CONFIG 设为 0 并设 REDIS_URL 指向自建 Webdis/Redis）');
+  console.log('                        （ESA 未配 REDIS_URL 时自动走「静态烘焙配置」只读兜底：构建时加 --bake <导出配置.json>，完全不依赖 KV；');
+  console.log('                         在 ESA 控制台设 REDIS_URL 指向自建 Webdis/Redis 即【自动退出烘焙】进入可写模式，无需再设 STATIC_CONFIG=0）');
+  console.log('  外置 Webdis（全平台通用）→ 任意平台设 REDIS_URL 即启用；与平台 KV 并存时默认优先 Webdis，');
+  console.log('                             设 KV_BACKEND=native 可切回平台 KV（详见 docs-site/docs/dev/13-redis-kv.md）');
 }
 
 async function runWatch() {

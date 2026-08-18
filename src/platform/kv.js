@@ -27,6 +27,14 @@
  * （用户自建 Webdis/Redis，见 redis-kv.js）。createEdgeKVAdapter 仅作为非 ESA 平台
  * 误探测到 EdgeKV 时的兜底兼容。
  *
+ * 【双后端选型】三平台（CF / EO / ESA）均支持外置自部署 Webdis，且可与平台级 KV
+ * **同时存在**。选型由环境变量 KV_BACKEND 决定（见 getKV / caps.decideKvBackend）：
+ *   - 未设 / auto → 默认 **自部署 Webdis 优先**
+ *   - native      → 强制平台 KV
+ *   - redis       → 强制自部署 Webdis
+ * 偏好侧不可用时自动降级到另一侧。开关只走环境变量：配置本身存在 KV 里，
+ * 若写进 cfg:global 会形成「读配置前需先知道用哪个后端」的循环依赖。
+ *
  * 因此本层的策略是：
  * 1. get 一律先按「原始文本」取回，再由本层自己做 JSON.parse，
  *    避免依赖底层对 type 参数的支持程度。
@@ -51,7 +59,7 @@
 
 import { encodeKey, decodeKey, encodePrefix } from './keyCodec.js';
 import { hasRedisConfig, createRedisKV } from './redis-kv.js';
-import { PLATFORM_ALIASES } from './caps.js';
+import { PLATFORM_ALIASES, readKvBackendPreference } from './caps.js';
 
 /**
  * @typedef {Object} KVListKey
@@ -592,18 +600,57 @@ function isEsaPlatform(env) {
 }
 
 /**
- * 获取统一的 KV 适配器。
+ * 获取「平台级原生 KV」适配器（不含自部署 Webdis）。
  *
- * 优先级链（按平台能力自动选择，上层无感）：
- *   1. env.CDN_KV / env.KV      —— Cloudflare / EdgeOne 原生 KV 绑定
- *   2. globalThis.EdgeKV        —— 阿里云 ESA 原生边缘存储（**仅 CF/EO 之外的平台**；
- *                                  ESA 因 EdgeKV 收费无免费额度，本项目统一禁用，见下方 ESA 分支）
- *   3. REDIS_URL                 —— 无原生 KV 时降级（自建 Webdis/Redis，见 redis-kv.js）
- *   4. null                      —— 完全无持久化，上层降级到 defaults
+ * 覆盖三种平台注入方式：
+ *   1. env.CDN_KV / env.KV   —— Cloudflare（以及部分 EO 版本）经 env 注入
+ *   2. globalThis.CDN_KV     —— EdgeOne Makers：KV 是【运行时全局变量】而非 env 绑定
+ *                               （官方范式 `await my_kv.get()`），故必须查 globalThis
+ *   3. globalThis.EdgeKV     —— 阿里云 ESA 原生边缘存储（**仅非 ESA 平台的兜底兼容**）
  *
- * ⚠️ ESA 特殊处理：阿里云 ESA 的 EdgeKV **按量收费、无免费额度**，因此本项目
- * 在 ESA 上**不使用任何厂商 KV**（既不读 EdgeKV 也不依赖其免费额度），持久化
- * 一律走外置 REDIS_URL（用户自建 Webdis/Redis）。故 ESA 分支直接跳过步骤 2。
+ * ⚠️ ESA 特殊处理：ESA 的 EdgeKV **按量收费、无免费额度**，本项目在 ESA 上
+ * **统一禁用厂商 KV**，持久化一律走外置 REDIS_URL。故 ESA 跳过第 3 步，
+ * createEdgeKVAdapter 仅作为非 ESA 平台误探测到 EdgeKV 时的兜底。
+ *
+ * @param {Object} env 平台环境变量与绑定
+ * @returns {KVLike|null} 平台 KV 适配器；无原生绑定时返回 null
+ */
+export function getNativeKV(env) {
+  const raw = pickRawBinding(env);
+  if (raw) return wrap(raw);
+
+  const globalRaw = pickGlobalBinding();
+  if (globalRaw) return wrap(globalRaw);
+
+  // 阿里云 ESA：EdgeKV 收费无免费额度，统一禁用，避免误用收费资源。
+  return isEsaPlatform(env) ? null : createEdgeKVAdapter(env);
+}
+
+/**
+ * 获取「自部署 Webdis/Redis」适配器（不含平台 KV）。
+ *
+ * 与 KVLike 完全同构，store.js 无需任何改动即可获得持久化能力。
+ * 三平台（CF / EO / ESA）一致可用——只要 REDIS_URL 指向自建 Webdis/Redis。
+ *
+ * @param {Object} env 平台环境变量
+ * @returns {KVLike|null} Redis 适配器；未配置 REDIS_URL 时返回 null
+ */
+export function getRedisKV(env) {
+  return hasRedisConfig(env) ? createRedisKV(env) : null;
+}
+
+/**
+ * 获取统一的 KV 适配器（双后端选型入口）。
+ *
+ * 【选型策略】平台级 KV 与自部署 Webdis 可同时存在，由 env.KV_BACKEND 决策：
+ *   - 未设 / `auto` → **默认自部署 Webdis 优先**（两者并存时用 Webdis）
+ *   - `native`      → 强制平台 KV（CDN_KV / KV）
+ *   - `redis`       → 强制自部署 Webdis（REDIS_URL）
+ * 偏好侧不可用时**自动降级到另一侧**，而非直接失去持久化——避免误配开关
+ * 导致配置无法读写。两侧都不可用时返回 null，由上层降级到 defaults。
+ *
+ * 为什么开关用环境变量而非配置项：配置本身存放在 KV 里，把「用哪个后端」写进
+ * cfg:global 会形成「读配置前必须先知道用哪个后端」的循环依赖（见 caps.js）。
  *
  * @param {Object} env 平台环境变量与绑定
  * @returns {KVLike|null} KV 适配器，无持久化时返回 null
@@ -614,27 +661,20 @@ function isEsaPlatform(env) {
  * const cfg = await kv.get('cfg:global', 'json');
  */
 export function getKV(env) {
-  const raw = pickRawBinding(env);
-  if (raw) return wrap(raw);
+  const preference = readKvBackendPreference(env);
+  // 与 caps.decideKvBackend 同一套排序口径：native 偏好时平台 KV 在前，否则 Webdis 在前
+  const nativeFirst = preference === 'native';
 
-  // EdgeOne Makers：KV 是【全局变量】而非 env 绑定（官方范式 `await my_kv.get()`）。
-  // EO 控制台把 namespace 绑成变量名 CDN_KV（本项目约定）后，该名字作为全局注入
-  // Edge Function 运行时，故从 globalThis 探测并包装，与 CF 的 env 绑定统一成 KVLike。
-  const globalRaw = pickGlobalBinding();
-  if (globalRaw) return wrap(globalRaw);
-
-  // 阿里云 ESA：EdgeKV 收费无免费额度，统一禁用，直接走 REDIS_URL（步骤 3）。
-  // 不在此创建 EdgeKV 适配器，避免误用收费资源。
-  const esa = isEsaPlatform(env) ? null : createEdgeKVAdapter(env);
-  if (esa) return esa;
-
-  // 平台未提供原生 KV 绑定时，降级到自部署的 Webdis/Redis 后端
-  // （EO Pages / ESA 等不具备免费 KV 的平台，通过 REDIS_URL 指向自建 Redis）。
-  // 该后端与 KVLike 完全同构，store.js 无需任何改动即可获得持久化能力。
-  if (hasRedisConfig(env)) {
-    return createRedisKV(env);
+  if (nativeFirst) {
+    const native = getNativeKV(env);
+    if (native) return native;
+    return getRedisKV(env);
   }
-  return null;
+
+  // 默认（auto / redis）：自部署 Webdis 优先
+  const redis = getRedisKV(env);
+  if (redis) return redis;
+  return getNativeKV(env);
 }
 
 /**

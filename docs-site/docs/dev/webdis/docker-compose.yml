@@ -13,8 +13,10 @@ services:
       - ./redis.conf:/etc/redis.conf:ro
       # 覆盖官方默认 /etc/webdis.prod.json
       - ./webdis.prod.json:/etc/webdis.prod.json:ro
-      # 持久化数据卷（AOF + RDB 落在这里）
-      - webdis-data:/data
+      # 持久化数据目录（AOF + RDB + pidfile 落在这里）
+      # 注意：宿主机目录必须可被容器内进程写入，否则 Redis 写 pidfile /
+      # appendonlydir 会 Permission denied 导致容器崩溃重启循环。
+      - ./webdis-data:/data
     networks:
       - web
     labels:

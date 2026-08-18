@@ -8,7 +8,10 @@
 
 ## 配置从哪来
 
-所有配置存在**边缘 KV 或静态烘焙**里（ESA 用 REDIS_URL/烘焙），由代码 `src/config/schema.js` 校验。
+所有配置存在**边缘 KV 或静态烘焙**里，由代码 `src/config/schema.js` 校验。
+KV 后端可以是**平台级 KV**（`CDN_KV`）或**你自部署的 Webdis**（`REDIS_URL`，全平台可用）；
+两者同时配置时**默认优先 Webdis**，可用环境变量 `KV_BACKEND=native` 切回平台 KV，
+详见 [Redis / Webdis 外置 KV](/dev/13-redis-kv.md)。
 你在网页管理面点出来的配置，底层就是这个 JSON。**理解字段 = 理解管理面每个表单项的含义。**
 
 配置分四层：

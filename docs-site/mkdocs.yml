@@ -70,7 +70,7 @@ nav:
       - API 参考: dev/10-api-reference.md
       - 系统架构: dev/11-architecture.md
       - 请求流程: dev/12-request-flow.md
-      - Redis KV 兜底: dev/13-redis-kv.md
+      - Redis / Webdis 外置 KV: dev/13-redis-kv.md
       - 部署 ESA: dev/14-deploy-esa.md
       - ESA MCP: dev/15-mcp-esa.md
   - 附录:

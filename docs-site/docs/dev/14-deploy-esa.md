@@ -60,15 +60,26 @@
 
 ---
 
-## §3 KV 两选一：REDIS_URL 或 静态烘焙
+## §3 KV：REDIS_URL（可写）或 静态烘焙（只读）
 
-ESA 无原生 KV，二选一：
+ESA 无原生 KV。**按是否配置 `REDIS_URL` 自动选择**，无需手动切开关：
 
-### 方式 A：REDIS_URL（Webdis 兜底，配置常变时用）
+| 控制台设置 | 结果 |
+|---|---|
+| 配了 `REDIS_URL`，未设 `STATIC_CONFIG` | **可写模式**，走 Webdis（与 CF / EO 一致） |
+| 未配 `REDIS_URL`，未设 `STATIC_CONFIG` | **静态烘焙只读**（兜底） |
+| 显式 `STATIC_CONFIG=1` | 强制只读烘焙（即使配了 `REDIS_URL`） |
+| 显式 `STATIC_CONFIG=0` | 强制可写（无 `REDIS_URL` 时配置无法保存） |
 
-ESA 控制台设 `REDIS_URL=http://你的-webdis地址`，代码 `getKV()` 在 esa 平台自动走 Webdis。
-验证：`/__panel/api/kv/ping` 返回 `backend:"redis-webdis"`。
-详见 [Redis KV 兜底](/dev/13-redis-kv.md)。
+### 方式 A：REDIS_URL（可写，配置常变时用）
+
+ESA 控制台设 `REDIS_URL=https://你的-webdis地址`（不带尾斜杠），`esa/index.js` 检测到它就
+**自动退出烘焙**、进入可写模式，管理面可正常保存配置。
+
+验证：管理面「系统信息 → KV 存储后端 → 测试连通性（平台 KV + Webdis）」，
+Webdis 一侧应为 ✅ 且标记「当前生效」；或直接调 `/__panel/api/kv/ping`，顶层 `backend` 为 `"redis"`。
+
+详见 [Redis / Webdis 外置 KV](/dev/13-redis-kv.md)。
 
 ### 方式 B：静态烘焙（配置基本不动时用，最稳）
 
@@ -76,7 +87,8 @@ ESA 控制台设 `REDIS_URL=http://你的-webdis地址`，代码 `getKV()` 在 e
 npm run build -- --bake config.json    # 把配置烤进 src/config/baked.generated.js
 ```
 
-ESA 默认 `STATIC_CONFIG=1` 走烘焙分支，运行时**完全不依赖 KV/Redis**。
+未配 `REDIS_URL` 时 ESA 自动按 `STATIC_CONFIG=1` 走烘焙分支，运行时**完全不依赖 KV/Redis**，
+但管理面**只读**（配置变更 = 重新导出 + 重新构建部署）。
 适合配置稳定、追求零运行时依赖的生产场景。
 
 ---
@@ -87,7 +99,7 @@ ESA 默认 `STATIC_CONFIG=1` 走烘焙分支，运行时**完全不依赖 KV/Red
 
 1. 控制台「函数」→ 新建，入口 `./esa/index.js`。
 2. 上传构建产物（`_worker.js` + `dist/public/`）。
-3. 设环境变量：`CLOUD_PLATFORM=esa`、`REDIS_URL`（或 `STATIC_CONFIG=1`）。
+3. 设环境变量：`CLOUD_PLATFORM=esa`、`REDIS_URL`（不设则自动走静态烘焙只读兜底）。
 4. 发布，绑定自定义域。
 
 ### 方式 B：ESA CLI
@@ -119,7 +131,8 @@ npm run deploy:esa:cli    # 或直接走 cli 部署脚本 scripts/deploy-esa-cli
 | 现象 | 原因 | 解法 |
 |---|---|---|
 | 部署报错平台探测失败 | 没设 `CLOUD_PLATFORM=esa` | 控制台/构建设 `esa` |
-| 配置读不到 | 既没 REDIS_URL 也没烘焙 | 二选一（§3） |
+| 配置读不到 | 既没 REDIS_URL 也没烘焙产物 | 配 REDIS_URL，或用 `--bake` 重新构建（§3） |
+| 管理面无法保存配置 | 处于静态烘焙只读模式 | 设 REDIS_URL（自动退出烘焙）；若已设仍只读，检查是否显式设了 `STATIC_CONFIG=1` |
 | 管理面 500 | 站点数多逼近 32 子请求 | 依赖分页；或改用烘焙 |
 | 源站回源失败 | 填了 IP | ESA 必须填可解析域名 |
 | 缓存没生效 | ESA 缓存全局单例 | 用 `cacheGen` 代次清，或确认 cache 阶段开 |

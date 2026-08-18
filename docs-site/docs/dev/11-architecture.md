@@ -43,8 +43,9 @@ flowchart TD
 
 `src/config/schema.js` 是唯一字段真相源；`src/config/store.js` 负责：
 
-1. 优先读 **baked 烘焙配置**（ESA `STATIC_CONFIG=1` 时）；
-2. 否则读 **KV**（CDN_KV）；
+1. 优先读 **baked 烘焙配置**（`STATIC_CONFIG=1` 时；ESA 在未配 `REDIS_URL` 时默认如此）；
+2. 否则读 **KV**——由 `KV_BACKEND` 在「自部署 Webdis（`REDIS_URL`）」与「平台 KV（`CDN_KV`）」间选型，
+   **两者并存时默认优先 Webdis**，详见 [Redis / Webdis 外置 KV](/dev/13-redis-kv.md)；
 3. 内存缓存 **30s**（`kvTtlSeconds`/`kvRefreshStaleSeconds`），陈旧期内返回旧值，后台刷新。
 
 > [!NOTE]
@@ -64,6 +65,7 @@ flowchart TD
 | D1 | ✅ | ❌ | ❌ |
 | R2 | ✅ | ❌ | ❌ |
 | 原生 KV | ✅ (CDN_KV) | ✅ (CDN_KV) | ❌（禁用 EdgeKV，走 REDIS_URL/烘焙） |
+| 外置自部署 Webdis | ✅ (REDIS_URL) | ✅ (REDIS_URL) | ✅ (REDIS_URL) |
 | cache 全局单例 | ❌ | ❌ | ✅ |
 | cache 节点本地 | ❌ | ✅ | ❌ |
 | cacheKey 须 http | ❌ | ❌ | ✅ |
@@ -74,6 +76,7 @@ flowchart TD
 
 - EO 无裸 IP fetch → 源站必须填**可解析域名**（不能用 IP 直连回源）。
 - ESA 无原生 KV → 配置走 **REDIS_URL (Webdis)** 或**静态烘焙**，不能依赖运行时 KV。
+  （CF / EO 亦可配 `REDIS_URL` 使用同一份外置 Webdis，且**并存时默认优先 Webdis**。）
 - ESA cache 全局单例 + key 须 http → `put` 用 http URL，自动降级。
 - ESA 子请求上限 **32** → 管理面站点数多时单请求会逼近上限，需分页（见 [部署 ESA](/dev/14-deploy-esa.md)）。
 

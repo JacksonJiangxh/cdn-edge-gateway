@@ -166,6 +166,41 @@ CLOUD_PLATFORM = "cf"
 # binding = "CDN_KV"
 # id = "在此填 wrangler kv namespace create CDN_KV 输出的 id"
 
+#-------------------------------------------------------------------------------
+# 外置自部署 Webdis（可替代或与平台 KV 并存）—— 【控制台环境变量归属】
+# ----------------------------------------------------------------------------
+# 本项目在【所有平台】（CF / EO / ESA）都支持把配置存到你自己的 Redis：
+# 部署一个 Webdis（HTTP↔Redis 网关），把 REDIS_URL 指向它即可，接口与平台 KV
+# 完全同构（见 src/platform/redis-kv.js，自建教程见 docs-site/docs/dev/13-redis-kv.md）。
+#
+# 变量一律在 Dashboard → Worker → Settings → Variables 设置（不写进本文件，
+# 避免把自建服务地址与鉴权信息提交进仓库；REDIS_TOKEN 建议用 Secret 类型）：
+#   REDIS_URL         必填才启用，如 https://webdis.example.com（不带尾斜杠）
+#   REDIS_TOKEN       可选，Webdis 鉴权头原样值，如 Basic <base64>（建议 Secret）
+#   REDIS_PREFIX      可选，键前缀，多项目共库时便于识别
+#   REDIS_DB          可选，Redis 逻辑库号 0–15，非法值回退 0
+#   REDIS_TIMEOUT_MS  可选，单次请求超时，默认 5000
+#
+# 【后端选型】KV_BACKEND（可选，同样在控制台设）：
+#   未设 / auto  → 默认 **自部署 Webdis 优先**（与平台 KV 并存时用 Webdis）
+#   native       → 强制平台 KV（CDN_KV / KV）
+#   redis        → 强制自部署 Webdis
+# 偏好侧不可用时自动降级到另一侧，不会直接失去持久化。
+#
+# ⚠️ 为什么选型开关必须是环境变量而不是管理面配置项：配置本身就存放在 KV 里，
+#    若把「用哪个后端」写进 cfg:global，会形成「读配置前必须先知道用哪个后端」
+#    的循环依赖。故该开关只来自环境变量，管理面仅只读展示（改后需重新部署）。
+# ⚠️ 切换后端【不会自动迁移数据】：两份存储独立，切换前请先在管理面导出配置。
+# ⚠️ Webdis 默认无鉴权会把 Redis 裸暴露公网：务必仅监听内网 / 套 TLS /
+#    前置带 REDIS_TOKEN 的反向代理。
+#
+# 另：STATIC_CONFIG=1 可启用「静态烘焙只读模式」（配置构建时内置、零运行时 KV
+# 依赖），CF 上一般不需要；ESA 在未配 REDIS_URL 时会默认启用它作为兜底。
+#
+# 连通性自检：管理面「系统信息 → KV 存储后端 → 测试连通性（平台 KV + Webdis）」
+# 一次点击会【同时】探测两端并分别显示延迟 / 错误，同时标注当前生效后端。
+#-------------------------------------------------------------------------------
+
 # [[r2_buckets]]
 # binding = "CDN_R2"
 # bucket_name = "cdn-assets"

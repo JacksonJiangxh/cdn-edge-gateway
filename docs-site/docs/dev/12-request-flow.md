@@ -151,4 +151,4 @@ flowchart TD
 
 ## 下一步
 
-→ [Redis KV 兜底](/dev/13-redis-kv.md)：ESA 等无原生 KV 平台怎么存配置。
+→ [Redis / Webdis 外置 KV](/dev/13-redis-kv.md)：全平台如何用自部署 Webdis 存配置，以及后端选型。

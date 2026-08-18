@@ -183,6 +183,48 @@ function hasRedisBackend(env) {
 }
 
 /**
+ * 读取 KV 后端偏好开关（env.KV_BACKEND）。
+ *
+ * 为什么用环境变量而不是配置项：配置本身就存放在 KV 里，若把「用哪个 KV 后端」
+ * 写进 cfg:global，就会形成「读配置前必须先知道用哪个后端」的循环依赖。
+ * 因此该开关只来自平台环境变量，管理面仅做只读展示。
+ *
+ * @param {Object} env 环境对象
+ * @returns {'auto'|'native'|'redis'} 归一化后的偏好；无效值一律回落 'auto'
+ */
+export function readKvBackendPreference(env) {
+  const raw = env && env.KV_BACKEND;
+  const v = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (v === 'native' || v === 'kv' || v === 'platform') return 'native';
+  if (v === 'redis' || v === 'webdis') return 'redis';
+  return 'auto';
+}
+
+/**
+ * 在「平台 KV」与「自部署 Webdis」之间决策实际生效后端。
+ *
+ * 规则（与 kv.js getKV 的候选排序保持单一真相源）：
+ *   - preference='redis'  → 强制 Webdis；未配置 REDIS_URL 时降级回平台 KV
+ *   - preference='native' → 强制平台 KV；无原生绑定时降级回 Webdis
+ *   - preference='auto'   → **默认 Webdis 优先**（两者同时存在时用 Webdis）
+ * 任一侧都不可用时返回 'none'。降级而非硬失败，避免误配开关直接丢掉持久化。
+ *
+ * @param {boolean} nativeOk 是否探测到平台 KV 绑定
+ * @param {boolean} redisOk 是否配置了 REDIS_URL
+ * @param {'auto'|'native'|'redis'} preference 偏好
+ * @returns {'native'|'redis'|'none'} 实际生效后端
+ */
+export function decideKvBackend(nativeOk, redisOk, preference) {
+  const order =
+    preference === 'native' ? ['native', 'redis'] : ['redis', 'native'];
+  for (const cand of order) {
+    if (cand === 'native' && nativeOk) return 'native';
+    if (cand === 'redis' && redisOk) return 'redis';
+  }
+  return 'none';
+}
+
+/**
  * 判断 env 上某个绑定是否为「有效的 D1 绑定」（prepare 方法标志）。
  * @param {any} binding 待检测对象
  * @returns {boolean} 是否像 D1
@@ -218,6 +260,29 @@ function looksLikeR2(binding) {
  * @returns {'cf'|'eo'|'esa'} 归一化后的厂商标识
  * @throws {Error} 未设置或取值非法时
  */
+/**
+ * 把原始声明串归一为规范厂商标识，不做任何告警 / 抛错。
+ * @param {string} raw 已 lower/trim 的声明串（来自 CLOUD_PLATFORM 或构建期烘焙值）
+ * @returns {'cf'|'eo'|'esa'|undefined} 归一后的规范值；未设置或非法返回 undefined
+ */
+function normalizePlatform(raw) {
+  const declared = (raw || '').toLowerCase().trim();
+  if (!declared) return undefined;
+  return PLATFORM_ALIASES[declared];
+}
+
+/**
+ * 读取并归一化部署厂商环境变量 CLOUD_PLATFORM。
+ *
+ * 返回值恒为规范值 cf | eo | esa 之一：
+ *   - 未设置 → 抛错（强制显式声明，禁止运行时指纹猜测）；
+ *   - 规范值 / 历史别名（edgeone / cloudflare / aliyun-esa / pages 等）→ 归一为规范值，
+ *     若为别名则 console.warn 提示使用规范值（向后兼容，不再 throw）；
+ *   - 其它未知取值 → 抛错。
+ * @param {Object} env 环境对象
+ * @returns {'cf'|'eo'|'esa'} 归一化后的厂商标识
+ * @throws {Error} 未设置或取值非法时
+ */
 function readPlatform(env) {
   // 优先级：运行时 env / process.env > 构建期烘焙的默认值。
   //
@@ -229,27 +294,42 @@ function readPlatform(env) {
   // 用 typeof 守卫读取，未注入时不会抛 ReferenceError（部分运行时对未声明
   // 标识符的裸访问会抛错，故不能直接写 __BUILD_PLATFORM__ || ''）。
   const baked = typeof __BUILD_PLATFORM__ === 'string' ? __BUILD_PLATFORM__ : '';
+  const canonical = normalizePlatform(readEnvVar(env, 'CLOUD_PLATFORM') || baked || '');
+  if (!canonical) {
+    const declared = (readEnvVar(env, 'CLOUD_PLATFORM') || baked || '')
+      .toLowerCase()
+      .trim();
+    throw new Error(
+      `[caps] 必须设置环境变量 CLOUD_PLATFORM 以声明部署厂商，取值为 cf / eo / esa 之一` +
+      `（亦兼容旧别名 edgeone / cloudflare / aliyun-esa / pages）。` +
+      (declared ? `当前取值 "${declared}" 非法。` : '当前未设置。')
+    );
+  }
   const declared = (readEnvVar(env, 'CLOUD_PLATFORM') || baked || '')
     .toLowerCase()
     .trim();
-  if (!declared) {
-    throw new Error(
-      '[caps] 必须设置环境变量 CLOUD_PLATFORM 以声明部署厂商，' +
-      '取值为 cf / eo / esa 之一（分别对应 Cloudflare / EdgeOne / 阿里云 ESA）。'
-    );
-  }
-  const canonical = PLATFORM_ALIASES[declared];
-  if (!canonical) {
-    throw new Error(
-      `[caps] CLOUD_PLATFORM 取值 "${declared}" 非法，必须为 cf / eo / esa 之一` +
-      `（亦兼容旧别名 edgeone / cloudflare / aliyun-esa / pages）。`
-    );
-  }
   if (canonical !== declared) {
     // 历史别名向后兼容：不阻断运行，仅告警提示规范化
     console.warn(`[caps] CLOUD_PLATFORM="${declared}" 已归一为 "${canonical}"，建议显式使用 cf / eo / esa。`);
   }
   return canonical;
+}
+
+/**
+ * 安全读取并归一化部署厂商，未设置 / 非法时返回 fallback（**不抛错**）。
+ *
+ * 用于 KV 适配器等「不应因平台变量缺失而崩溃」的场景（例如 REDIS_PREFIX 的
+ * 平台自适应默认前缀：取不到平台就回退为无前缀，而非整条存储链路报错）。
+ * 归一逻辑与 {@link readPlatform} 完全一致（共用 normalizePlatform），仅错误处理不同。
+ *
+ * @param {Object} env 环境对象
+ * @param {string} [fallback=''] 取不到合规平台时的回退值
+ * @returns {'cf'|'eo'|'esa'|string} 规范厂商标识或 fallback
+ */
+export function readPlatformSafe(env, fallback = '') {
+  const baked = typeof __BUILD_PLATFORM__ === 'string' ? __BUILD_PLATFORM__ : '';
+  const canonical = normalizePlatform(readEnvVar(env, 'CLOUD_PLATFORM') || baked || '');
+  return canonical || fallback;
 }
 
 /**
@@ -298,6 +378,16 @@ export function detectCaps(env) {
     looksLikeKV(safeGlobal('CDN_KV')) ||
     looksLikeKV(safeGlobal('KV'));
 
+  // 双后端并存判定：平台 KV 与自部署 Webdis 各自独立探测，
+  // 再由 KV_BACKEND 偏好决定谁生效（默认 Webdis 优先）。
+  const hasRedisKV = hasRedisBackend(e);
+  const kvPreference = readKvBackendPreference(e);
+  const kvEffective = decideKvBackend(hasNativeKV, hasRedisKV, kvPreference);
+  // 是否因显式 KV_BACKEND 而偏离了默认（auto）决策——供管理面提示用
+  const kvOverridden =
+    kvPreference !== 'auto' &&
+    kvEffective !== decideKvBackend(hasNativeKV, hasRedisKV, 'auto');
+
   /** @type {import('../contracts.js').Caps} */
   const caps = Object.freeze({
     platform,
@@ -324,9 +414,17 @@ export function detectCaps(env) {
     // 仅 Cloudflare 有 cloudflare:sockets，用于「裸 IP + HTTPS + 自定义 SNI」内部兜底
     hasSocket: platform === 'cf',
     hasD1: looksLikeD1(e.CDN_DB) || looksLikeD1(e.DB) || looksLikeD1(e.D1),
-    hasKV: hasNativeKV || hasRedisBackend(e),
-    // KV 实际后端类型：native（平台 KV）/ redis（自部署 Webdis）/ none
-    kvBackend: hasNativeKV ? 'native' : hasRedisBackend(e) ? 'redis' : 'none',
+    hasKV: hasNativeKV || hasRedisKV,
+    // KV 实际生效后端：native（平台 KV）/ redis（自部署 Webdis）/ none
+    // ⚠️ 默认（KV_BACKEND 未设或 auto）在两者并存时选 **redis**（自部署 Webdis 优先）
+    kvBackend: kvEffective,
+    // 双后端各自的「存在性」——供管理面分别展示与分别探测
+    kvNative: hasNativeKV,
+    kvRedis: hasRedisKV,
+    // KV_BACKEND 偏好原始归一值：auto / native / redis
+    kvBackendPreference: kvPreference,
+    // 是否因显式 KV_BACKEND 覆盖了默认决策
+    kvBackendOverridden: kvOverridden,
     // R2 直读回源：仅在 CF 可用，检测常见绑定名
     hasR2:
       platform === 'cf' &&

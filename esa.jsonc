@@ -18,12 +18,29 @@
   // 5. 运行限制：内存 128MB、执行时间 120s、每请求子请求(fetch)上限 4 个。
   // 6. 环境变量在【ESA 控制台】设置（esa.jsonc 不支持顶层 env 字段），包括：
   //      CLOUD_PLATFORM=esa          —— 显式声明平台（规范值），caps.js 据此探测
-  //      REDIS_URL                   —— 【必填】外置持久化。ESA 的 EdgeKV 按量收费
-  //                                      且无免费额度，本项目在 ESA 上统一禁用厂商 KV，
-  //                                      持久化一律走 REDIS_URL（自建 Webdis/Redis）。
-  //      REDIS_TOKEN / REDIS_PREFIX  —— 可选，Webdis 前置鉴权 / 键前缀
+  //      REDIS_URL                   —— 【强烈建议配置】外置持久化（自建 Webdis/Redis）。
+  //                                      ESA 的 EdgeKV 按量收费且无免费额度，本项目在 ESA
+  //                                      上统一禁用厂商 KV，可写持久化只能走 REDIS_URL。
+  //                                      配上后 esa/index.js 会【自动退出静态烘焙只读模式】，
+  //                                      管理面即可正常保存配置（与 CF / EO 行为一致）。
+  //                                      不配则默认回退静态烘焙（只读，见第 7 条）。
+  //                                      格式：https://webdis.example.com（不带尾斜杠）
+  //      REDIS_TOKEN                 —— 可选，Webdis 鉴权头原样值，如 Basic <base64>
+  //      REDIS_PREFIX                —— 可选，键前缀（多项目共库时便于识别）
+  //      REDIS_DB                    —— 可选，Redis 逻辑库号 0–15，非法值回退 0
+  //      REDIS_TIMEOUT_MS            —— 可选，Webdis 单次请求超时，默认 5000
+  //      KV_BACKEND                  —— 可选，KV 后端选型：auto（默认，Webdis 优先）/
+  //                                      native（平台 KV）/ redis（Webdis）。
+  //                                      ESA 无可用平台 KV，故此处通常无需设置。
+  //                                      ⚠️ 只能走环境变量：配置本身存在 KV 里，写进配置
+  //                                      会形成「读配置前需先知道用哪个后端」的循环依赖。
   //      ADMIN_PASSWORD / JWT_SECRET —— 可选，凭据类变量
-  // 7. 实时日志：ESA 即时日志只采集 console.alert() 输出（非 console.log）。
+  // 7. STATIC_CONFIG（静态烘焙只读模式）—— 由 esa/index.js 按 REDIS_URL 自动决定：
+  //      配了 REDIS_URL 且未显式设置  → 不烘焙，走 Webdis 可写模式
+  //      未配 REDIS_URL 且未显式设置  → 默认 STATIC_CONFIG=1（只读兜底，读构建时内置配置）
+  //      显式 STATIC_CONFIG=1        → 强制只读烘焙（即使配了 REDIS_URL）
+  //      显式 STATIC_CONFIG=0        → 强制可写（无 REDIS_URL 时配置无法保存）
+  // 8. 实时日志：ESA 即时日志只采集 console.alert() 输出（非 console.log）。
 
   "name": "cdn-edge-gateway",
   "entry": "./esa/index.js",

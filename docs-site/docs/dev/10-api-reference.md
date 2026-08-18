@@ -209,7 +209,7 @@ curl "http://127.0.0.1:8799/__panel/api/system/info" -H "cookie: ecw_token=$TOK"
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/kv/ping` | 连通性（读写回环），返回 `{ok,latencyMs,backend}` |
+| `GET` | `/kv/ping` | **同时**探测平台 KV 与自部署 Webdis（各自读写回环） |
 | `GET` | `/kv?prefix=` | 列键 |
 | `GET` | `/kv/:key` | 读键（纯文本） |
 | `PUT` | `/kv/:key?ttl=` | 写键（body 为值） |
@@ -217,8 +217,23 @@ curl "http://127.0.0.1:8799/__panel/api/system/info" -H "cookie: ecw_token=$TOK"
 
 ```bash
 curl "http://127.0.0.1:8799/__panel/api/kv/ping" -H "cookie: ecw_token=$TOK"
-# → {"ok":true,"backend":"redis-webdis","latencyMs":12}
 ```
+
+```json
+{
+  "backend": "redis",
+  "preference": "auto",
+  "ok": true,
+  "latencyMs": 12,
+  "native": { "ok": true, "latencyMs": 8,  "backend": "native",       "effective": false },
+  "redis":  { "ok": true, "latencyMs": 12, "backend": "redis-webdis", "effective": true  }
+}
+```
+
+- 顶层 `backend` 为**当前生效**后端（`native` / `redis` / `none`），`preference` 为 `KV_BACKEND` 归一值。
+- `native` / `redis` 为两端**各自**的探测结果；未配置的一侧返回 `backend: "none"` 与说明性 `error`，不计为失败。
+- 顶层 `ok` / `latencyMs` 反映生效后端的结果（兼容旧调用方）。
+- 后端选型规则见 [Redis / Webdis 外置 KV](/dev/13-redis-kv.md)。
 
 ---
 

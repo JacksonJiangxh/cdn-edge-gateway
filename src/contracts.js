@@ -28,7 +28,12 @@
  * @property {boolean} hasRawIpFetch      是否支持「fetch 直连裸 IP / 自定义端口 / 自定义 SNI」（仅 CF 支持；EO/ESA 的 fetch 仅支持域名，裸 IP 须走平台源站组兜底）
  * @property {boolean} hasSocket          是否支持 cloudflare:sockets（仅 CF，用于裸 IP+HTTPS+自定义 SNI 的内部自动兜底）
  * @property {boolean} hasD1              是否绑定了 D1
- * @property {boolean} hasKV              是否绑定了 KV
+ * @property {boolean} hasKV              是否有可用的 KV 持久化（平台 KV 或自部署 Webdis 任一）
+ * @property {'native'|'redis'|'none'} kvBackend  实际生效的 KV 后端；两者并存时默认 'redis'（自部署 Webdis 优先）
+ * @property {boolean} kvNative           是否探测到平台级 KV 绑定（CF env / EO 全局变量）
+ * @property {boolean} kvRedis            是否配置了自部署 Webdis/Redis（REDIS_URL）
+ * @property {'auto'|'native'|'redis'} kvBackendPreference  env.KV_BACKEND 归一值（auto=默认 Webdis 优先）
+ * @property {boolean} kvBackendOverridden 是否因显式 KV_BACKEND 覆盖了默认决策
  * @property {boolean} hasR2              是否绑定了 R2（仅 CF；用于 engine='r2' 回源到 R2 桶）
  * @property {number}  maxExecutionMs     平台单次请求总执行上限（墙钟）：cf=30000（Workers 默认）、eo=120000、esa=120000（函数单次执行响应时间上限）；EXECUTION_LIMIT_MS 可覆盖
  * @property {number}  [firstByteMs]      网关等待函数返回首个数据的时间上限：esa=10000（超时网关主动断连返回 504），cf/eo 无此约束；FIRST_BYTE_LIMIT_MS 可覆盖

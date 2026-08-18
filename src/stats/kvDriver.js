@@ -12,6 +12,9 @@
  */
 
 import { hourKey } from '../utils/hourKey.js';
+// 读取历史 stat:* 键需要 KV 适配器。此前漏了这条 import，导致 queryStats 等
+// 读函数一旦被调用即抛 ReferenceError（因 stats/index.js 已硬编码走 D1 而未暴露）。
+import { getKV } from '../platform/kv.js';
 
 /** 分片数量。契约规定 0-7。 */
 const SHARD_COUNT = 8;

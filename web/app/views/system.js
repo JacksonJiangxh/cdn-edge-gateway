@@ -21,9 +21,25 @@ export   async function renderSystem() {
       ['边缘缓存', caps.hasEdgeCache ? '可用' : '不可用（降级）'],
       ['TCP Socket', caps.hasSocket ? '可用' : '不可用（socket 引擎降级 fetch）'],
       ['D1', caps.hasD1 ? '可用' : '不可用'],
-      ['KV', caps.hasKV ? '可用' : '不可用（配置无法持久化！）'],
       ['统计驱动', (info && info.statsDriver) || 'none'],
     ];
+    // KV 可用性：平台 KV 与自部署 Webdis 可同时存在，逐项说明避免误判「不可用」
+    {
+      const nOk = typeof info?.kvNative === 'boolean' ? info.kvNative : !!caps.kvNative;
+      const rOk = typeof info?.kvRedis === 'boolean'
+        ? info.kvRedis
+        : !!(info?.redisConfigured || caps.kvRedis);
+      const eff = (info && info.kvBackend) || caps.kvBackend || 'none';
+      const effLabel = eff === 'baked'
+        ? '静态烘焙只读'
+        : eff === 'redis' ? '自部署 Webdis' : eff === 'native' ? '平台 KV' : '无';
+      rows.splice(4, 0, [
+        'KV 持久化',
+        caps.hasKV || eff === 'baked'
+          ? `可用（生效：${effLabel}${nOk && rOk ? '；平台 KV 与 Webdis 均已配置' : ''}）`
+          : '不可用（配置无法持久化！）',
+      ]);
+    }
     // 缓存观测：展示当前 isolate 的边缘缓存命中情况，帮助用户直观评估「缓存收益 /
     // 额度克制」。注意这是单实例内存统计，实例回收即归零，用于观察趋势而非精确计量。
     const cacheStat = (info && info.cache) || null;
@@ -47,54 +63,131 @@ export   async function renderSystem() {
     }
     wrap.appendChild(table(['项目', '状态'], rows));
 
-    // ---- KV 后端 / Redis(Webdis) 状态与连通性测试 ----
-    // 面向「无原生 KV 平台」（EO Pages / ESA 等）的自部署 Redis 兜底存储。
-    const kvBackend = (info && info.kvBackend) || (caps.hasKV ? 'native' : 'none');
-    const redisConfigured = !!(info && info.redisConfigured);
-    const kvStateText =
+    // ---- KV 后端（平台 KV + 自部署 Webdis 双后端）状态与连通性测试 ----
+    // 三平台（CF / EO / ESA）均支持外置自部署 Webdis，且可与平台级 KV 同时存在。
+    // 生效后端由环境变量 KV_BACKEND 决定（未设/auto = 默认自部署 Webdis 优先）。
+    // 该开关只读展示：配置本身存放在 KV 里，若写进配置会形成循环依赖。
+    const bakedMode = !!(info && info.bakedMode);
+    // 生效后端只认「后端透传值」或 caps 自身的 kvBackend——**不可**由 hasKV 反推
+    // 成 'native'：那是改造前「平台 KV 优先」的旧语义，会把纯 Webdis 部署误标为平台 KV。
+    const kvBackend = (info && info.kvBackend) || caps.kvBackend || 'none';
+    // 两端存在性：优先用后端透传的 kvNative/kvRedis，缺失时退到 caps 同名字段
+    const hasNative = typeof info?.kvNative === 'boolean'
+      ? info.kvNative
+      : typeof caps.kvNative === 'boolean'
+        ? caps.kvNative
+        : kvBackend === 'native';
+    const hasRedis = typeof info?.kvRedis === 'boolean'
+      ? info.kvRedis
+      : typeof caps.kvRedis === 'boolean'
+        ? caps.kvRedis
+        : !!(info && info.redisConfigured) || kvBackend === 'redis';
+    const preference = (info && info.kvBackendPreference) || caps.kvBackendPreference || 'auto';
+    const overridden = !!(info && info.kvBackendOverridden);
+
+    // 「当前生效后端」文案：烘焙只读 > 双后端并存 > 单后端 > 无
+    const effectiveText =
       kvBackend === 'baked'
-        ? '静态烘焙配置（只读，不依赖 KV）📦'
+        ? '📦 静态烘焙配置（只读，不依赖 KV）'
         : kvBackend === 'redis'
-          ? '自部署 Redis（Webdis）✅'
+          ? '✅ 自部署 Webdis（REDIS_URL）'
           : kvBackend === 'native'
-            ? '平台 KV（CDN_KV / KV）✅'
-            : '无（配置无法持久化）❌';
+            ? '✅ 平台 KV（CDN_KV / KV）'
+            : '❌ 无（配置无法持久化）';
+    const prefText =
+      preference === 'auto'
+        ? 'auto（未设置，默认自部署 Webdis 优先）'
+        : preference === 'native'
+          ? 'native（强制平台 KV）'
+          : 'redis（强制自部署 Webdis）';
+
+    /**
+     * 渲染单个后端的「存在性 + 探测结果」行。
+     * 探测结果由 /kv/ping 一次返回的两端数据分别填充（见下方按钮）。
+     */
+    const backendRow = (id, label, present, isEffective, absentHint) =>
+      field(
+        label,
+        el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap' }, [
+          el('span', { class: 'badge ' + (present ? 'badge-on' : 'badge-off') },
+            present ? '已配置' : '未配置'),
+          isEffective
+            ? el('span', { class: 'badge badge-info' }, '当前生效')
+            : null,
+          el('span', { id, class: 'muted' }, present ? '待测试' : absentHint),
+        ])
+      );
+
+    const pingBtnLabel = '测试连通性（平台 KV + Webdis）';
     const kvCard = el('div', { class: 'card-block' }, [
       el('h4', {}, 'KV 存储后端'),
       el('div', { class: 'form-stack' }, [
-        field('当前后端', el('span', {}, kvStateText)),
-        field('REDIS_URL 已配置', el('span', {}, redisConfigured ? '是' : '否（使用平台 KV 或默认配置）')),
+        field('当前生效后端', el('span', {}, effectiveText),
+          overridden ? '已由环境变量 KV_BACKEND 覆盖默认决策' : null),
+        field('KV_BACKEND（只读）', el('span', { class: 'mono' }, prefText),
+          '该开关只能通过平台环境变量设置（配置本身存放在 KV 中，写入配置会造成循环依赖）。修改后需重新部署生效。'),
+        backendRow('kv-ping-native', '平台 KV（CDN_KV / KV）', hasNative,
+          kvBackend === 'native', '未检测到平台 KV 绑定'),
+        backendRow('kv-ping-redis', '自部署 Webdis（REDIS_URL）', hasRedis,
+          kvBackend === 'redis', '未配置 REDIS_URL'),
       ]),
-      el('div', { class: 'section-head' }, [
+      el('div', { class: 'section-head', style: 'display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px' }, [
         el('button', {
-          class: 'btn', text: '测试连通性（读写回环）',
-          disabled: !!(info && info.bakedMode),
+          class: 'btn', text: pingBtnLabel,
           onclick: async (ev) => {
-            const btn = ev.target;
+            const btn = ev.currentTarget || ev.target;
             btn.disabled = true; btn.textContent = '测试中…';
-            const out = document.getElementById('kv-ping-out');
-            if (out) { out.textContent = '请求中…'; out.className = 'muted'; }
+            const outN = document.getElementById('kv-ping-native');
+            const outR = document.getElementById('kv-ping-redis');
+            const outAll = document.getElementById('kv-ping-out');
+            [outN, outR].forEach((o) => { if (o) { o.className = 'muted'; o.textContent = '探测中…'; } });
+            if (outAll) { outAll.className = 'muted'; outAll.textContent = '请求中…'; }
+            // 单次请求同时探测两端，各自渲染延迟 / 错误
+            const paint = (node, r) => {
+              if (!node) return;
+              if (!r) { node.className = 'muted'; node.textContent = '无结果'; return; }
+              if (r.ok) {
+                node.className = 'badge badge-on';
+                node.textContent = `✅ 读写回环一致 · ${r.latencyMs}ms`;
+              } else if (r.backend === 'none') {
+                node.className = 'muted';
+                node.textContent = r.error || '未配置';
+              } else {
+                node.className = 'badge badge-danger';
+                node.textContent = `❌ ${r.error || '未知错误'}`;
+              }
+            };
             try {
               const r = await API.kv.ping();
-              const okk = r && r.ok;
-              if (out) {
-                out.className = okk ? 'ok-text' : 'err-text';
-                out.textContent = okk
-                  ? `✅ 后端=${r.backend} 延迟=${r.latencyMs}ms 读写回环一致`
-                  : `❌ 后端=${r.backend || '?'} 错误=${r.error || '未知'}`;
+              paint(outN, r && r.native);
+              paint(outR, r && r.redis);
+              if (outAll) {
+                const eff = (r && r.backend) || 'none';
+                const effLabel = eff === 'redis' ? '自部署 Webdis' : eff === 'native' ? '平台 KV' : '无';
+                outAll.className = 'muted';
+                outAll.textContent = `当前生效后端：${effLabel}${r && r.preference && r.preference !== 'auto' ? `（KV_BACKEND=${r.preference}）` : ''}`;
               }
             } catch (e) {
-              if (out) { out.className = 'err-text'; out.textContent = '请求失败: ' + e.message; }
+              [outN, outR].forEach((o) => {
+                if (o) { o.className = 'badge badge-danger'; o.textContent = '请求失败'; }
+              });
+              if (outAll) { outAll.className = 'badge badge-danger'; outAll.textContent = '请求失败: ' + e.message; }
             } finally {
-              btn.disabled = false; btn.textContent = '测试连通性（读写回环）';
+              btn.disabled = false; btn.textContent = pingBtnLabel;
             }
           },
         }),
-        el('span', { id: 'kv-ping-out', class: 'muted' }, '点击测试自部署 Redis 是否可读可写'),
+        el('span', { id: 'kv-ping-out', class: 'muted' },
+          bakedMode
+            ? '当前为静态烘焙只读模式，探测仅反映后端可达性，不影响只读约束'
+            : '点击同时测试平台 KV 与自部署 Webdis 的读写回环'),
       ]),
       el('p', { class: 'muted small' },
-        '无原生 KV 的平台（如 EdgeOne Pages / ESA）可自部署 Webdis（HTTP↔Redis 网关），' +
-        '并在环境变量配置 REDIS_URL 指向它，本项目即可获得与平台 KV 完全同构的持久化能力，配置 / 统计自动落到您的 Redis。'),
+        '所有平台（Cloudflare / EdgeOne / 阿里云 ESA）均支持自部署 Webdis（HTTP↔Redis 网关）：' +
+        '在环境变量配置 REDIS_URL 指向它，即可获得与平台 KV 完全同构的持久化能力。' +
+        '两者同时配置时默认优先使用 Webdis，可将 KV_BACKEND 设为 native 切回平台 KV。' +
+        '⚠️ 切换后端不会自动迁移数据，切换前请先在系统设置中导出配置。' +
+        '⚠️ Webdis 默认无鉴权，务必仅监听内网 / 套 TLS / 前置带 REDIS_TOKEN 的反向代理，切勿裸露公网。'),
     ]);
     wrap.appendChild(kvCard);
 

@@ -29,9 +29,11 @@
  *   4) '?' 会截断命令参数（src/cmd.c:160 把 ? 之后当 query 丢弃），本实现 URL
  *      不含 '?'。format/type 等用 query 参数时由 Webdis 客户端解析（本项目不用）。
  *   5) 鉴权：Webdis 自带 HTTP Basic Auth（src/acl.c，Authorization: Basic）；
- *      更常见是自部署套反向代理做 Bearer。本项目 REDIS_TOKEN 直接作为
- *      Authorization 头的值（若填的是 base64 即为 Basic，若填 Bearer xxx 即 Bearer），
- *      由用户按自己前置鉴权方式填写。
+ *      更常见是自部署套反向代理做 Bearer。本项目 REDIS_TOKEN **直接作为
+ *      Authorization 头的值原样发送**，代码**不会对其做任何 base64 编码**——
+ *      用户须自行用 `printf 'esa:密码' | base64` 算好 base64 串，把
+ *      `Basic <已算好的串>`（或 `Bearer xxx`）这一完整字面量填进环境变量。
+ *      ⚠️ 切勿填 `Basic <base64("...")>` 这种伪代码文本，否则服务端收到的凭据非法。
  *
  * 设计要点（与 kv.js 的 CF/EO 适配器完全同构）：
  *   1. 暴露与 KVLike 一致的 { get, put, delete, list }；store.js 零改动。
@@ -40,8 +42,10 @@
  *
  * 配置来源（env）：
  *   REDIS_URL        必填，如 https://redis.example.com 或 http://127.0.0.1:7379
- *   REDIS_TOKEN      可选，直接作为 Authorization 头值（Basic base64 / Bearer xxx）
- *   REDIS_PREFIX     可选，键统一前缀（多应用共享 Redis 时隔离）
+ *   REDIS_TOKEN      可选，直接作为 Authorization 头值（Basic <已算好的base64> / Bearer xxx），
+ *                    代码**不二次 base64 编码**，须填完整字面量
+ *   REDIS_PREFIX     可选，键统一前缀（多应用共享 Redis 时隔离）。未设置时按 CLOUD_PLATFORM
+ *                    自适应默认前缀（cf: / eo: / esa:）；显式设为空串 "" 表示主动不要前缀
  *   REDIS_TIMEOUT_MS 可选，单次请求超时，默认 5000ms
  *
  * ⚠️ 安全红线：Webdis 默认无鉴权、会把 Redis 明文暴露公网。自部署务必
@@ -51,6 +55,7 @@
  */
 
 import { encodeKey, decodeKey, encodePrefix } from './keyCodec.js';
+import { readPlatformSafe } from './caps.js';
 
 /**
  * 判断 env 是否配置了 Webdis Redis 后端。
@@ -73,15 +78,27 @@ function physKey(prefix, logicalKey) {
 }
 
 /**
+ * 计算 REDIS_PREFIX 的平台自适应默认值。
+ * 仅当 REDIS_PREFIX 未设置时调用：按 CLOUD_PLATFORM 规范值生成 `cf:` / `eo:` / `esa:`。
+ * 取不到合规平台（readPlatformSafe 返回空）→ 回退为无前缀，绝不抛错。
+ * @param {Object} env 平台环境变量
+ * @returns {string} 形如 `cf:` 的前缀，或空串
+ */
+function defaultPrefixFor(env) {
+  const p = readPlatformSafe(env, '');
+  return p ? `${p}:` : '';
+}
+
+/**
  * 构造 Webdis 只读命令 URL：GET /<CMD>/<arg1>/<arg2>...（path 参数全部编码）。
  * @param {string} base Webdis 基址（已去尾斜杠）
  * @param {string} cmd 命令，如 GET/DEL/KEYS
  * @param {string[]} args 命令参数（逐条 URL 编码后拼进 path）
  * @returns {string} 完整 URL
  */
-function readUrl(base, cmd, args) {
+function readUrl(base, cmd, args, dbSeg = '') {
   const parts = [cmd, ...args.map((a) => encodeURIComponent(a))];
-  return `${base}/${parts.join('/')}`;
+  return `${base}${dbSeg}/${parts.join('/')}`;
 }
 
 /**
@@ -155,7 +172,21 @@ export function createRedisKV(env) {
   const rawUrl = (env.REDIS_URL || env.REDIS_URL_KV || '').trim().replace(/\/+$/, '');
   const base = rawUrl || 'http://127.0.0.1:7379';
   const token = typeof env.REDIS_TOKEN === 'string' && env.REDIS_TOKEN ? env.REDIS_TOKEN : '';
-  const prefix = typeof env.REDIS_PREFIX === 'string' && env.REDIS_PREFIX ? env.REDIS_PREFIX : '';
+  // REDIS_PREFIX：键前缀隔离。仅当变量**完全未定义**时套平台自适应默认（cf:/eo:/esa:）；
+  // 显式设为空串 "" 表示用户主动不要前缀（与 REDIS_DB 的 undefined 判断行为对齐）。
+  const prefix =
+    env.REDIS_PREFIX === undefined
+      ? defaultPrefixFor(env)
+      : (typeof env.REDIS_PREFIX === 'string' ? env.REDIS_PREFIX : '');
+  // REDIS_DB：预留多租户/多项目逻辑隔离。Webdis 通过 URL 路径首段（纯数字）选库，
+  // 与 Redis 直连 SELECT 的库号 1:1 对应。默认 0，保持现状兼容；设为 1-15 即落到独立库。
+  let db = 0;
+  if (env.REDIS_DB !== undefined && env.REDIS_DB !== null && env.REDIS_DB !== '') {
+    const n = Number(String(env.REDIS_DB).trim());
+    if (Number.isInteger(n) && n >= 0 && n <= 15) db = n;
+  }
+  // dbSegment：非空时在每条命令路径前插入 /{db} 段，例如 /3/GET/key
+  const dbSegment = db > 0 ? `/${db}` : '';
   const timeoutMs = (() => {
     const n = Number(env.REDIS_TIMEOUT_MS);
     return Number.isFinite(n) && n > 0 ? n : 5000;
@@ -177,7 +208,7 @@ export function createRedisKV(env) {
       const phys = physKey(prefix, logical);
       let json;
       try {
-        json = await webdisFetch(readUrl(base, 'GET', [phys]), { method: 'GET' }, token, timeoutMs);
+        json = await webdisFetch(readUrl(base, 'GET', [phys], dbSegment), { method: 'GET' }, token, timeoutMs);
       } catch {
         // 读失败降级到默认值
         return null;
@@ -214,7 +245,7 @@ export function createRedisKV(env) {
       // SETEX 的 ttl 放 path，value 放 body。
       const cmd = ttl > 0 ? 'SETEX' : 'SET';
       const pathArgs = ttl > 0 ? [phys, String(ttl)] : [phys];
-      const url = `${base}/${cmd}/${pathArgs.map((a) => encodeURIComponent(a)).join('/')}`;
+      const url = `${base}${dbSegment}/${cmd}/${pathArgs.map((a) => encodeURIComponent(a)).join('/')}`;
 
       try {
         await webdisFetch(
@@ -237,7 +268,7 @@ export function createRedisKV(env) {
       const logical = encodeKey(key);
       const phys = physKey(prefix, logical);
       try {
-        await webdisFetch(readUrl(base, 'DEL', [phys]), { method: 'GET' }, token, timeoutMs);
+        await webdisFetch(readUrl(base, 'DEL', [phys], dbSegment), { method: 'GET' }, token, timeoutMs);
       } catch (err) {
         throw new Error(`Redis delete failed for "${key}": ${err && err.message ? err.message : err}`);
       }
@@ -258,7 +289,7 @@ export function createRedisKV(env) {
       const glob = `${physKey(prefix, prefixLogical)}*`;
       let json;
       try {
-        json = await webdisFetch(readUrl(base, 'KEYS', [glob]), { method: 'GET' }, token, timeoutMs);
+        json = await webdisFetch(readUrl(base, 'KEYS', [glob], dbSegment), { method: 'GET' }, token, timeoutMs);
       } catch {
         return { keys: [], list_complete: true };
       }

@@ -8,7 +8,7 @@
  *      配置存储，仅作「通用 KV 命名空间」暴露给上层与运维使用）。
  *
  * 路由（均挂载在 /{adminPath}/api/kv 之下，鉴权同管理面）：
- *   GET    /kv/ping            → 探测 Webdis 后端连通性（读写回环）
+ *   GET    /kv/ping            → **同时**探测平台 KV 与自部署 Webdis（各自读写回环）
  *   GET    /kv/:key            → 读一个键（text/json 自适应）
  *   PUT    /kv/:key            → 写一个键，body 为值；?ttl= 可选过期秒
  *   DELETE /kv/:key            → 删一个键
@@ -21,24 +21,28 @@
 
 import { ok, fail } from '../../utils/response.js';
 import { ERROR_CODES } from '../../contracts.js';
-import { getKV } from '../../platform/kv.js';
-import { probeRedis } from '../../platform/redis-kv.js';
+import { getKV, getNativeKV } from '../../platform/kv.js';
+import { probeRedis, hasRedisConfig } from '../../platform/redis-kv.js';
+import { readKvBackendPreference, decideKvBackend } from '../../platform/caps.js';
 
 /**
- * GET /kv/ping —— 探测后端连通性。
- * 优先走 probeRedis（若配置了 REDIS_URL），否则对平台 KV 做同等回环。
- * @param {import('../../contracts.js').Ctx} ctx
+ * 对「平台级原生 KV」做读写回环探测（与 probeRedis 同构、可独立调用）。
+ *
+ * 与 probeRedis 刻意保持相同的返回结构，便于管理面并列渲染两端结果。
+ * 探测使用随机 key 并在读回后立即删除，TTL 120s 兜底（防中途异常残留）。
+ *
+ * @param {Object} env 平台环境变量与绑定
+ * @returns {Promise<{ok:boolean, latencyMs:number, backend:string, error?:string}>}
  */
-export async function ping(ctx) {
-  const env = ctx.env || {};
-  if (typeof env.REDIS_URL === 'string' && env.REDIS_URL.trim()) {
-    const r = await probeRedis(env);
-    return ok({ backend: 'redis-webdis', ...r });
-  }
-  // 平台 KV 回环探测
-  const kv = getKV(env);
+export async function probeNativeKV(env) {
+  const kv = getNativeKV(env || {});
   if (!kv) {
-    return ok({ backend: 'none', ok: false, error: '未配置任何 KV 后端（平台 KV 或 REDIS_URL）' });
+    return {
+      ok: false,
+      latencyMs: 0,
+      backend: 'none',
+      error: '未检测到平台 KV 绑定（CDN_KV / KV）',
+    };
   }
   const probeKey = `__ping__:${Math.random().toString(36).slice(2)}`;
   const probeVal = `pong-${Date.now()}`;
@@ -47,21 +51,52 @@ export async function ping(ctx) {
     await kv.put(probeKey, probeVal, { expirationTtl: 120 });
     const got = await kv.get(probeKey, 'text');
     await kv.delete(probeKey);
-    const okBack = got === probeVal;
-    return ok({
-      backend: 'native',
-      ok: okBack,
-      latencyMs: Date.now() - t0,
-      error: okBack ? undefined : '读写回环不一致',
-    });
+    const latencyMs = Date.now() - t0;
+    if (got !== probeVal) {
+      return { ok: false, latencyMs, backend: 'native', error: '读写回环不一致（写入后读回的值不匹配）' };
+    }
+    return { ok: true, latencyMs, backend: 'native' };
   } catch (err) {
-    return ok({
-      backend: 'native',
+    return {
       ok: false,
       latencyMs: Date.now() - t0,
+      backend: 'native',
       error: err && err.message ? err.message : String(err),
-    });
+    };
   }
+}
+
+/**
+ * GET /kv/ping —— **同时**探测平台 KV 与自部署 Webdis 两端连通性。
+ *
+ * 两端各自独立做读写回环、各自返回 ok/latencyMs/error，并附带当前生效后端标记，
+ * 便于管理面一次点击并列展示（不再是二选一）。两端探测并发执行以压低总耗时；
+ * 该接口仅供管理面手动触发，不在数据面热路径，不影响 ESA 的 32 子请求预算。
+ *
+ * @param {import('../../contracts.js').Ctx} ctx
+ */
+export async function ping(ctx) {
+  const env = ctx.env || {};
+  const [native, redis] = await Promise.all([probeNativeKV(env), probeRedis(env)]);
+
+  // 生效后端优先取 caps（单一真相源）；caps 缺失时按同一规则现场推导。
+  // 存在性判定用权威来源（hasRedisConfig / getNativeKV），不依赖探测结果的 backend 字面值——
+  // 探测失败时 backend 仍是 'redis-webdis'/'native'，用它推导会把「已配置但不通」误判为存在性问题。
+  const preference = readKvBackendPreference(env);
+  const effective =
+    (ctx.caps && ctx.caps.kvBackend) ||
+    decideKvBackend(!!getNativeKV(env), hasRedisConfig(env), preference);
+
+  return ok({
+    // 当前生效后端：native / redis / none
+    backend: effective,
+    preference,
+    // 兼容旧前端：顶层 ok/latencyMs 反映「当前生效后端」的探测结果
+    ok: effective === 'redis' ? redis.ok : effective === 'native' ? native.ok : false,
+    latencyMs: effective === 'redis' ? redis.latencyMs : effective === 'native' ? native.latencyMs : 0,
+    native: { ...native, effective: effective === 'native' },
+    redis: { ...redis, effective: effective === 'redis' },
+  });
 }
 
 /**
