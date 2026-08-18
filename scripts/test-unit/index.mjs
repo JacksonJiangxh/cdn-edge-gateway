@@ -23,6 +23,7 @@ import './security.mjs';
 import './platform.mjs';
 import './config.mjs';
 import './datasource.mjs';
+import './stats.mjs';
 
 import { runQueue } from './_testkit.mjs';
 

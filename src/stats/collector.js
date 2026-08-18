@@ -2,12 +2,16 @@
  * ============================================================================
  * stats/collector.js —— 内存聚合式访问统计
  * ----------------------------------------------------------------------------
- * 【核心约束：统计落盘只允许 D1，绝不复用 KV】
- * 产品约束：KV 仅用于「控制台改配置」这一写路径，运行期所有统计写入都走 D1。
- * D1 免费版每日写入上限 100,000 行（远高于 KV 的 1000），因此统计先在 isolate
- * 内存里聚合，达到阈值（默认 500 条 / 5 分钟）后才批量落盘一次。
- * 若平台无 D1 绑定，统计功能**不可用**——聚合数据落盘时直接丢弃（最多丢一个
- * flush 周期的量），绝不回退 KV，以保证「KV 零写入」的硬约束。
+ * 【核心约束：统计落盘走「解析出的后端」，绝不静默跨后端回退】
+ * 统计落盘后端由 stats/index.js 的 resolveDriver 决定（D1 / KV 二选一），这里
+ * 只负责把内存聚合结果交给对应驱动：
+ *   - D1 模式：D1 免费版每日写入上限 100,000 行，统计先在 isolate 内存里聚合，
+ *     达到阈值（默认 500 条 / 5 分钟）后才批量落盘一次。D1 写入失败【绝不】降级
+ *     到 KV（历史 bug：D1 抖动时回落 KV 会污染 KV 且无法对账），而是重试一次后丢弃。
+ *   - KV 模式：仅在解析后端明确为 KV（自部署 redis / 厂商 native）时进入，把聚合
+ *     分片写入 KV（见 kvDriver）。此模式仅用于「无 D1 平台（EO/ESA）」或运维显式
+ *     指定。⚠️ 厂商 native KV 有读写次数限制，统计流量绝不会意外落到它上面——
+ *     是否走 native 由 STATS_BACKEND 显式指定且需实际部署，否则回落 none 而非 redis。
  *
  * 落盘触发条件（满足其一即可）：
  *   - 自上次 flush 起累计条数 >= 500
@@ -21,7 +25,8 @@
  * 【已知的可接受损失】
  * isolate 随时可能被平台回收，最后一批未 flush 的内存数据会丢失（最多 500 条
  * 或 5 分钟的量）。对「趋势型访问统计」这个用途来说完全可以接受 —— 我们要的是
- * 量级和趋势，不是财务级精确计数。
+ * 量级和趋势，不是财务级精确计数。此外 KV 模式采用分片随机键写入，同一小时在
+ * 多 isolate 并发时以「追加独立键」避免覆盖，实时小时可能有极少量计数丢失。
  * ============================================================================
  */
 
@@ -33,6 +38,11 @@ import {
   syncEntries,
   getDomainQuota,
 } from '../platform/memBudget.js';
+import {
+  detectCaps,
+  resolveStatsBackend,
+  readStatsBackendPreference,
+} from '../platform/caps.js';
 
 // ============================================================================
 // 常量
@@ -481,12 +491,34 @@ export async function flush(ctx, force = false) {
         return;
       }
 
-      // 统计落盘只允许 D1：'kv' 已废弃（旧配置残留视为 d1），'none' 表示关闭。
-      let driverName = (cfg && cfg.statsDriver) || 'd1';
-      if (driverName === 'kv') driverName = 'd1'; // 旧值兼容：KV 不再承载统计
-      if (driverName === 'none') {
-        takeSnapshot();
-        return;
+      // 解析落盘后端：
+      //   - STATS_BACKEND 显式指定（非 auto）→ 受实际部署可用性硬约束，选了未部署
+      //     的后端直接判定 none（绝不静默回退到其它 KV，避免侵蚀厂商 KV 额度）。
+      //   - auto（缺省）→ 沿用部署者配置 cfg.statsDriver（'d1' | 'none'，
+      //     旧值 'kv' 视为 'd1'）；none 表示关闭。
+      const caps = ctx?.caps || detectCaps(ctx?.env);
+      const pref = readStatsBackendPreference(ctx?.env);
+      let driverName = 'd1';
+      let kvBackend = null; // 'redis' | 'native'（仅 kv 模式用）
+      if (pref !== 'auto') {
+        const backend = resolveStatsBackend(ctx?.env, caps); // 'd1'|'redis'|'native'|'none'
+        if (backend === 'none') {
+          takeSnapshot();
+          return;
+        }
+        if (backend === 'd1') driverName = 'd1';
+        else {
+          driverName = 'kv';
+          kvBackend = backend; // 'redis' | 'native'
+        }
+      } else {
+        // auto：沿用部署者配置
+        driverName = (cfg && cfg.statsDriver) || 'd1';
+        if (driverName === 'kv') driverName = 'd1'; // 旧值兼容：KV 不再作为统计默认后端
+        if (driverName === 'none') {
+          takeSnapshot();
+          return;
+        }
       }
 
       const { snapshot } = takeSnapshot();
@@ -497,7 +529,7 @@ export async function flush(ctx, force = false) {
 
       try {
         if (driverName === 'd1') {
-          // 统计只允许 D1：写入失败【绝不】降级到 KV。
+          // D1 模式：写入失败【绝不】降级到 KV。
           // 历史 bug：D1 瞬时不可用（冷启动 / env 绑定未注入 / ctx.env 透传缺失）
           // 时会回落 KV，导致 KV 被 hourly 分段污染，且 D1 恢复后无法对账。
           // 策略：先重试一次覆盖瞬时抖动；重试仍失败则丢弃本次聚合（最多落盘延迟
@@ -516,8 +548,14 @@ export async function flush(ctx, force = false) {
             );
             // 视为已落盘，避免无限重试堆积内存
           }
+        } else if (driverName === 'kv') {
+          // KV 模式（仅当解析后端明确为 KV 时进入，见上方解析逻辑）。
+          // 分片随机键写入由 kvDriver 内部处理，多 isolate 并发互不覆盖。
+          const kv = await import('./kvDriver.js');
+          if (typeof kv.initKV === 'function') kv.initKV(ctx, kvBackend);
+          await kv.writeStats(ctx, records);
         }
-        // 除 'd1' 与 'none' 外无任何其他分支：统计落盘的唯一存储是 D1。
+        // 除 'd1'、'kv'、'none' 外无任何其他分支。
       } catch (err) {
         // 落盘失败：把数据放回内存，下次再试（最多重复几个周期后自然被丢弃）
         restore(snapshot);

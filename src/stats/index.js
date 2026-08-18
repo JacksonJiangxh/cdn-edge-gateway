@@ -2,17 +2,30 @@
  * ============================================================================
  * stats/index.js —— 统计查询门面（Facade）
  * ----------------------------------------------------------------------------
- * 让管理面 API 无需关心底层存储：
- *   - 当前统计存储**只允许 D1**（产品硬约束：KV 仅用于控制台改配置）
- *   - 按 `GlobalConfig.statsDriver` 解析；旧值 'kv' 视为 'd1'；'none' / 无 D1 绑定
- *     / 任何异常 → 一律返回**零值结构**，绝不抛错（统计挂掉不能让管理面白屏）
+ * 让管理面 API 无需关心底层存储。统计落盘后端由两层配置共同决定：
  *
- * D1 驱动一条 SQL 即可聚合任意 host 与时间区间，没有子请求预算限制。
+ *   1. 部署者配置（GlobalConfig）：statsEnabled（开关）、statsDriver
+ *      （'d1' | 'none'，旧值 'kv' 视为 'd1'，KV 不再作为统计默认后端）
+ *   2. 平台级开关（env.STATS_BACKEND，优先级更高）：
+ *      d1 | redis | native | auto | none
+ *      —— 本次新增：让统计**独立**于「配置存哪」选型 KV 后端。
+ *         例如 KV_BACKEND=native（配置存厂商 KV）时，仍可 STATS_BACKEND=redis
+ *         （统计存自部署 KV），解决 EO/ESA 无 D1 时统计只能落自部署 KV 的问题。
+ *
+ * 硬约束（关键）：选了未部署的后端 → 直接判定 none（统计不可用、零值降级），
+ * **绝不静默回退到其它 KV**。原因：厂商 KV（native）有读写次数限制，绝不能让
+ * 统计流量意外落到它上面侵蚀额度。因此：
+ *   - auto：在「已部署集合」中选优先级最高者 d1 > redis(自部署) > native(厂商)
+ *   - 显式选 native 但没部署 → none（而非落到 redis）
+ *   - 显式选 redis 但没部署 → none（而非落到 native）
+ *
+ * 任何异常 / 无可用后端 → 一律返回**零值结构**，绝不抛错（统计挂掉不能让管理面白屏）。
  * ============================================================================
  */
 
 import { getGlobal } from '../config/store.js';
 import { hourKey } from '../utils/hourKey.js';
+import { detectCaps, resolveStatsBackend, readStatsBackendPreference } from '../platform/caps.js';
 
 /** 并发上限：一批最多同时发起多少个驱动查询。 */
 const CONCURRENCY = 10;
@@ -112,29 +125,56 @@ async function runBatched(tasks, limit) {
 
 /**
  * 解析当前应使用的驱动模块。
+ *
+ * 返回 { name, mod, kvSub }：
+ * - 'd1'   → src/stats/d1Driver.js
+ * - 'kv'   → src/stats/kvDriver.js，kvSub ∈ {'redis'(自部署), 'native'(厂商)}
+ * - 'none' → 零值降级（统计不可用，门面返回空，绝不抛错）
+ *
+ * 决策（受产品硬约束）：
+ *   1. cfg.statsEnabled === false → none（用户关闭统计）
+ *   2. cfg.statsDriver === 'none' → none（部署者显式关闭）
+ *   3. 平台开关 STATS_BACKEND 显式指定（非 auto）时，受「实际部署可用性」硬约束：
+ *      选了未部署的后端 → none（绝不回退其它 KV）
+ *   4. auto（缺省）：d1 > redis > native，都无则 none
+ *
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
- * @returns {Promise<{name:'d1'|'none', mod:Object|null}>} 驱动信息
+ * @returns {Promise<{name:'d1'|'kv'|'none', mod:Object|null, kvSub:'redis'|'native'|null}>} 驱动信息
  */
 async function resolveDriver(ctx) {
-  let name = 'd1';
+  const caps = ctx?.caps || detectCaps(ctx?.env);
+
+  // 部署者配置：开关 / 显式关闭统计
   try {
     const cfg = await getGlobal(ctx);
-    if (cfg && cfg.statsEnabled === false) return { name: 'none', mod: null };
-    if (cfg && cfg.statsDriver) name = cfg.statsDriver;
-    if (name === 'kv') name = 'd1'; // 旧值兼容：统计落盘只走 D1
+    if (cfg && cfg.statsEnabled === false) return { name: 'none', mod: null, kvSub: null };
+    if (cfg && cfg.statsDriver === 'none') return { name: 'none', mod: null, kvSub: null };
   } catch {
-    name = 'd1';
+    /* cfg 读不到按 auto 继续 */
   }
 
-  if (name === 'none') return { name: 'none', mod: null };
+  const pref = readStatsBackendPreference(ctx?.env);
+  const backend = resolveStatsBackend(ctx?.env, caps); // 受可用性约束，非法选择 → 'none'
 
-  // 统计只允许 D1：D1 驱动各查询函数在 db 为 null 时已返回零值结构（不抛错），
-  // 因此即使无 D1 绑定，也走 D1 驱动——最多返回「无数据」，绝不回退 KV。
+  if (backend === 'none') return { name: 'none', mod: null, kvSub: null };
+  if (backend === 'd1') {
+    try {
+      const mod = await import('./d1Driver.js');
+      if (!mod || typeof mod.queryStats !== 'function') return { name: 'none', mod: null, kvSub: null };
+      return { name: 'd1', mod, kvSub: null };
+    } catch {
+      return { name: 'none', mod: null, kvSub: null };
+    }
+  }
+
+  // backend ∈ {'redis','native'} → KV 驱动
   try {
-    const mod = await import('./d1Driver.js');
-    return { name: 'd1', mod };
+    const mod = await import('./kvDriver.js');
+    if (!mod || typeof mod.writeStats !== 'function') return { name: 'none', mod: null, kvSub: null };
+    if (typeof mod.initKV === 'function') mod.initKV(ctx, backend);
+    return { name: 'kv', mod, kvSub: backend };
   } catch {
-    return { name: 'none', mod: null };
+    return { name: 'none', mod: null, kvSub: null };
   }
 }
 

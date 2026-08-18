@@ -1,68 +1,120 @@
 /**
  * ============================================================================
- * stats/kvDriver.js —— KV 统计驱动【已弃用】
+ * stats/kvDriver.js —— KV 统计驱动（自部署 redis / 厂商 native）
  * ----------------------------------------------------------------------------
- * 历史原因：统计曾落盘 KV。现产品硬约束：KV 仅用于「控制台改配置」这一写路径，
- * 运行期所有统计写入都走 D1（见 d1Driver.js / collector.js）。
+ * 让统计在「无 D1 平台（EO/ESA）」或运维显式指定时落 KV。
  *
- * 因此本文件的写入函数 writeStats 已降级为 no-op（绝不向 KV 写任何统计条目），
- * 查询函数也不再被 stats/index.js 门面引用。保留文件仅为兼容旧部署中可能残留的
- * 历史 stat:* 键的读取，新版本应一律使用 D1 驱动。
+ * 【多 isolate 并发计数：用「分片随机键」而非原子 CAS】
+ * 平台 KV（经 Webdis/Redis HTTP）没有原子 compare-and-swap 语义，而 D1 之所有
+ * 能正确计数靠的是原子 upsert。这里改用**分片**规避：每个 isolate 每次 flush
+ * 都写一条独立的随机键 `stat:{host}:{hour}:p:{rand}`，彼此互不覆盖，读取时把
+ * 同一 hour 的所有 partial + 已压实的 compact 键求和。代价是实时小时可能有极
+ * 少量计数丢失（多 isolate 同时写、又恰在读取窗口内），对趋势型统计可接受。
+ *
+ * 【条数上限：TTL 自动过期 + host 封顶】
+ * 每条统计键都带 TTL（STAT_TTL_SEC，默认 3 天），过期由 KV 服务端自动清理，
+ * 无需额外 prune 任务；写入前校验 host 数不超过 STAT_MAX_HOSTS，超出则静默丢弃
+ * 新 host，防止命名空间被构造 Host 头打爆。
+ *
+ * 【压实（compaction）】
+ * 封存的小时（非当前小时）在首次读取时把多个 partial 合并为单一 `stat:{host}:
+ * {hour}:c` 键（带 TTL），后续读取降为 1 次。压实是纯优化，失败不影响正确性
+ * （下次读重新走 partial 路径，结果幂等）。
+ *
+ * ⚠️ 厂商 native KV 有读写次数限制，统计流量**绝不**会意外落到它上面 —— 是否走
+ * native 由 STATS_BACKEND 显式指定且需实际部署，否则解析为 none（见 stats/index.js
+ * 的 resolveDriver）。本驱动只被动接收「选中的后端」由 initKV 注入。
  * ============================================================================
  */
 
 import { hourKey } from '../utils/hourKey.js';
-// 读取历史 stat:* 键需要 KV 适配器。此前漏了这条 import，导致 queryStats 等
-// 读函数一旦被调用即抛 ReferenceError（因 stats/index.js 已硬编码走 D1 而未暴露）。
-import { getKV } from '../platform/kv.js';
+import { getRedisKV, getNativeKV } from '../platform/kv.js';
+import { readStatsTtl, readStatsMaxHosts } from '../platform/caps.js';
 
-/** 分片数量。契约规定 0-7。 */
+/** 分片数量（封存小时压实前的 partial 读上限，仅用于当前小时实时读取预算）。 */
 const SHARD_COUNT = 8;
 
 /**
- * 统计条目 TTL（秒）= 3 天。
+ * 统计条目 TTL（秒），由 STAT_TTL env 控制，默认 3 天。
  *
- * 原为 7 天。收紧到 3 天的考量同时覆盖两个平台：
- *  - EdgeOne KV：仅 1GB 空间、按占用计费（不计请求次数）。stat key 总量 =
- *    站点数 × 小时数 × 8 分片 + 压实键，是命名空间主要膨胀源；砍 4 天约降 57%
- *    空间占用，避免逼近 1GB 上限。
- *  - Cloudflare KV：虽然 KV 操作计次（免费 10 万次/天、KV 读计入 Workers 50
- *    subrequest 上限），但 TTL 只影响过期清理、不改变写入频率，收紧 TTL 对 CF
- *    同样是「纯省空间」、写次数不变，故对两边均正向无害。
- * 统计用途是看趋势/量级而非对账，3 天窗口已足够覆盖绝大多数运维排查场景。
- * 查询窗口（MAX_QUERY_HOURS）跟随本值推导，详见其注释。
+ * 跟随考量：EdgeOne KV 仅 1GB 空间、按占用计费，stat key 是命名空间主要膨胀源，
+ * 砍到 3 天约降 57% 空间占用；Cloudflare KV 收紧 TTL 对写次数无影响、纯省空间。
+ * 查询窗口跟随本值推导，避免「窗口远大于存活期」造成的无效 KV 读。
  */
-const STAT_TTL_SEC = 3 * 24 * 3600;
+function ttlSec(ctx) {
+  return readStatsTtl(ctx && ctx.env);
+}
 
 /** KV 键前缀。 */
 const STAT_PREFIX = 'stat:';
 
 /**
  * 查询时最多回溯的小时数，防止管理面一次请求打出上千次 KV 读。
- * 跟随 STAT_TTL_SEC 推导（TTL 天数 + 1 天缓冲），保证查询窗口永远 >= 数据
- * 存活期，避免「窗口远大于存活期」造成的无效 KV 读（在 Cloudflare 上 KV 读
- * 计入 Workers 50 subrequest 上限与每日 10 万次 KV 操作额度，更要克制）。
+ * 跟随 TTL 推导（TTL 天数 + 1 天缓冲），保证查询窗口永远 >= 数据存活期。
  */
-const MAX_QUERY_HOURS = Math.min(24 * 14, Math.ceil(STAT_TTL_SEC / 3600) + 24);
+function maxQueryHours(ctx) {
+  const t = ttlSec(ctx);
+  return Math.min(24 * 14, Math.ceil(t / 3600) + 24);
+}
 
 /**
- * 单次 queryStats 调用允许消耗的「分片读」预算。
- *
+ * 单次 queryStats 允许消耗的「partial 读」预算。
  * 压实键（compactKey）生成后，历史小时恒为 1 次读；只有尚未压实的小时才会
- * 回退到 SHARD_COUNT 次分片读。冷启动时若所有小时都未压实，朴素做法是
- * hours × 8 次读，24 小时 = 192 次，远超 Workers 单请求 50 subrequest 上限。
- *
- * 这里给一次调用设定上限：最多允许 3 个小时走分片回退（3 × 8 = 24 次读），
- * 其余未压实的小时返回空值并置 result.partial = true。由于每次回退都会
- * 顺带回写压实键，连续查询几次之后所有历史小时都会被压实，不再触发降级。
+ * 回退到 partial 扫描。冷启动若所有小时都未压实，朴素做法是 hours × N 次读，
+ * 远超 Workers 单请求 subrequest 上限。这里给一次调用设定上限，超出未压实的
+ * 小时返回空值并置 result.partial = true。由于回退都会顺带回写压实键，连续
+ * 查询几次后所有历史小时都会被压实，不再触发降级。
  */
-const MAX_SHARD_READS_PER_QUERY = SHARD_COUNT * 3;
+const MAX_PARTIAL_READS_PER_QUERY = 200;
+
+// ============================================================================
+// 后端选择与适配器缓存
+// ============================================================================
 
 /**
- * 把时间戳格式化为 `yyyymmddhh`（UTC）。
- * 统一用 UTC，避免不同边缘节点时区不一致导致同一小时被写进两个桶。
- * @param {number} [ts] 时间戳（ms），缺省为当前时间
+ * 模块级「选中后端」状态。由 stats/index.js 的 resolveDriver 在每次请求解析后
+ * 通过 initKV 注入。统计后端与「配置存哪」解耦：backend 明确为 'redis'（自部署）
+ * 或 'native'（厂商），绝不因 KV_BACKEND=native 而误把统计写进厂商 KV。
+ * @type {{ backend: 'redis'|'native'|null, kv: Object|null }}
  */
+let _resolved = { backend: null, kv: null };
+
+/**
+ * 注入选中后端（由 resolveDriver 调用）。
+ * 同时惰性解析并缓存对应的 KV 适配器实例，避免每次请求重复包装。
+ * @param {import('../contracts.js').Ctx} ctx 请求上下文
+ * @param {'redis'|'native'} backend 选中的统计 KV 后端
+ * @param {Object} [kvOverride] 仅测试用：直接注入 KV 适配器，绕过真实 env 探测
+ */
+export function initKV(ctx, backend, kvOverride) {
+  const b = backend === 'native' ? 'native' : 'redis';
+  if (_resolved.backend === b && _resolved.kv) return;
+  const env = ctx && ctx.env;
+  const kv = kvOverride || (b === 'native' ? getNativeKV(env) : getRedisKV(env));
+  _resolved = { backend: b, kv };
+}
+
+/** 取当前选中的 KV 适配器；未注入或不可用返回 null。 */
+function getKV() {
+  return _resolved && _resolved.kv;
+}
+
+/**
+ * 清空模块级后端缓存（仅供测试使用）。
+ * 真实运行时 _resolved 在每次 resolveDriver 时由 initKV 覆盖，无需重置；
+ * 单测多用例共享模块状态，需在「模拟不可用」等用例前主动清空。
+ */
+export function __resetKV() {
+  _resolved = { backend: null, kv: null };
+}
+
+function currentBackend() {
+  return _resolved ? _resolved.backend : null;
+}
+
+// ============================================================================
+// 键构造
+// ============================================================================
 
 /**
  * 规整 host，防止非法字符污染 KV 键空间。
@@ -75,22 +127,21 @@ function normHost(host) {
 }
 
 /**
- * 构造分片键。
- * @param {string} host 主机名
- * @param {string} hour yyyymmddhh
- * @param {number} shard 分片号
+ * 构造「分片随机键」—— 每个 isolate 每 flush 一次的独立 partial 键。
+ * 随机后缀保证多 isolate 并发写互不覆盖（KV 无原子 upsert 的兜底手段）。
+ * 落在 `stat:{host}:` 前缀下，clearStats 的前缀扫描能一并清掉。
+ * @param {string} host 主机名（已规整）
+ * @param {string} hour 小时键 yyyymmddhh
+ * @param {string} rand 随机后缀
  * @returns {string} KV key
  */
-function shardKey(host, hour, shard) {
-  return `${STAT_PREFIX}${host}:${hour}:${shard}`;
+function partialKey(host, hour, rand) {
+  return `${STAT_PREFIX}${host}:${hour}:p:${rand}`;
 }
 
 /**
- * 构造「压实键」—— 已封存小时的 8 个分片合并后的单一键。
- *
- * 用 `c` 作为分片位，与数字分片（0-7）天然不冲突，
- * 同时仍落在 `stat:{host}:` 前缀下，clearStats 的前缀扫描能一并清掉。
- *
+ * 构造「压实键」—— 已封存小时的多个 partial 合并后的单一键。
+ * 用 `c` 作为分片位，与 partial 的 `p:` 天然不冲突。
  * @param {string} host 主机名（已规整）
  * @param {string} hour 小时键 yyyymmddhh
  * @returns {string} KV key
@@ -100,9 +151,45 @@ function compactKey(host, hour) {
 }
 
 /**
- * 空统计对象。
- * @returns {Object} 归零的统计结构
+ * 从一条 KV key 中解析出 host 与小时（若存在）。
+ * 支持 partial（`...:p:{rand}`）与 compact（`...:c`）。
+ * @param {string} name KV key
+ * @returns {{host:string, hour:string}|null}
  */
+function parseStatKey(name) {
+  if (!name || !name.startsWith(STAT_PREFIX)) return null;
+  const rest = name.slice(STAT_PREFIX.length);
+  // 形如 {host}:{hour}:c            （压实键，单段后缀 c）
+  //   或 {host}:{hour}:p:{rand}     （分片键，两段后缀 p + rand）
+  const parts = rest.split(':');
+  if (parts.length < 3) return null;
+
+  // 先定位 hour 的索引：
+  //   - 压实键 ........ {host...}:{hour}:c        → hour 在倒数第 2 段
+  //   - 分片键 ........ {host...}:{hour}:p:{rand} → hour 在倒数第 3 段
+  //     （last 既非 'c' 也非 'p' 时，要求倒数第 2 段为 'p'）
+  const last = parts[parts.length - 1];
+  let hourIdx;
+  if (last === 'c') {
+    hourIdx = parts.length - 2;
+  } else if (last === 'p') {
+    hourIdx = parts.length - 2;
+  } else {
+    if (parts[parts.length - 2] !== 'p') return null;
+    hourIdx = parts.length - 3;
+  }
+  if (hourIdx < 1) return null;
+  const hour = parts[hourIdx];
+  if (!hour) return null;
+  const host = parts.slice(0, hourIdx).join(':');
+  if (!host) return null;
+  return { host, hour };
+}
+
+// ============================================================================
+// 聚合工具
+// ============================================================================
+
 function emptyAgg() {
   return {
     requests: 0,
@@ -120,12 +207,6 @@ function emptyAgg() {
   };
 }
 
-/**
- * 把一条记录累加进聚合对象。
- * @param {Object} target 累加目标
- * @param {Object} src 源记录
- * @returns {Object} 累加后的 target
- */
 function addInto(target, src) {
   if (!src || typeof src !== 'object') return target;
   target.requests += num(src.requests);
@@ -137,7 +218,6 @@ function addInto(target, src) {
   target.bytes += num(src.bytes);
   target.cacheHit += num(src.cacheHit);
   target.cacheMiss += num(src.cacheMiss);
-  // durSum 用于最终算加权平均；durAvg 单独存的记录也兼容
   target.durSum += num(src.durSum) || num(src.durAvg) * num(src.requests);
   target.durP95Max = Math.max(target.durP95Max, num(src.durP95));
   if (src.origins && typeof src.origins === 'object') {
@@ -148,14 +228,18 @@ function addInto(target, src) {
   return target;
 }
 
-/**
- * 安全转数字。
- * @param {any} v 任意值
- * @returns {number} 有限非负数，否则 0
- */
 function num(v) {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function finalize(agg) {
+  const total = agg.cacheHit + agg.cacheMiss;
+  return {
+    ...agg,
+    durAvg: agg.requests > 0 ? Math.round(agg.durSum / agg.requests) : 0,
+    cacheHitRate: total > 0 ? Math.round((agg.cacheHit / total) * 10000) / 100 : 0,
+  };
 }
 
 // ============================================================================
@@ -165,26 +249,126 @@ function num(v) {
 /**
  * 批量写入统计记录（由 collector.flush 调用）。
  *
- * 【已弃用】统计落盘只走 D1，本函数不再向 KV 写入任何统计条目，
- * 直接返回 false 表示「未写入」，由 collector 视为已落盘（丢弃该批聚合），
- * 以保证 KV 零写入的硬约束。如需持久化统计，请使用 d1Driver.writeStats。
+ * 采用分片随机键写入：`stat:{host}:{hour}:p:{rand}`，每个 host 每 flush 一次
+ * 写一条独立随机键。多 isolate 并发写互不覆盖（无需原子 CAS），读取时按 hour
+ * 聚合所有 partial 与压实键。每条带 TTL 自动过期。
+ *
+ * host 数封顶：写入前校验当前 host 数不超过 STAT_MAX_HOSTS，超出则静默丢弃新
+ * host 的写入，防止命名空间被构造 Host 头打爆。
  *
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
  * @param {Object[]} records collector 产出的扁平统计记录数组
- * @returns {Promise<boolean>} 始终 false（不写 KV）
+ * @returns {Promise<boolean>} 是否成功写入（适配器不可用返回 false）
  */
-export async function writeStats(_ctx, _records) {
-  return false;
+export async function writeStats(ctx, records) {
+  const kv = getKV();
+  if (!kv || typeof kv.put !== 'function') return false;
+  if (!Array.isArray(records) || records.length === 0) return true;
+
+  const ttl = ttlSec(ctx);
+  const maxHosts = readStatsMaxHosts(ctx && ctx.env);
+
+  // host 封顶校验：先扫一遍已有 host 集合，再决定哪些是新 host 可写
+  let existingHosts = null;
+  const seenInBatch = new Set();
+  const toWrite = [];
+
+  for (const rec of records) {
+    const host = normHost(rec && rec.host);
+    const hour = (rec && rec.hour) || hourKey();
+    const stored = {
+      requests: num(rec.requests),
+      status2xx: num(rec.status2xx),
+      status3xx: num(rec.status3xx),
+      status4xx: num(rec.status4xx),
+      status5xx: num(rec.status5xx),
+      statusOther: num(rec.statusOther),
+      bytes: num(rec.bytes),
+      cacheHit: num(rec.cacheHit),
+      cacheMiss: num(rec.cacheMiss),
+      durSum: num(rec.durSum),
+      durP95: num(rec.durP95),
+      origins: rec.origins && typeof rec.origins === 'object' ? rec.origins : {},
+    };
+    // 空记录（全 0）也写，以便后续聚合实时性；但若确实全 0 可跳过省空间
+    if (
+      stored.requests === 0 &&
+      stored.bytes === 0 &&
+      stored.cacheHit === 0 &&
+      stored.cacheMiss === 0
+    ) {
+      continue;
+    }
+
+    if (seenInBatch.has(host)) {
+      // 同批内同一 host 出现多次：合并到首条（理论上 collector 已按 host 聚合，防御性）
+      const first = toWrite.find((w) => w.host === host);
+      if (first) addInto(first.stored, stored);
+      continue;
+    }
+    seenInBatch.add(host);
+
+    // host 封顶：已存在 / 本批已见 / 不超过上限才允许写
+    if (existingHosts === null) existingHosts = await collectExistingHosts(ctx, kv);
+    const totalHosts = existingHosts.size + countNewHosts(existingHosts, seenInBatch);
+    if (!existingHosts.has(host) && totalHosts > maxHosts) {
+      // 超出封顶：丢弃该 host 写入（静默，不影响其余）
+      continue;
+    }
+
+    const rand = Math.random().toString(36).slice(2, 10);
+    toWrite.push({ key: partialKey(host, hour, rand), stored });
+  }
+
+  if (toWrite.length === 0) return true;
+
+  // 并发写入独立随机键（互不覆盖）
+  await Promise.all(
+    toWrite.map(async (w) => {
+      try {
+        await kv.put(w.key, JSON.stringify(w.stored), { expirationTtl: ttl });
+      } catch {
+        /* 单条失败不阻断其余 */
+      }
+    })
+  );
+  return true;
 }
 
 /**
- * 把 KV 中读到的旧结构规整为标准聚合结构（做向前兼容）。
- * @param {Object} stored KV 中的原始对象
- * @returns {Object} 规整后的对象
+ * 收集 KV 中当前已有的 host 集合（用于 host 封顶校验）。
+ * 仅扫描当前小时与上一小时的键前缀即可覆盖绝大多数场景，降低成本。
+ * @param {Object} ctx 上下文
+ * @param {Object} kv KV 适配器
+ * @returns {Promise<Set<string>>}
  */
-function normalizeStored(stored) {
-  const out = emptyAgg();
-  return addInto(out, stored);
+async function collectExistingHosts(ctx, kv) {
+  const hosts = new Set();
+  if (typeof kv.list !== 'function') return hosts;
+  const hours = [hourKey(), hourKey(Date.now() - 3600000)];
+  for (const hk of hours) {
+    try {
+      let cursor;
+      do {
+        const res = await kv.list({ prefix: STAT_PREFIX, cursor, limit: 1000 });
+        for (const k of res.keys || []) {
+          const parsed = parseStatKey(k.name);
+          if (parsed && parsed.hour === hk) hosts.add(parsed.host);
+        }
+        cursor = res.list_complete ? null : res.cursor;
+      } while (cursor);
+    } catch {
+      break;
+    }
+  }
+  return hosts;
+}
+
+/** 统计 seen 中「不在 existing 里」的新 host 数量。 */
+function countNewHosts(existing, seen) {
+  let n = 0;
+  for (const h of seen) if (!existing.has(h)) n += 1;
+  return n;
 }
 
 // ============================================================================
@@ -194,20 +378,19 @@ function normalizeStored(stored) {
 /**
  * 查询指定 host 最近 N 小时的统计，供管理后台使用。
  *
- * 会把每小时的 8 个分片全部读出来相加。
- * 读取成本 = hours × 8 次 KV 读，因此对 hours 做了上限保护。
+ * 读取逻辑：
+ *   - 封存小时：优先读压实键 `:c`（1 次读）；若无则扫描该小时所有 partial 并回写压实键。
+ *   - 当前小时（仍在写入）：直接扫描所有 partial 求和。
+ * 所有 partial + compact 聚合为该小时总量，多个 isolate 的 partial 自然相加。
  *
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
  * @param {string} host 主机名；传 '*' 或空表示不限（此时走 list 扫描）
  * @param {number} [hours=24] 回溯小时数
- * @returns {Promise<{driver:string, host:string, hours:number, total:Object, series:Object[]}>}
- *
- * @example
- * const data = await queryStats(ctx, 'img.a.com', 24);
+ * @returns {Promise<{driver:string, host:string, hours:number, total:Object, series:Object[], available:boolean, partial?:boolean}>}
  */
 export async function queryStats(ctx, host, hours = 24) {
-  const kv = getKV(ctx && ctx.env);
-  const h = Math.min(MAX_QUERY_HOURS, Math.max(1, Math.floor(Number(hours) || 24)));
+  const kv = getKV();
+  const h = Math.min(maxQueryHours(ctx), Math.max(1, Math.floor(Number(hours) || 24)));
 
   const result = {
     driver: 'kv',
@@ -225,65 +408,57 @@ export async function queryStats(ctx, host, hours = 24) {
     hourList.push(hourKey(now - i * 3600000));
   }
 
-  // ---------------------------------------------------------------------
-  // 子请求预算优化：小时级「压实（compaction）」
-  //
-  // 朴素做法是每个小时都读满 SHARD_COUNT 个分片，成本 = hours × 8 次 KV 读。
-  // 24 小时就是 192 次，远超 Workers 单请求 50 subrequest 的上限（KV 读也计入），
-  // 概览页多站点叠加后会直接把预算打爆。
-  //
-  // 关键观察：分片只是为了**避免当前小时的并发写覆盖**。一旦某个小时过去了，
-  // 就不会再有新的写入，其 8 个分片的值从此不再变化 —— 此时可以把它们合并成
-  // 一个「压实键」`stat:{host}:{hour}:c`，之后每次只需 1 次读。
-  //
-  // 于是成本变成：
-  //   - 当前小时（仍在写入）：8 次读，不压实
-  //   - 历史小时：首次读 8 次并回写压实键，之后恒为 1 次读
-  // 24 小时的稳态成本从 192 次降到 23 + 8 = 31 次，落回预算内。
-  //
-  // 压实写入失败无所谓：下次读取会重新走分片路径，结果完全一致（幂等）。
-  // ---------------------------------------------------------------------
   const targetHost = result.host;
   const currentHour = hourKey(now);
-
-  // 冷启动保护：压实键尚未生成时，回退的分片读会是 hours × 8 次。
-  // 这里给「本次调用」设一个分片读预算，超出后该小时只读压实键/放弃分片回退，
-  // 返回部分数据而不是把 subrequest 预算耗尽导致整个请求被平台掐断。
-  // 已压实的小时不消耗预算，所以第二次查询起就不会再触发降级。
-  let shardReadBudget = MAX_SHARD_READS_PER_QUERY;
+  let partialReadBudget = MAX_PARTIAL_READS_PER_QUERY;
 
   const perHour = await Promise.all(
     hourList.map(async (hk) => {
       const sealed = hk !== currentHour;
 
-      // 历史小时优先读压实键
+      // 历史小时优先读压实键（1 次读）
       if (sealed) {
         try {
           const packed = await kv.get(compactKey(targetHost, hk), 'json');
           if (packed) return { hour: hk, ...finalize(addInto(emptyAgg(), packed)) };
         } catch {
-          /* 压实键读取失败则回退到分片读 */
+          /* 压实键读取失败则回退到 partial 扫描 */
         }
       }
 
-      // 预算不足则跳过分片回退（当前小时始终保证读取，保证实时性）
-      if (sealed && shardReadBudget < SHARD_COUNT) {
+      // 扫描该小时所有 partial 键（前缀 `stat:{host}:{hour}:p:`）
+      const prefix = `${STAT_PREFIX}${targetHost}:${hk}:p:`;
+      const partials = [];
+      try {
+        let cursor;
+        do {
+          const res = await kv.list({ prefix, cursor, limit: 1000 });
+          for (const k of res.keys || []) partials.push(k.name);
+          cursor = res.list_complete ? null : res.cursor;
+        } while (cursor);
+      } catch {
+        /* list 失败则该小时返回空 */
+      }
+
+      // 预算保护：partial 数量过多时仅取预算内部分，避免打爆 subrequest
+      const overBudget = sealed && partials.length > partialReadBudget;
+      if (sealed && overBudget) {
         result.partial = true;
         return { hour: hk, ...finalize(emptyAgg()) };
       }
-      shardReadBudget -= SHARD_COUNT;
+      partialReadBudget -= partials.length;
 
       const agg = emptyAgg();
-      const shards = await Promise.all(
-        Array.from({ length: SHARD_COUNT }, (_, s) =>
-          kv.get(shardKey(targetHost, hk, s), 'json').catch(() => null)
-        )
-      );
       let hasData = false;
-      for (const s of shards) {
-        if (s) {
-          addInto(agg, s);
-          hasData = true;
+      if (partials.length > 0) {
+        const vals = await Promise.all(
+          partials.map((name) => kv.get(name, 'json').catch(() => null))
+        );
+        for (const v of vals) {
+          if (v) {
+            addInto(agg, v);
+            hasData = true;
+          }
         }
       }
 
@@ -292,7 +467,7 @@ export async function queryStats(ctx, host, hours = 24) {
         try {
           const snapshot = { ...agg, host: targetHost, hour: hk, compacted: true };
           await kv.put(compactKey(targetHost, hk), JSON.stringify(snapshot), {
-            expirationTtl: STAT_TTL_SEC,
+            expirationTtl: ttlSec(ctx),
           });
         } catch {
           /* 压实是纯优化，失败不影响正确性 */
@@ -312,30 +487,15 @@ export async function queryStats(ctx, host, hours = 24) {
 }
 
 /**
- * 给聚合对象补上派生字段（平均耗时、命中率）。
- * @param {Object} agg 聚合对象
- * @returns {Object} 带派生字段的对象
- */
-function finalize(agg) {
-  const total = agg.cacheHit + agg.cacheMiss;
-  return {
-    ...agg,
-    durAvg: agg.requests > 0 ? Math.round(agg.durSum / agg.requests) : 0,
-    cacheHitRate: total > 0 ? Math.round((agg.cacheHit / total) * 10000) / 100 : 0,
-  };
-}
-
-/**
  * 列出 KV 中有统计数据的所有 host（供管理后台的站点下拉框使用）。
  *
- * 注意：list 是相对昂贵的操作，且返回的 key 数量随站点数 × 小时数 × 8 增长。
- * 因此只扫描当前小时与上一小时，足够覆盖「近期有流量的站点」。
+ * 只扫描当前小时与上一小时（近期有流量的站点），降低 list 成本。
  *
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
  * @returns {Promise<string[]>} host 列表
  */
 export async function listStatHosts(ctx) {
-  const kv = getKV(ctx && ctx.env);
+  const kv = getKV();
   if (!kv || typeof kv.list !== 'function') return [];
 
   const hours = [hourKey(), hourKey(Date.now() - 3600000)];
@@ -347,12 +507,8 @@ export async function listStatHosts(ctx) {
       do {
         const res = await kv.list({ prefix: STAT_PREFIX, cursor, limit: 1000 });
         for (const k of res.keys || []) {
-          // key = stat:{host}:{hour}:{shard}
-          const rest = k.name.slice(STAT_PREFIX.length);
-          const parts = rest.split(':');
-          if (parts.length >= 3 && parts[parts.length - 2] === hk) {
-            hosts.add(parts.slice(0, parts.length - 2).join(':'));
-          }
+          const parsed = parseStatKey(k.name);
+          if (parsed && parsed.hour === hk) hosts.add(parsed.host);
         }
         cursor = res.list_complete ? null : res.cursor;
       } while (cursor);
@@ -364,13 +520,13 @@ export async function listStatHosts(ctx) {
 }
 
 /**
- * 删除指定 host 的全部统计分片（管理后台「清空统计」用）。
+ * 删除指定 host 的全部统计键（partial + compact，管理后台「清空统计」用）。
  * @param {import('../contracts.js').Ctx} ctx 请求上下文
  * @param {string} host 主机名
  * @returns {Promise<number>} 删除的 key 数量
  */
 export async function clearStats(ctx, host) {
-  const kv = getKV(ctx && ctx.env);
+  const kv = getKV();
   if (!kv || typeof kv.list !== 'function') return 0;
 
   const target = `${STAT_PREFIX}${normHost(host)}:`;
@@ -399,6 +555,5 @@ export async function clearStats(ctx, host) {
 
 /** 导出常量供其他模块复用。 */
 export const KV_STATS_META = Object.freeze({
-  shardCount: SHARD_COUNT,
-  ttlSec: STAT_TTL_SEC,
+  ttlSec: ttlSec({ env: {} }),
 });

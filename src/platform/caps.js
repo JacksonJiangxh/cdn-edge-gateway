@@ -225,6 +225,97 @@ export function decideKvBackend(nativeOk, redisOk, preference) {
 }
 
 /**
+ * 读取统计落盘后端开关（env.STATS_BACKEND）。
+ *
+ * 与 KV_BACKEND 不同：KV_BACKEND 决定「配置存哪」，而统计后端是**独立**开关，
+ * 因为它可能在「配置存厂商 KV」的同时「统计存自部署 KV」（EO/ESA 无 D1 时只能如此）。
+ *
+ * 取值归一为：'d1' | 'redis' | 'native' | 'auto' | 'none'。
+ * 无效值一律回落 'auto'（受实际部署可用性约束，见 resolveStatsBackend）。
+ * 注意：统一管理面不把本开关写进 cfg:global，避免「读配置前需先知道用哪个后端」的循环依赖。
+ *
+ * @param {Object} env 环境对象
+ * @returns {'d1'|'redis'|'native'|'auto'|'none'} 归一化后的偏好
+ */
+export function readStatsBackendPreference(env) {
+  const raw = env && env.STATS_BACKEND;
+  const v = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (v === 'd1' || v === 'd1only') return 'd1';
+  if (v === 'redis' || v === 'webdis' || v === 'self' || v === 'selfhost') return 'redis';
+  if (v === 'native' || v === 'kv' || v === 'platform') return 'native';
+  if (v === 'none' || v === 'off' || v === 'disabled') return 'none';
+  return 'auto';
+}
+
+/**
+ * 统计落盘键 TTL（秒）。默认 3 天（259200）。
+ *
+ * 跟随 KV 存储约束：EdgeOne KV 仅 1GB 空间、按占用计费，3 天窗口是命名空间主要
+ * 膨胀源，砍到 3 天约降 57% 空间占用；Cloudflare KV 收紧 TTL 对写次数无影响、纯省空间。
+ * 统计用途是看趋势/量级而非对账，3 天窗口已足够覆盖绝大多数运维排查。
+ * 查询窗口跟随本值推导，避免「窗口远大于存活期」造成的无效 KV 读。
+ *
+ * @param {Object} env 环境对象
+ * @returns {number} TTL 秒数
+ */
+export function readStatsTtl(env) {
+  const n = readNumEnv(env, 'STAT_TTL');
+  // 下限 60s（CF KV 硬性最小 expirationTtl），上限 30 天，避免误设导致即时过期或永久堆积
+  if (n != null) return Math.min(30 * 24 * 3600, Math.max(60, Math.floor(n)));
+  return 3 * 24 * 3600;
+}
+
+/**
+ * 统计聚合 host 数封顶（防止 KV/config 被构造 Host 头打爆空间或内存）。
+ * 默认 500，可由 STAT_MAX_HOSTS 覆盖（值需 > 0）。
+ * @param {Object} env 环境对象
+ * @returns {number} 最大 host 数
+ */
+export function readStatsMaxHosts(env) {
+  const n = readNumEnv(env, 'STAT_MAX_HOSTS');
+  if (n != null) return Math.max(1, Math.floor(n));
+  return 500;
+}
+
+/**
+ * 解析统计落盘实际生效的后端。
+ *
+ * 这是统计存储选型的**单一真相源**，stats/index.js 与 stats/kvDriver.js 都调用它，
+ * 保证路由与 KV 适配器选取一致。
+ *
+ * 决策规则（硬约束：选了未部署的后端 → 直接判定 none，**绝不静默回退到其它 KV**）：
+ *   - 'none'           → none（统计完全禁用，零值降级）
+ *   - 'd1'             → 仅当 caps.hasD1 时生效，否则 none
+ *   - 'redis'          → 仅当 caps.kvRedis（自部署 Webdis）时生效，否则 none
+ *   - 'native'         → 仅当 caps.kvNative（平台厂商 KV）时生效，否则 none
+ *   - 'auto'（缺省）   → 在「已部署集合」中选优先级最高者：
+ *                        d1 > redis(自部署) > native(厂商)；都无则 none
+ *
+ * ⚠️ 关键约束：任何分支都不得把统计意外落到厂商 KV 侵蚀其读写次数额度。
+ * 因此显式选 native 但没部署 → none（而非落到 redis）；auto 只选「已部署的最高优先级」，
+ * 不会把统计塞给没被选中的 KV。
+ *
+ * @param {Object} env 环境对象
+ * @param {import('../contracts.js').Caps} [caps] 可选，未传时内部 detectCaps
+ * @returns {'d1'|'redis'|'native'|'none'} 实际生效后端
+ */
+export function resolveStatsBackend(env, caps) {
+  const c = caps || detectCaps(env);
+  const pref = readStatsBackendPreference(env);
+
+  if (pref === 'none') return 'none';
+  if (pref === 'd1') return c.hasD1 ? 'd1' : 'none';
+  if (pref === 'redis') return c.kvRedis ? 'redis' : 'none';
+  if (pref === 'native') return c.kvNative ? 'native' : 'none';
+
+  // auto：在已部署集合中选优先级最高者
+  if (c.hasD1) return 'd1';
+  if (c.kvRedis) return 'redis';
+  if (c.kvNative) return 'native';
+  return 'none';
+}
+
+/**
  * 判断 env 上某个绑定是否为「有效的 D1 绑定」（prepare 方法标志）。
  * @param {any} binding 待检测对象
  * @returns {boolean} 是否像 D1
