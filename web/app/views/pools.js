@@ -125,8 +125,6 @@ export
     // 类型一经创建不可随意切换：single→pool 允许（加源站即升级），pool→single 会丢数据故禁止
     const kind = forceKind || poolKind(pool);
     const isSingle = kind === 'single';
-    // socket 引擎已弃用，恒为 disabled；hasRawIpFetch 仅作语义占位（CF 上裸 IP+SNI 由 fetchEngine 自动兜底）
-    const socketDisabled = !(APP_DATA.info && APP_DATA.info.caps && APP_DATA.info.caps.hasRawIpFetch);
 
     const originList = el('div', { id: 'origin-list' });
     // 调度策略下拉需在 addOrigin 之前创建：源站行里的「权重」字段要按策略显隐
@@ -154,8 +152,7 @@ export
       // 源站组只负责「地址 + 负载均衡」，回源 Host / 路径 / 请求头等一律在规则引擎里绑定
       o = o || { id: '', enabled: true, order: 1, weight: 1, engine: 'fetch', scheme: 'https', addr: '', port: 443 };
       const engineSel = select('', [], '', [
-        { value: 'fetch', label: 'fetch（支持自定义 Host）' },
-        { value: 'socket', label: 'socket（已弃用）', disabled: true },
+        { value: 'fetch', label: 'fetch（标准回源，支持自定义 Host）' },
         { value: 'r2', label: 'r2（回源到 R2 桶，仅 CF）', disabled: !(APP_DATA.info && APP_DATA.info.caps && APP_DATA.info.caps.hasR2) },
         { value: 'cnb', label: 'cnb（CNB 仓库 raw，自动生成的规则）' },
         { value: 'github', label: 'github（GitHub 仓库 raw，自动生成的规则）' },
@@ -164,8 +161,7 @@ export
       engineSel.className = 'input o-engine';
       // 不同引擎：地址格式 + 提示不同（先选引擎，再据此切换地址占位与可见字段）
       const ENGINE_ADDR = {
-        fetch: { ph: '域名 / IP（可带端口），如 storage.example.net 或 1.2.3.4:8080', hint: '你的真实服务器地址（fetch 为标准 HTTP 回源）。' },
-        socket: { ph: '真实目标主机（域名/IP，可带端口），如 origin.internal:9000', hint: 'TCP 透传（已弃用）。' },
+        fetch: { ph: '域名 / IP（可带端口），如 storage.example.net 或 1.2.3.4:8080', hint: '你的真实服务器地址（fetch 为标准 HTTP 回源，支持自定义 Host 头）。' },
         r2: { ph: 'R2 桶名，如 my-bucket（地址栏隐藏，改用下方 R2 字段）', hint: '回源到 R2 桶（仅 CF）；地址由下方 R2 绑定决定。' },
         cnb: { ph: '仓库地址，如 https://cnb.cool/owner/repo', hint: 'CNB 仓库型引擎：地址栏隐藏，改用下方仓库字段。' },
         github: { ph: '仓库地址，如 https://github.com/owner/repo', hint: 'GitHub 仓库型引擎：地址栏隐藏，改用下方仓库字段。' },
@@ -226,15 +222,15 @@ export
       // 回源 Host 三选项（与「新建站点」单一源站保持一致）：
       //   accel  = 加速域名（站点 Host）
       //   origin = 回源域名（源站自身 addr，默认）
-      //   custom = 自定义域名（仅 socket 真正生效；fetch 平台会静默丢弃）
+      //   custom = 自定义域名（fetch 引擎原生支持，CF/EO/ESA 三平台均生效）
       const fHostMode = select('', [], (o.hostHeader?.mode || 'origin'), [
         { value: 'accel', label: '加速域名（站点 Host）' },
         { value: 'origin', label: '回源域名（源站自身地址）' },
         { value: 'custom', label: '自定义域名' },
       ], 'o-host-mode');
       const fHostCustom = el('input', { class: 'input o-host-custom', value: o.hostHeader?.mode === 'custom' ? (o.hostHeader.custom || '') : '', placeholder: '如 api1.internal' });
-      const hostField = field('回源 Host（该源站专用）', el('div', { class: 'host-mode-wrap' }, [fHostMode, fHostCustom]), '这台源站回源时使用的 Host 头；默认「回源域名」即用源站自身地址，避免误用加速域名去公网源站拉数据。⑨规则再设 Host 会覆盖它。');
-      const hostNote = el('div', { class: 'hint', text: 'fetch 引擎下自定义 Host 由回源地址决定、平台会静默丢弃；如需真正自定义 Host 请把引擎改为 socket。cnb/github 由引擎常量固定回源域名，此处选择仅作示意。' });
+      const hostField = field('回源 Host（该源站专用）', el('div', { class: 'host-mode-wrap' }, [fHostMode, fHostCustom]), '这台源站回源时使用的 Host 头；默认「回源域名」即用源站自身地址，避免误用加速域名去公网源站拉数据。fetch 引擎原生支持自定义 Host（CF/EO/ESA 三平台均生效）。⑨规则再设 Host 会覆盖它。');
+      const hostNote = el('div', { class: 'hint', text: 'fetch 引擎原生支持自定义 Host 头（CF/EO/ESA 三平台均生效），可直接选「自定义域名」回源。cnb/github 由引擎常量固定回源域名，此处选择仅作示意。' });
       // 别名（仅展示用，方便在列表里区分）
       // 源站名称（折叠时显示在标题行；对标规则卡「规则名称」）
       const nameInput = el('input', { class: 'input o-name', value: o.name || '', placeholder: '如 主站 / 北京备份' });
@@ -258,7 +254,7 @@ export
         portField.style.display = (isR2 || isRepo) ? 'none' : '';
         schemeField.style.display = (isR2 || isRepo) ? 'none' : '';
         // 回源 Host 选择器：仓库型（cnb/github）与 r2 引擎由代码层引擎常量自动约定，
-        // 不再暴露给用户选择（与后端 buildOriginUrl 引擎优先逻辑一致）。fetch/socket 才展示。
+        // 不再暴露给用户选择（与后端 buildOriginUrl 引擎优先逻辑一致）。fetch 才展示。
         const showHost = !(isR2 || isRepo);
         hostField.style.display = showHost ? '' : 'none';
         hostNote.style.display = showHost ? '' : 'none';
@@ -278,7 +274,7 @@ export
       ]);
       const body = el('div', { class: 'origin-detail' }, [
         nameField,
-        field('引擎类型', engineSel, '先选引擎，下方地址格式与字段随之变化：① fetch=标准 HTTP 回源；② socket=已弃用；③ r2=回源到 R2 桶（仅 CF）；④ cnb/github=仓库型引擎（自动生成重写+请求头规则）。可被⑨规则覆盖。'),
+        field('引擎类型', engineSel, '先选引擎，下方地址格式与字段随之变化：① fetch=标准 HTTP 回源（支持自定义 Host 头）；② r2=回源到 R2 桶（仅 CF）；③ cnb/github=仓库型引擎（自动生成重写+请求头规则）。可被⑨规则覆盖。'),
         addrField,
         portField,
         schemeField,

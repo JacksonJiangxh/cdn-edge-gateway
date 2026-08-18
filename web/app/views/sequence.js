@@ -267,7 +267,7 @@ export   async function renderTrafficSequence() {
         ['⑭.1 合并本源站配置', '源站级打底 + ⑤⑧⑨ 规则级覆盖，形成回源改写输入'],
         ['⑭.2 构造回源 URL', '落实 ⑤「URL 重写」与 ⑨「Origin Rules」的路径 / Host 改写'],
         ['⑭.3 构造回源请求头', '源站 extraHeaders + ⑧「修改请求头」规则的改写 + 客户端IP'],
-        ['⑭.4 选择引擎并发起', 'fetch / socket 引擎按源站配置分派（真正发请求）'],
+        ['⑭.4 选择引擎并发起', 'fetch 引擎按源站配置分派（CF 裸 IP 场景内部自动走 socket 兜底，真正发请求）'],
         ['⑭.5 处理响应 / 异常', '命中 retryOn 状态码或异常 → 换下一源站'],
       ];
       flow.appendChild(el('div', { class: 'seq-substeps' },

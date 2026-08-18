@@ -811,8 +811,10 @@ export function normRule(input, idx) {
     errors.push(`${label} 回源 Host 为 custom 时必须填写 custom 值`);
   }
 
-  // 规则级回源连接参数（⑨ Origin Rules）：覆盖源站物理属性，空串/0 表示回退源站
-  const aEngine = enumOf(a.engine, ['', 'fetch', 'socket', 'r2'], '');
+  // 规则级回源连接参数（⑨ Origin Rules）：覆盖源站物理属性，空串/0 表示回退源站。
+  // 规则引擎同源站级，socket 已弃用，仅允许 fetch / r2（与 normOrigin 对齐，
+  // 历史残留的 'socket' 经 enumOf 归一为空串即回退源站引擎）。
+  const aEngine = enumOf(a.engine, ['', 'fetch', 'r2'], '');
   const aScheme = enumOf(a.scheme, ['', 'http', 'https'], '');
   const aPort = int(a.port, 0, 0, 65535);
 
@@ -1374,8 +1376,10 @@ function normOrigin(input, idx) {
   const label = `源站[${idx}]`;
   if (!isObj(input)) return { value: null, errors: [`${label} 不是合法对象`] };
 
-  // 枚举仍接受 cnb/github 以兼容历史数据，但会归一为 fetch（见 normRepoOrigin）
-  const engine = enumOf(input.engine, ['fetch', 'socket', 'r2', 'cnb', 'github'], DEFAULT_ORIGIN.engine);
+  // 枚举仍接受 cnb/github 以兼容历史数据，但会归一为 fetch（见 normRepoOrigin）。
+  // socket 引擎已彻底弃用：历史残留的 engine:'socket' 在此归一为 'fetch'，
+  // 避免存量配置落盘后运行时走到 dispatch 的 socket 兜底分支而崩溃（自定义 Host 现由 fetch 原生支持）。
+  const engine = enumOf(input.engine, ['fetch', 'r2', 'cnb', 'github'], DEFAULT_ORIGIN.engine);
 
   // R2 回源：不需要 addr/scheme/port/hostHeader，只校验绑定与 key 配置
   if (engine === 'r2') {
@@ -1407,21 +1411,15 @@ function normOrigin(input, idx) {
   // hostHeader
   const hhIn = isObj(input.hostHeader) ? input.hostHeader : {};
   // 仓库型引擎（cnb/github）回源 host 由引擎常量（resolveRepoDomain）固定，
-  // 源站级 hostHeader 保持 inherit 让其走引擎常量；其余引擎（fetch/socket 等）
+  // 源站级 hostHeader 保持 inherit 让其走引擎常量；其余引擎（fetch 等）
   // 默认 origin（回源域名 = 源站自身 addr），避免被站点级 defaultHostHeader（accel）兜底吃掉。
+  // fetch 引擎原生支持自定义 Host 头（CF/EO/ESA 三平台均生效，见 fetchEngine/headers/dispatch），
+  // 故 client / custom 模式在 fetch 下完全合法，不再拦截。
   const hhDefaultMode = (engine === 'cnb' || engine === 'github') ? 'inherit' : 'origin';
   const hhMode = enumOf(hhIn.mode, ['inherit', 'origin', 'client', 'custom'], hhDefaultMode);
   const hhCustom = str(hhIn.custom, '', LIMITS.HOST_MAX).toLowerCase();
   if (hhMode === 'custom' && !hhCustom) {
     errors.push(`${label} hostHeader 为 custom 时必须填写 custom 值`);
-  }
-
-  // fetch 引擎无法自定义 Host 头（Cloudflare 会静默丢弃），提前警告而非静默失效
-  if (engine === 'fetch' && (hhMode === 'client' || hhMode === 'custom')) {
-    errors.push(
-      `${label} fetch 引擎不支持自定义 Host 头（平台限制会静默丢弃），` +
-        `请改用 socket 引擎（仅 Cloudflare Workers）或将 hostHeader 设为 inherit`
-    );
   }
 
   // ---- 源站级回源元数据已收集完毕；流量序列字段（rewrite/头/cache/超时/跟随）
@@ -1603,17 +1601,9 @@ export function validatePool(input, caps) {
     c.errors.push('至少需要启用一个源站');
   }
 
-  // 引擎合法性：socket 已弃用，任何平台都不应使用（自定义 Host 由 fetch 原生支持，
-  // CF 上裸 IP+HTTPS+自定义 SNI 由 fetchEngine 内部自动走 socket 兜底）。
-  // caps 缺失（如离线校验、配置导入迁移）时不依赖 caps，直接按枚举值校验。
+  // 引擎合法性：socket 引擎已在 normOrigin 阶段归一为 fetch（自定义 Host 现由 fetch 原生支持），
+  // 故此处不会出现 socket；仅保留对已彻底移除的 api 引擎的拒绝（api 不走归一化）。
   origins.forEach((o, i) => {
-    if (o.engine === 'socket') {
-      c.errors.push(
-        `源站[${i}] 使用了已弃用的 socket 引擎：自定义回源 Host 已由 fetch 原生支持，` +
-          `CF 上裸 IP+HTTPS+自定义 SNI 由 fetchEngine 自动走 cloudflare:sockets 兜底，` +
-          `请移除 origin/rule 配置中的 engine:'socket'，改用默认 fetch。`
-      );
-    }
     if (o.engine === 'api') {
       c.errors.push(
         `源站[${i}] 使用了已移除的 api 引擎：请改用 cnb 或 github 仓库型引擎（回源到对应仓库 raw API）。`

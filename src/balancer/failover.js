@@ -592,12 +592,12 @@ async function dispatch(ctx, origin, originUrl, headers, timeoutMs, opts) {
     return fetchOrigin(ctx, origin, originUrl, headers, timeoutMs, opts);
   }
 
+  // socket 引擎已彻底弃用：自定义回源 Host 由 fetch 原生支持（CF/EO/ESA 三平台均生效），
+  // CF 上裸 IP+HTTPS+自定义 SNI 由 fetchEngine 内部自动走 cloudflare:sockets 兜底。
+  // 历史残留的 engine:'socket' 在 schema 层已归一为 'fetch'，此处直接按 fetch 拨号，
+  // 不再抛错（fail-open，避免存量/迁移配置触发运行时崩溃）。
   if (origin.engine === 'socket') {
-    throw new Error(
-      "engine 'socket' 已弃用：自定义回源 Host 已由 fetch 原生支持；" +
-      "CF 上裸 IP + HTTPS + 自定义 SNI 由 fetchEngine 内部自动走 cloudflare:sockets 兜底，" +
-      "请移除 origin/rule 配置中的 engine:'socket'。"
-    );
+    origin = { ...origin, engine: 'fetch' };
   }
 
   const hh = opts?.hostHeader;

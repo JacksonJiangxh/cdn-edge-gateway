@@ -94,8 +94,7 @@ export   async function openSiteDrawer(host, anchor) {
       fScheme = select('f-scheme', [], 'https', [{ value: 'https', label: 'https' }, { value: 'http', label: 'http' }]);
       fScheme.className = 'input';
       fEngine = select('f-engine', [], 'fetch', [
-        { value: 'fetch', label: 'fetch（标准回源，支持自定义 Host）' },
-        { value: 'socket', label: 'socket（已弃用：自定义 Host 现由 fetch 支持，勿用）', disabled: true },
+        { value: 'fetch', label: 'fetch（标准回源，支持自定义 Host 头）' },
         { value: 'r2', label: 'r2（回源到 R2 桶，仅 CF）', disabled: !(APP_DATA.info && APP_DATA.info.caps && APP_DATA.info.caps.hasR2) },
         { value: 'cnb', label: 'cnb（CNB 仓库 raw 预设：底层 fetch + 自动关联规则）' },
         { value: 'github', label: 'github（GitHub 仓库 raw 预设：底层 fetch + 自动关联规则）' },
@@ -375,17 +374,17 @@ export   async function openInitialOriginDrawer(host, anchor) {
       o = o || { addr: '', port: 443, scheme: 'https', engine: 'fetch', weight: 1 };
       const engineSel = select('', [], o.engine || 'fetch', [
         { value: 'fetch', label: 'fetch（支持自定义 Host）' },
-        { value: 'socket', label: 'socket（已弃用）', disabled: true },
         { value: 'r2', label: 'r2（回源到 R2 桶，仅 CF）', disabled: !(APP_DATA.info && APP_DATA.info.caps && APP_DATA.info.caps.hasR2) },
       ]);
       engineSel.className = 'input o-engine';
       // 源站级专用 Host：默认不启用（沿用站点级默认的回源 Host），
       // 仅当「覆盖」勾选时才出现输入框，避免无意义的冗余填写。
+      // fetch 引擎原生支持自定义 Host（CF/EO/ESA 均生效），故勾选即展示，不再依赖引擎判断。
       const hostCustom = o.hostHeader?.mode === 'custom' ? (o.hostHeader.custom || '') : '';
       const hostEn = el('input', { type: 'checkbox', class: 'o-host-en', checked: !!hostCustom });
       const hostInput = el('input', { class: 'input o-host', value: hostCustom, placeholder: '如 api1.internal（留空=用规则/站点级 Host）' });
-      const hostField = field('回源 Host 自定义值', hostInput, '仅这台源站回源时使用的 Host 头，会覆盖站点级「回源 Host」。留空等同不覆盖。');
-      const syncHost = () => { hostField.style.display = engineSel.value === 'socket' && hostEn.checked ? '' : 'none'; };
+      const hostField = field('回源 Host 自定义值', hostInput, '仅这台源站回源时使用的 Host 头，会覆盖站点级「回源 Host」。fetch 引擎原生支持自定义 Host（CF/EO/ESA 均生效）。留空等同不覆盖。');
+      const syncHost = () => { hostField.style.display = hostEn.checked ? '' : 'none'; };
       hostEn.onchange = syncHost;
       // ---- R2 引擎专用字段 ----
       const r2BindingIn = el('input', { class: 'input o-r2-binding', value: o.r2Binding || '', placeholder: 'CDN_R2（必须与 wrangler.toml 的 binding 一致）' });
@@ -423,11 +422,8 @@ export   async function openInitialOriginDrawer(host, anchor) {
         addrField.style.display = isR2 ? 'none' : '';
         portField.style.display = isR2 ? 'none' : '';
         schemeField.style.display = isR2 ? 'none' : '';
-        // 源站级自定义 Host 只有 socket 引擎能真正手写；fetch 下 Host 恒等于回源地址
-        const canHost = eng === 'socket';
-        hostEnLabel.style.display = canHost ? '' : 'none';
-        hostField.style.display = canHost && hostEn.checked ? '' : 'none';
-        // 引擎变化会影响站点级「回源 Host」可选项（fetch 不支持加速域名），通知其重算
+        // 源站级自定义 Host 由「覆盖」勾选控制显隐（见 syncHost），fetch 引擎原生支持自定义 Host，
+        // 故不再按引擎裁剪；引擎变化仅影响 R2 字段，不影响回源 Host 覆盖框。
         if (typeof onEngineChange === 'function') onEngineChange();
       };
       // 回源连接参数（协议/端口/引擎/Host）作为整池物理默认；⑨ Origin Rules
@@ -445,7 +441,7 @@ export   async function openInitialOriginDrawer(host, anchor) {
         schemeField,
         hostEnLabel,
         hostField,
-        field('引擎', engineSel, '回源方式（整池默认）：① fetch=标准回源，支持自定义 Host 头（CF/EO/ESA 均可用，Host 由「回源域名/地址」或规则级 hostHeader 决定）；② socket=已弃用（自定义 Host 现由 fetch 原生支持，CF 上裸 IP+HTTPS+自定义 SNI 由 fetchEngine 内部自动走 socket 兜底）；③ r2=回源到 R2 桶（仅 CF，需先在 wrangler.toml 绑定）。可被⑨规则覆盖。'),
+        field('引擎', engineSel, '回源方式（整池默认）：① fetch=标准回源，支持自定义 Host 头（CF/EO/ESA 均可用，Host 由「回源域名/地址」或规则级 hostHeader 决定）；② r2=回源到 R2 桶（仅 CF，需先在 wrangler.toml 绑定）。可被⑨规则覆盖。'),
         r2Fields,
         weightField,
         overrideHint,
@@ -490,14 +486,13 @@ export   async function openInitialOriginDrawer(host, anchor) {
     const hhCustom = el('input', { class: 'input', id: 'f-hh-custom', value: defaultHH.custom || '', placeholder: 'origin.example.com' });
     const hhField = field('回源 Host（回源时发给源站的 Host 头）', hhSel, '一般保持「加速域名」即可；仅当源站要求特定域名时才改。选择「自定义」后下方出现填写框。');
     const hhCustomField = field('回源 Host 自定义值', hhCustom);
-    // fetch 引擎无法自定义 Host（平台强制 Host = 回源 URL 的 hostname），
-    // 因此 accel / client 这类「Host 与回源地址不一致」的模式在 fetch 下不可实现。
-    // 只有 socket 引擎能手写 Host 头。这里根据新建单一源站实际选用的引擎动态裁剪可选项。
     const hhNote = el('div', { class: 'hint' });
+    // 回源 Host 模式：fetch 引擎原生支持全部模式（accel / origin / custom），
+    // CF/EO/ESA 三平台均生效，故不再按引擎裁剪可选项。
     const HH_ALL = [
-      { value: 'accel', label: '加速域名（即你访问的这个域名，默认）', socketOnly: true },
-      { value: 'origin', label: '源站域名（用源站自己的域名）', socketOnly: false },
-      { value: 'custom', label: '自定义（指定一个域名）', socketOnly: false },
+      { value: 'accel', label: '加速域名（即你访问的这个域名，默认）' },
+      { value: 'origin', label: '源站域名（用源站自己的域名）' },
+      { value: 'custom', label: '自定义（指定一个域名）' },
     ];
     // 收集正在填写的单一源站引擎；选择已有源站时由该源站自身定义，此处不判定。
     const inlineEngines = () => Array.from(inlineOriginList.querySelectorAll('.o-engine')).map((s) => s.value);
@@ -521,27 +516,21 @@ export   async function openInitialOriginDrawer(host, anchor) {
       }
       // 全部源站都是 r2 → 回源 Host 完全无意义（不走 HTTP 回源），整块隐藏
       const allR2 = engines.length > 0 && engines.every((e) => e === 'r2');
-      // 存在 socket 源站才允许 accel（Host ≠ 回源地址）
-      const hasSocket = engines.some((e) => e === 'socket');
 
       hhField.style.display = allR2 ? 'none' : '';
       hhNote.style.display = allR2 ? 'none' : '';
       if (allR2) { hhCustomField.style.display = 'none'; return; }
 
-      const allowed = HH_ALL.filter((o) => hasSocket || !o.socketOnly);
+      // fetch 引擎原生支持自定义 Host（CF/EO/ESA 均生效），三种模式均无差别开放
       const cur = hhSel.value;
       clear(hhSel);
-      allowed.forEach((o) => {
+      HH_ALL.forEach((o) => {
         const node = el('option', { value: o.value }, o.label);
         if (o.value === cur) node.selected = true;
         hhSel.appendChild(node);
       });
-      // 原选中项被裁掉（如 accel 在纯 fetch 下不可用）→ 回落到 origin
-      if (!allowed.some((o) => o.value === cur)) hhSel.value = 'origin';
 
-      hhNote.textContent = hasSocket
-        ? ''
-        : 'fetch / r2 引擎下平台强制 Host = 回源地址，无法伪装成加速域名，故「加速域名」选项不可用；需要该能力请将源站引擎改为 socket。';
+      hhNote.textContent = 'fetch 引擎原生支持自定义 Host 头（CF/EO/ESA 三平台均生效），可直接选「自定义域名」回源；选「加速域名」即以你访问的站点域名作为回源 Host。';
       hhNote.style.display = hhNote.textContent ? '' : 'none';
       hhCustomField.style.display = hhSel.value === 'custom' ? '' : 'none';
     };

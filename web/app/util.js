@@ -72,7 +72,6 @@ export function renderPlatBadge() {
   const caps = (APP_DATA.info && APP_DATA.info.caps) || {};
   const parts = ['平台: ' + (APP_DATA.info ? APP_DATA.info.platform : PLATFORM)];
   if (caps.hasEdgeCache) parts.push('边缘缓存 ✓');
-  if (!caps.hasSocket) parts.push('socket ✗');
   if (!caps.hasD1) parts.push('D1 ✗');
   badge.textContent = parts.join(' · ');
   badge.title = (APP_DATA.info && APP_DATA.info.limitations || []).map((l) => l.message).join('\n');

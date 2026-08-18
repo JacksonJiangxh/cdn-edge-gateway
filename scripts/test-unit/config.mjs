@@ -134,12 +134,39 @@ testA('validatePool: single 多个源站拒绝', (a) => {
   a.equal(res.ok, false, 'single 多源站拒绝');
 });
 
-testA('validatePool: 弃用 socket 引擎拒绝', (a) => {
+testA('validatePool: 历史 socket 引擎归一为 fetch 并被接受', (a) => {
+  // socket 引擎已彻底弃用：落盘时归一为 fetch（自定义 Host 现由 fetch 原生支持），
+  // 存量/迁移配置不再报错，避免误伤已上线源站。
   const res = validatePool({
     kind: 'single',
     origins: [{ engine: 'socket', addr: '1.1.1.1', port: 443 }],
   });
-  a.equal(res.ok, false, 'socket 引擎拒绝');
+  a.equal(res.ok, true, 'socket 引擎归一为 fetch 后被接受');
+  a.equal(res.value.origins[0].engine, 'fetch', 'engine 归一为 fetch');
+});
+
+testA('validatePool: fetch 引擎 + 自定义 Host 回源应被接受', (a) => {
+  // 核心修复：CF/EO/ESA 三平台 fetch 均原生支持自定义 Host 头，不再拦截。
+  const res = validatePool({
+    kind: 'single',
+    origins: [{
+      engine: 'fetch', addr: '1.1.1.1', port: 443,
+      hostHeader: { mode: 'custom', custom: 'api.internal' },
+    }],
+  });
+  a.equal(res.ok, true, 'fetch + custom Host 通过校验');
+  a.equal(res.value.origins[0].hostHeader.mode, 'custom', 'hostHeader.mode 落盘为 custom');
+});
+
+testA('validatePool: fetch 引擎 + accel Host 应被接受', (a) => {
+  const res = validatePool({
+    kind: 'single',
+    origins: [{
+      engine: 'fetch', addr: '1.1.1.1', port: 443,
+      hostHeader: { mode: 'accel' },
+    }],
+  });
+  a.equal(res.ok, true, 'fetch + accel Host 通过校验');
 });
 
 testA('validatePool: 已移除 api 引擎配置不被接受', (a) => {

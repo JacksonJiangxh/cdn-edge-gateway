@@ -338,8 +338,7 @@ export
         // 留空/0 = 沿用源站对应值，向后兼容旧版「源站级规则」语义。
         const engine = select('', [
           { value: '', label: '沿用源站引擎' },
-          { value: 'fetch', label: 'fetch（HTTP 回源）' },
-          { value: 'socket', label: 'socket（TCP 透传，仅 CF）' },
+          { value: 'fetch', label: 'fetch（HTTP 回源，支持自定义 Host）' },
           { value: 'r2', label: 'r2（R2 直读，仅 CF）' },
         ], a.engine || '');
         engine.className = 'input';

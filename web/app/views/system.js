@@ -19,7 +19,7 @@ export   async function renderSystem() {
       ['运行平台', (info && info.platform) || PLATFORM],
       ['版本', (info && info.version) || '—'],
       ['边缘缓存', caps.hasEdgeCache ? '可用' : '不可用（降级）'],
-      ['TCP Socket', caps.hasSocket ? '可用' : '不可用（socket 引擎降级 fetch）'],
+      ['裸 IP 兜底（CF sockets）', caps.hasSocket ? '可用' : '不可用（fetch 直连回源）'],
       ['D1', caps.hasD1 ? '可用' : '不可用'],
       ['统计驱动', (info && info.statsDriver) || 'none'],
     ];
