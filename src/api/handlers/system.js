@@ -20,11 +20,23 @@ import {
 } from '../../config/store.js';
 import { validateSite, validatePool } from '../../config/schema.js';
 import { getCacheStats } from '../../platform/cache.js';
+import {
+  resolveStatsBackend,
+  readStatsBackendPreference,
+  readStatsTtl,
+  readStatsMaxHosts,
+} from '../../platform/caps.js';
 
 /** GET /system/info */
 export async function info(ctx, global) {
   const g = global || (await getGlobal(ctx));
   const baked = isBakedMode(ctx);
+  // 统计落盘实际生效后端（独立于配置 KV 后端）：d1 / redis（自部署）/ native（厂商）/ none
+  // 由 STATS_BACKEND 平台开关 + 实际部署可用性共同决定，前端据此展示「配置存哪、统计存哪」。
+  const statsBackend = resolveStatsBackend(ctx.env, ctx.caps);
+  const statsBackendPref = readStatsBackendPreference(ctx.env);
+  const statsTtl = readStatsTtl(ctx.env);
+  const statsMaxHosts = readStatsMaxHosts(ctx.env);
   return ok({
     version: CONFIG_VERSION,
     platform: ctx.caps.platform,
@@ -43,6 +55,13 @@ export async function info(ctx, global) {
     configMode: baked ? 'baked' : ctx.caps.kvBackend === 'none' ? 'defaults' : 'kv',
     statsDriver: g?.statsDriver || 'none',
     statsEnabled: !!g?.statsEnabled,
+    // 统计落盘后端（独立于配置 KV 后端）：d1 / redis（自部署 Webdis）/ native（厂商 KV）/ none
+    statsBackend,
+    // STATS_BACKEND 平台开关偏好（auto / d1 / redis / native / none），只读展示
+    statsBackendPref,
+    // 统计聚合窗口 TTL（秒）与 host 封顶，供管理面直观呈现统计落盘约束
+    statsTtl,
+    statsMaxHosts,
     // 边缘缓存命中率。注意：仅统计当前 isolate，实例回收后归零，
     // 用于观察趋势而非精确计量。
     cache: getCacheStats(),

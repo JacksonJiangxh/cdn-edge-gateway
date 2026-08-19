@@ -50,6 +50,8 @@ async function request(path, opts = {}) {
   const init = {
     method,
     credentials: 'same-origin',
+    // 管理后台所有请求禁止走缓存，避免边缘节点返回陈旧数据（如系统信息/配置）
+    cache: 'no-store',
     headers: { Accept: 'application/json' },
   };
   if (body !== undefined) {

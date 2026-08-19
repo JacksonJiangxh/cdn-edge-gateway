@@ -15,11 +15,14 @@ export   async function renderSystem() {
     if (!info) { try { info = await API.system.info(); APP_DATA.info = info; } catch (e) { toast(e.message, 'err'); } }
 
     const caps = (info && info.caps) || {};
+    // 裸 IP fetch 可用性用 hasRawIpFetch（CF/EO 均为 true）；hasSocket 仅表示
+    // 「HTTPS + 自定义 SNI」的 CF sockets 兜底，二者语义不同，单独展示避免误判。
     const rows = [
       ['运行平台', (info && info.platform) || PLATFORM],
       ['版本', (info && info.version) || '—'],
       ['边缘缓存', caps.hasEdgeCache ? '可用' : '不可用（降级）'],
-      ['裸 IP 兜底（CF sockets）', caps.hasSocket ? '可用' : '不可用（fetch 直连回源）'],
+      ['裸 IP fetch（直连回源）', caps.hasRawIpFetch ? '可用' : '不可用（须走平台源站组兜底）'],
+      ['HTTPS+自定义 SNI 兜底（CF sockets）', caps.hasSocket ? '可用' : '不可用'],
       ['D1', caps.hasD1 ? '可用' : '不可用'],
       ['统计驱动', (info && info.statsDriver) || 'none'],
     ];
@@ -38,6 +41,30 @@ export   async function renderSystem() {
         caps.hasKV || eff === 'baked'
           ? `可用（生效：${effLabel}${nOk && rOk ? '；平台 KV 与 Webdis 均已配置' : ''}）`
           : '不可用（配置无法持久化！）',
+      ]);
+    }
+    // 统计落盘后端（独立于配置 KV 后端）：配置可存厂商 KV，统计独立存自部署 KV/D1。
+    // 后端透传 statsBackend（实际生效）/ statsBackendPref（STATS_BACKEND 偏好）/ 约束项。
+    {
+      const sb = info && info.statsBackend;
+      const sbPref = info && info.statsBackendPref;
+      const sbLabel =
+        sb === 'd1' ? 'D1' :
+        sb === 'redis' ? '自部署 Webdis' :
+        sb === 'native' ? '平台 KV' : '无（统计不可用）';
+      const prefText =
+        sbPref === 'auto' ? 'auto（未设置，按 d1>redis>native 自动选）' :
+        sbPref === 'd1' ? 'd1（强制 D1）' :
+        sbPref === 'redis' ? 'redis（强制自部署 Webdis）' :
+        sbPref === 'native' ? 'native（强制平台 KV）' :
+        sbPref === 'none' ? 'none（关闭统计）' : (sbPref || 'auto');
+      const ttl = info && typeof info.statsTtl === 'number' ? info.statsTtl : null;
+      const maxHosts = info && typeof info.statsMaxHosts === 'number' ? info.statsMaxHosts : null;
+      rows.push([
+        '统计落盘后端',
+        `生效：${sbLabel}（STATS_BACKEND=${prefText}）` +
+          (ttl != null ? `；聚合窗口 ${ttl}s` : '') +
+          (maxHosts != null ? `；host 封顶 ${maxHosts}` : ''),
       ]);
     }
     // 缓存观测：展示当前 isolate 的边缘缓存命中情况，帮助用户直观评估「缓存收益 /
