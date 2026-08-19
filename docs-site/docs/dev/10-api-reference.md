@@ -191,7 +191,7 @@ POST /{adminPath}/api/cache/purge
 
 ```bash
 curl "http://127.0.0.1:8799/__panel/api/system/info" -H "cookie: ecw_token=$TOK"
-# → {"platform":"eo","hasCacheApi":true,"cacheIsNodeLocal":true,"hasRawIpFetch":false,"hasSocket":false,"hasKV":true}
+# → {"platform":"eo","hasCacheApi":true,"cacheIsNodeLocal":true,"hasRawIpFetch":true,"hasSocket":false,"hasKV":true}
 ```
 
 ---

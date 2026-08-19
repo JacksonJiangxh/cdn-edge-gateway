@@ -21,6 +21,7 @@ import './resp-headers.mjs';
 import './balancer.mjs';
 import './security.mjs';
 import './platform.mjs';
+import './proxy.mjs';
 import './config.mjs';
 import './datasource.mjs';
 import './stats.mjs';

@@ -500,9 +500,16 @@ export function detectCaps(env) {
     // MEM_BUDGET_BYTES 在运行时覆盖（见 platform/memBudget.js）。
     // 预留 64KB 给运行时本身（编译后代码、栈、V8 内部开销），不计入应用内存。
     memBudgetBytes: DEFAULT_MEM_BUDGET_BYTES,
-    // 仅 Cloudflare 支持 fetch 直连裸 IP / 自定义端口 / 自定义 SNI
-    hasRawIpFetch: platform === 'cf',
-    // 仅 Cloudflare 有 cloudflare:sockets，用于「裸 IP + HTTPS + 自定义 SNI」内部兜底
+    // 支持「fetch 直连裸 IP / 自定义端口」的平台：
+    //   - CF：标准 fetch 直连裸 IP（HTTP 可用；HTTPS + 自定义 SNI 由 fetchEngine 内部走 cloudflare:sockets 兜底）。
+    //   - EO：官方文档（cloud.tencent.com/document/product/1552/81897 Fetch 页）列尽的运行时限制
+    //         仅含次数/并发/超时，未禁止裸 IP；fetch 基于 Web APIs 标准，允许直接 fetch 裸 IP。
+    //         仅 EO 无可编程 TCP，无法在代码层自建 SNI，故「HTTPS + 裸 IP + 自定义 SNI」需走
+    //         EO 平台源站组兜底（由控制台回源 Host 注入），代码层不作 sockets 兜底。
+    //   - ESA：官方文档明确不支持裸 IP / 自定义端口，false。
+    hasRawIpFetch: platform === 'cf' || platform === 'eo',
+    // 仅 Cloudflare 有 cloudflare:sockets，用于「Host 头 ≠ URL 主机名（即需要自定义 SNI）」时
+    // 的内部自动兜底（CF 上无论裸 IP 还是域名，只要回源 Host 与 URL hostname 不同就需自建 TCP 设 SNI）。
     hasSocket: platform === 'cf',
     hasD1: looksLikeD1(e.CDN_DB) || looksLikeD1(e.DB) || looksLikeD1(e.D1),
     hasKV: hasNativeKV || hasRedisKV,

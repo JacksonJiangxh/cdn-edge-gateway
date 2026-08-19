@@ -303,8 +303,9 @@ function buildLimitations(ctx) {
     list.push({
       key: 'rawIpFetch',
       message:
-        '当前平台不支持 fetch 直连裸 IP / 自定义端口 / 自定义 SNI（如 EdgeOne、ESA）。' +
-        '回源到裸 IP 源站须走平台侧源站组兜底；自定义回源 Host 头仍可用。',
+        '当前平台（ESA）不支持 fetch 直连裸 IP / 自定义端口。' +
+        'Cloudflare 与 EdgeOne 的 fetch 均支持直连裸 IP（EO 官方文档未禁止裸 IP）；' +
+        '仅 ESA 因官方限制须把裸 IP 源站走平台侧源站组兜底。自定义回源 Host 头三平台均可用。',
     });
   }
   if (!caps.hasD1) {

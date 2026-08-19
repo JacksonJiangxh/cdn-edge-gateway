@@ -125,7 +125,7 @@ flowchart TD
 
 ## 回源与缓存键（src/proxy）
 
-- `engines/`：按源站类型回源（http/https；EO 无裸 IP fetch 必须填域名）。
+- `engines/`：按源站类型回源（http/https；EO/CF 的 fetch 均支持裸 IP 直连；仅 ESA 必须填域名）。
 - 缓存键（cacheKey）：由 URL + 可配置查询参数 + 头构成，规则可定制。
 - 命中缓存则直接返回，不进源站（CF 还可能命中平台级 Workers Cache，连函数都不进）。
 

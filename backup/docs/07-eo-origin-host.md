@@ -147,7 +147,7 @@
 | 项目部署形态 | 自定义回源 Host 实现方式 |
 |---|---|
 | **CF（`CLOUD_PLATFORM=cf`，含 Workers 与 Pages）** | 代码层 `fetch` 即可「域名/裸IP 源站 + 自定义 Host」；HTTPS + 裸 IP + 自定义 SNI 由 `fetchEngine` 内部自动走 `cloudflare:sockets` 兜底，无需平台配置 |
-| **EO Makers（`CLOUD_PLATFORM=eo`，本文档）** | 代码层 `fetch` 即可「域名源站 + 自定义 Host」（Host 头随请求带）；EO `fetch` 不支持裸 IP，故「裸 IP + 自定义 Host + SNI」由本文档的 **EO 源站组 + 回源 HOST 头 / 规则引擎 Host Header 重写** 兜底 |
+| **EO Makers（`CLOUD_PLATFORM=eo`，本文档）** | 代码层 `fetch` 即可「域名/裸IP 源站 + 自定义 Host」（EO 官方 Fetch 文档未禁止裸 IP，标准 fetch 直连可用）；仅 EO 无可编程 TCP，「HTTPS + 裸 IP + 自定义 SNI」需走 **EO 源站组 + 回源 HOST 头 / 规则引擎 Host Header 重写** 兜底 |
 | **阿里云 ESA（`CLOUD_PLATFORM=esa`）** | 代码层 `fetch` 支持自定义 Host 头（仅改 HTTP 头，连接仍按 URL 域名 DNS）；ESA `fetch` 明确不支持 IP/自定义端口，裸 IP 场景须走平台侧源站组兜底 |
 
 **对接要点**：

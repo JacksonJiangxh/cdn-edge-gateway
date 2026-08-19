@@ -25,7 +25,7 @@
  * @property {number}  cacheSubreqLimit    Cache 操作与 fetch 共享的子请求预算（esa=32 硬限；其余宽松）
  * @property {boolean} cacheKeyHttpOnly    Cache API 的 put key 必须为 http(s) 协议 URL（esa 引擎不支持 https key，写入时强制降为 http）
  * @property {number}  maxSubRequests     每请求子请求（fetch）预算上限（esa=32 硬限且与 Cache 共享；cf/eo=1000 宽松）
- * @property {boolean} hasRawIpFetch      是否支持「fetch 直连裸 IP / 自定义端口 / 自定义 SNI」（仅 CF 支持；EO/ESA 的 fetch 仅支持域名，裸 IP 须走平台源站组兜底）
+ * @property {boolean} hasRawIpFetch      是否支持「fetch 直连裸 IP / 自定义端口」（CF / EO 支持：EO 官方 Fetch 文档未禁止裸 IP；ESA 官方明确不支持，须走平台源站组兜底）
  * @property {boolean} hasSocket          是否支持 cloudflare:sockets（仅 CF，用于裸 IP+HTTPS+自定义 SNI 的内部自动兜底）
  * @property {boolean} hasD1              是否绑定了 D1
  * @property {boolean} hasKV              是否有可用的 KV 持久化（平台 KV 或自部署 Webdis 任一）

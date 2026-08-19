@@ -1,35 +1,55 @@
 /**
  * fetch 回源引擎（默认引擎）
  * ----------------------------------------------------------------------------
- * 标准回源方式，适用于「源站是域名」或「源站是裸 IP（HTTP / CF 上 HTTPS）」的场景。
+ * 标准回源方式，适用于「源站是域名」或「源站是裸 IP（CF / EO 的 fetch 均支持直连）」的场景。
  *
- * 认知基线（2026-08 澄清，见 docs/07-eo-origin-host.md §五）：
+ * 认知基线（2026-08 澄清，见 docs/07-eo-origin-host.md §五，并据 EdgeOne 官方
+ * Fetch 文档 cloud.tencent.com/document/product/1552/81897 校正）：
  *   - fetch 可自定义 Host 头：CF / EO / ESA 三平台均支持。
  *     通过在 init.headers 中设置 Host 头即可让源站看到指定域名，例如：
  *       fetch(originUrl, { headers: { Host: 'bbb.example.com' } })
- *     EO / ESA 仅改 HTTP 头、连接仍按 URL 域名 DNS；CF 在 HTTP 下连裸 IP 直接可用。
+ *     CF / EO 的 fetch 均允许直接 fetch 裸 IP（EO 官方文档未禁止裸 IP，标准 fetch 行为）。
  *   - 不再需要 SOCKS 才能自定义 Host：socket 不再是可选 engine，仅作为 CF 上
- *     「裸 IP + HTTPS + 自定义 SNI」的内部自动兜底（见下方 SNI 分支与 socketEngine.js）。
+ *     「回源 Host ≠ URL 主机名（即需要自定义 SNI）」的内部自动兜底（见下方分支与 socketEngine.js）。
  *
- * 关于 HTTPS + 裸 IP 的 SNI 限制（仅 CF 相关）：
- *   CF 的 fetch() 会用 URL 中的主机名做 SNI 与 TLS 证书校验，而不是你设置的 Host 头。
- *   因此当 originUrl 是 https://<裸IP> 且需把 Host 头设成真实域名时，SNI 会是裸 IP、
- *   源站证书通常只签给域名 → TLS 握手失败。此时在 CF 上自动改走 cloudflare:sockets
- *   自建 TCP 并自行发送带正确 SNI/Host 的 HTTP 请求（socketEngine.rawTcpFetch）。
+ * 关于 SNI 的核心规则（全局内置，三平台语义一致）：
+ *   「实际回源 Host 是什么，SNI 就是什么」。
+ *     - 加速域名 A 回源、DNS 目标 B、Host=A  → SNI=A
+ *     - 回源域名回源、DNS 目标 B、Host=B     → SNI=B
+ *     - 自定义 Host C 回源、DNS 目标 B、Host=C → SNI=C
+ *   标准 fetch() 的 SNI 取的是【URL 里的主机名】，而非你设置的 Host 头。
+ *   因此只要「Host 头 ≠ URL hostname」（无论目标是裸 IP 还是域名），标准 fetch 的 SNI 就会
+ *   取成 URL hostname 而非 Host，导致源站证书（签给 Host）校验失败。
+ *   此场景下（且仅 CF 具备 cloudflare:sockets）自动改走 socketEngine 自建 TCP，
+ *   用 Host 头作为 SNI 发送正确的 HTTP 请求。EO 上若该场景无法用 sockets 覆盖
+ *   （无可编程 TCP），应把「自定义 Host + SNI」下沉到 EO 平台源站组兜底。
  */
 
 import { UpstreamError } from '../../utils/errors.js';
 
 /**
- * 判断给定 URL 是否为裸 IP（而非域名）。用于决定是否需要 SNI 兜底。
- * @param {URL|string} url
- * @returns {boolean}
+ * 判断「回源 Host 头是否与 URL 主机名不同」——即是否需要自定义 SNI。
+ *
+ * 规则（SNI 跟随 Host）：实际回源 Host 是什么，SNI 就是什么。标准 fetch 的 SNI
+ * 取的是 URL 里的主机名而非 Host 头，所以只要 Host 头 ≠ URL hostname，标准 fetch
+ * 的 SNI 就会取错（取成 URL hostname），导致源站证书（签给 Host）校验失败。
+ * 此场景在 CF 上需改走 cloudflare:sockets 自建 TCP 用 Host 头作 SNI。
+ *
+ * 注意：与是否裸 IP 无关。裸 IP 只是其中一种「Host ≠ URL hostname」的情形；
+ * 加速域名 A 回源但 DNS 目标 B（Host=A、URL=B）同样命中本判断。
+ *
+ * @param {URL|string} url 回源 URL（其 hostname 为连接/TLS 目标）
+ * @param {Headers} headers 已构造好的回源请求头（含 Host 头）
+ * @returns {boolean} Host 头与 URL hostname 不同则为 true（需要自定义 SNI）
  */
-function isBareIp(url) {
-  const host = (typeof url === 'string' ? new URL(url).hostname : url.hostname) || '';
-  // IPv6 包裹在 [] 中，去掉括号再判
-  const bare = host.startsWith('[') ? host.slice(1, -1) : host;
-  return /^\d{1,3}(\.\d{1,3}){3}$/.test(bare) || bare.includes(':');
+export function needCustomSni(url, headers) {
+  const urlHost = (typeof url === 'string' ? new URL(url).hostname : url.hostname) || '';
+  const hostHeader = headers.get('Host');
+  // 无 Host 头或 Host 头与 URL hostname 一致 → 标准 fetch 的 SNI 即正确，无需兜底
+  if (!hostHeader) return false;
+  // Host 头可能带端口（host:port），只比主机名部分
+  const hostName = hostHeader.split(':')[0];
+  return hostName !== urlHost;
 }
 
 /**
@@ -77,14 +97,16 @@ export async function fetchOrigin(ctx, origin, originUrl, headers, timeoutMs, op
     }
   }
 
-  // CF + HTTPS + 裸 IP：fetch 的 SNI 会取 URL 里的 IP 导致证书校验失败，
-  // 自动改走 cloudflare:sockets 自建 TCP（自行发送正确的 SNI/Host）。
+  // CF + HTTPS + 需要自定义 SNI（Host 头 ≠ URL hostname）：标准 fetch 的 SNI 取 URL
+  // hostname 而非 Host 头，证书校验失败，自动改走 cloudflare:sockets 自建 TCP
+  // （用 Host 头作 SNI 发送正确的 HTTP 请求）。场景包括：裸 IP 回源、加速域名 A 回源
+  // 但 DNS 目标 B（Host=A）、以及任意自定义 Host 回源——SNI 跟随 Host 即可正确握手。
   if (
     ctx.caps &&
     ctx.caps.platform === 'cf' &&
     ctx.caps.hasSocket &&
     String(originUrl).startsWith('https://') &&
-    isBareIp(originUrl)
+    needCustomSni(originUrl, headers)
   ) {
     clearTimeout(timer);
     const { rawTcpFetch } = await import('./socketEngine.js');

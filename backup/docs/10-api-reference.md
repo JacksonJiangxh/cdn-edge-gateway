@@ -196,9 +196,9 @@ Content-Type: application/json
 **示例**：查看能力
 ```bash
 curl "http://127.0.0.1:8799/__panel/api/system/info" -H "cookie: ecw_token=$TOK"
-# → {"platform":"eo","hasEdgeCache":true,"hasCacheApi":true,"cacheIsNodeLocal":true,"eoEdgeCache":true,"hasRawIpFetch":false,"hasSocket":false,"hasD1":false,"hasKV":true}
+# → {"platform":"eo","hasEdgeCache":true,"hasCacheApi":true,"cacheIsNodeLocal":true,"eoEdgeCache":true,"hasRawIpFetch":true,"hasSocket":false,"hasD1":false,"hasKV":true}
 ```
-> 注意：EdgeOne 上 `hasEdgeCache:true`（边缘缓存已启用）、`hasCacheApi:true`（原生支持 `caches.default`，但 `cacheIsNodeLocal:true` 仅节点本地化、不跨节点复制）、`eoEdgeCache:true`（支持同站 fetch 委托）、`hasRawIpFetch:false`（fetch 不支持裸 IP）、`hasSocket:false`（无 cloudflare:sockets）。
+> 注意：EdgeOne 上 `hasEdgeCache:true`（边缘缓存已启用）、`hasCacheApi:true`（原生支持 `caches.default`，但 `cacheIsNodeLocal:true` 仅节点本地化、不跨节点复制）、`eoEdgeCache:true`（支持同站 fetch 委托）、`hasRawIpFetch:true`（fetch 支持裸 IP 直连，官方 Fetch 文档未禁止裸 IP）、`hasSocket:false`（无 cloudflare:sockets，故「HTTPS+裸IP+自定义 SNI」需平台源站组兜底）。
 >
 > 阿里云 ESA 示例：`{"platform":"esa","hasEdgeCache":true,"hasCacheApi":true,"cacheSingleInstance":true,"cacheKeyHttpOnly":true,"cacheSubreqLimit":32,"hasRawIpFetch":false,"hasSocket":false,"hasD1":false,"hasKV":true}` —— `cacheSingleInstance:true`（全局 `cache` 单实例、非 `caches.default`）、`cacheKeyHttpOnly:true`（`put` key 须 http URL）、`cacheSubreqLimit:32`（Cache 与 fetch 共享）。
 

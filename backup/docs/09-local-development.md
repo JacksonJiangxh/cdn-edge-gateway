@@ -86,7 +86,7 @@ curl http://localhost:8799/__health
 
 ```json
 {"ok":true,"platform":"eo","caps":{"platform":"eo","hasEdgeCache":true,
-"hasCacheApi":true,"cacheIsNodeLocal":true,"eoEdgeCache":true,"hasRawIpFetch":false,"hasSocket":false,"hasD1":false,
+"hasCacheApi":true,"cacheIsNodeLocal":true,"eoEdgeCache":true,"hasRawIpFetch":true,"hasSocket":false,"hasD1":false,
 "hasKV":true,"hasR2":false},"time":"..."}
 ```
 
@@ -97,7 +97,7 @@ curl http://localhost:8799/__health
 | `ok` | `true` | 服务正常 |
 | `hasKV` | **`true`** | 配置存储可用。**若为 `false`，登录会 500** |
 | `platform` | `eo` | 本地默认模拟 EdgeOne 能力集（由 `CLOUD_PLATFORM=eo` 声明） |
-| `hasRawIpFetch` | `false` | 本地/EO 不支持 fetch 直连裸 IP（CF 才为 true） |
+| `hasRawIpFetch` | `true` | 本地/EO 支持 fetch 直连裸 IP（CF / EO 均为 true，仅 ESA 为 false） |
 | `hasSocket` | `false` | 本地/EO 无 cloudflare:sockets，**属正常** |
 | `hasD1` / `hasR2` | `false` | 本地未绑定，不影响主流程 |
 

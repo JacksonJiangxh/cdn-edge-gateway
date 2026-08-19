@@ -153,7 +153,7 @@ KV 是 CF 与 EO **共用**的存储层，但计费口径不同，优化必须�
 
 > 配置内存缓存（`configCacheTtl`）是数据面压低 KV 访问的核心杠杆：绝大多数请求命中 isolate 内 L1 缓存后 KV 冷读次数归零。EO 上进一步抬高低限，是因为 EO KV 跨节点最终一致约 60s，缓存窗口过短既拉高延迟又读不到新值。
 | 自定义回源 Host（fetch 设 Host 头） | ✅ | ✅ | ✅（仅改 HTTP 头，连接按 URL 域名 DNS） |
-| TCP Socket 裸 IP + 自定义 SNI 回源 | ✅（CF 上由 fetchEngine 内部自动走 socket 兜底） | ❌（无 socket 且 fetch 不支持裸 IP；裸 IP 走平台源站组兜底） | ❌（fetch 不支持 IP/自定义端口；裸 IP 走平台源站组兜底） |
+| TCP Socket 裸 IP + 自定义 SNI 回源 | ✅（CF 上由 fetchEngine 内部自动走 socket 兜底） | ⚠️（EO fetch 支持裸 IP 直连；仅无 socket，故「HTTPS+裸IP+自定义 SNI」走 EO 源站组兜底） | ❌（fetch 不支持 IP/自定义端口；裸 IP 走平台源站组兜底） |
 | 图片优化(webp/avif) | ✅ | ❌ | EO 下降级为原图 |
 
 > 部署厂商由环境变量 `CLOUD_PLATFORM` 显式声明，取值 `cf` / `eo` / `esa`，程序不再靠运行时指纹猜测。本地开发可用 `CLOUD_PLATFORM=eo` 强制按 EO 降级，确保「本地 = 线上」。详见 [09 本地开发](./09-local-development.md)。

@@ -5,13 +5,18 @@
  *
  * 为什么需要它？
  *   CF 的 fetch() 会用 URL 中的主机名做 SNI 与 TLS 证书校验，而不是你设置的 Host 头。
- *   当 originUrl 是 https://<裸IP> 且 Host 头需设成真实域名时，SNI 取的是裸 IP、
- *   源站证书通常只签给域名 → TLS 握手失败。此时只能自己开 TCP、自行发送带正确
- *   SNI/Host 的 HTTP/1.1 请求。
+ *   本模块唯一不可替代的价值是：自建 TCP 时把 SNI 设成【Host 头的值】，使 SNI 跟随
+ *   Host（实际回源 Host 是什么，SNI 就是什么）。
+ *
+ *   触发场景（由 fetchEngine 判定「Host 头 ≠ URL hostname」后转入，CF 专属）：
+ *     - 裸 IP 回源：URL=https://<裸IP>，Host=真实域名 → SNI=域名
+ *     - 加速域名 A 回源、DNS 目标 B：URL=https://B，Host=A → SNI=A
+ *     - 自定义 Host C 回源：URL=https://B，Host=C → SNI=C
+ *   当 Host 头就是 URL hostname（或 Host 缺失）时不会走本模块，标准 fetch 的 SNI 已正确。
  *
  *   注意：自定义 Host 头本身【不需要】socket —— fetch 在 CF/EO/ESA 上都能通过
  *   init.headers 设置 Host（见 fetchEngine.js 注释）。socket 的唯一不可替代价值是
- *   在裸 IP + HTTPS 时把 SNI 设成域名而非 URL 里的 IP。
+ *   在「Host 头 ≠ URL hostname」时用 Host 头作 SNI 自建 TCP。
  *
  * 平台兼容性：
  *   cloudflare:sockets 只在 CF 上存在。EdgeOne / ESA / Node 打包时，
@@ -26,6 +31,21 @@
 
 /** 读取响应头阶段的最大字节数，防止畸形响应把内存吃满 */
 const MAX_HEADER_BYTES = 64 * 1024;
+
+/**
+ * 计算自建 TCP 的 SNI —— SNI 跟随 Host（实际回源 Host 是什么，SNI 就是什么）。
+ * 取 Host 头的值作为 SNI；Host 头是裸 IP 时 SNI 就是该裸 IP（符合全局 SNI 规则）；
+ * Host 缺失时返回空串（调用方回退用 URL hostname，即标准 fetch 默认行为）。
+ *
+ * @param {URL|string} originUrl 回源 URL
+ * @param {Headers} headers 已构造好的回源请求头（已含自定义 Host 头）
+ * @returns {string} servername（Host 头主机名部分），无 Host 头时返回 ''
+ */
+export function computeServername(originUrl, headers) {
+  const hostFromHeader = headers.get('Host');
+  if (!hostFromHeader) return '';
+  return hostFromHeader.split(':')[0];
+}
 
 /**
  * 通过原始 TCP 套接字向源站发起 HTTP/1.1 请求（CF 专属 SNI 兜底）。
@@ -47,15 +67,14 @@ export async function rawTcpFetch(originUrl, headers, timeoutMs, opts, ctx) {
   // 裸 IP
   const hostname = url.hostname;
 
-  // TLS：SNI 必须设成 Host 头里的域名（而非 URL 里的裸 IP），否则证书校验失败。
+  // TLS：SNI 跟随 Host（实际回源 Host 是什么，SNI 就是什么）。
+  // 取 Host 头的值作为 SNI；Host 头是裸 IP 时 SNI 就是该裸 IP（符合全局 SNI 规则）；
+  // Host 缺失时回退用 URL hostname（标准 fetch 的默认行为）。
   const secure = url.protocol === 'https:';
   const options = secure ? { secureTransport: 'on', allowHalfOpen: false } : { allowHalfOpen: false };
   if (secure) {
-    const hostFromHeader = headers.get('Host');
-    // SNI 取 Host 头；若 Host 头是裸 IP 或缺失，说明没有自定义域名需求，回退用 URL hostname
-    if (hostFromHeader && !/^\d{1,3}(\.\d{1,3}){3}$/.test(hostFromHeader.split(':')[0])) {
-      options.servername = hostFromHeader.split(':')[0];
-    }
+    const servername = computeServername(url, headers);
+    if (servername) options.servername = servername;
   }
 
   const socket = connect({ hostname, port }, options);

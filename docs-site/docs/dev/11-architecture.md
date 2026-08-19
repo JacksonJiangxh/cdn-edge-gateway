@@ -61,7 +61,7 @@ flowchart TD
 | 能力 | cf | eo | esa |
 |---|---|---|---|
 | TCP 回源 (hasSocket) | ✅ | ❌ | ❌ |
-| 裸 IP fetch (hasRawIpFetch) | ✅ | ❌ | ❌ |
+| 裸 IP fetch (hasRawIpFetch) | ✅ | ✅ | ❌ |
 | D1 | ✅ | ❌ | ❌ |
 | R2 | ✅ | ❌ | ❌ |
 | 原生 KV | ✅ (CDN_KV) | ✅ (CDN_KV) | ❌（禁用 EdgeKV，走 REDIS_URL/烘焙） |
@@ -74,7 +74,9 @@ flowchart TD
 
 **降级含义**：
 
-- EO 无裸 IP fetch → 源站必须填**可解析域名**（不能用 IP 直连回源）。
+- EO 支持裸 IP fetch（官方 Fetch 文档未禁止裸 IP，标准 fetch 行为）；仅 EO 无可编程 TCP，
+  「HTTPS + 裸 IP + 自定义 SNI」需走 **EO 平台源站组 + 回源 Host** 兜底（代码层不建 socket）。
+- ESA 无裸 IP fetch（官方明确不支持）→ 源站必须填**可解析域名**（不能用 IP 直连回源）。
 - ESA 无原生 KV → 配置走 **REDIS_URL (Webdis)** 或**静态烘焙**，不能依赖运行时 KV。
   （CF / EO 亦可配 `REDIS_URL` 使用同一份外置 Webdis，且**并存时默认优先 Webdis**。）
 - ESA cache 全局单例 + key 须 http → `put` 用 http URL，自动降级。

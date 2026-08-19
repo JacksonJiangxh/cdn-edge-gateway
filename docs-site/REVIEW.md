@@ -101,7 +101,7 @@
 | 字段 | cf | eo | esa |
 |---|---|---|---|
 | hasSocket（TCP 回源） | ✅ | ❌ | ❌ |
-| hasRawIpFetch（裸 IP fetch） | ✅ | ❌ | ❌ |
+| hasRawIpFetch（裸 IP fetch） | ✅ | ✅ | ❌ |
 | hasD1 | ✅ | ❌ | ❌ |
 | hasR2 | ✅ | ❌ | ❌ |
 | hasKV | ✅（CDN_KV） | ✅（CDN_KV） | ❌（禁用 EdgeKV，走 REDIS_URL/烘焙） |
