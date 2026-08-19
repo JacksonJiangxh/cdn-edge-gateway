@@ -74,6 +74,7 @@ nav:
       - Redis / Webdis 外置 KV: dev/13-redis-kv.md
       - 部署 ESA: dev/14-deploy-esa.md
       - ESA MCP: dev/15-mcp-esa.md
+      - 三平台隐藏运行限制: dev/17-platform-limits.md
   - 附录:
       - 状态码说明: appendix/status-codes.md
       - 隐藏配置字段: appendix/hidden-fields.md

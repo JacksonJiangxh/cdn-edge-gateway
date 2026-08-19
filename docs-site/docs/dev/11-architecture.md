@@ -69,8 +69,8 @@ flowchart TD
 | cache 全局单例 | ❌ | ❌ | ✅ |
 | cache 节点本地 | ❌ | ✅ | ❌ |
 | cacheKey 须 http | ❌ | ❌ | ✅ |
-| 每请求子请求上限 | 1000 | 1000 | **32**（Cache 与 fetch 共享） |
-| 内存预算 | 128MB 假设 | 128MB 假设 | 128MB（esa.jsonc） |
+| 每请求子请求上限 | **50**（内置默认对齐 Free 档硬限；Paid=1000 可经 MAX_SUBREQUESTS 覆盖） | **100**（官方未单列硬限，取免费档近似上限避免无限大） | **4**（官方 fetchAPI「4 个」与 Cache API「32 个」冲突，保守取 4，待实测） |
+| 内存预算 | 128MB | 128MB | 128MB |
 
 **降级含义**：
 
@@ -80,7 +80,7 @@ flowchart TD
 - ESA 无原生 KV → 配置走 **REDIS_URL (Webdis)** 或**静态烘焙**，不能依赖运行时 KV。
   （CF / EO 亦可配 `REDIS_URL` 使用同一份外置 Webdis，且**并存时默认优先 Webdis**。）
 - ESA cache 全局单例 + key 须 http → `put` 用 http URL，自动降级。
-- ESA 子请求上限 **32** → 管理面站点数多时单请求会逼近上限，需分页（见 [部署 ESA](/dev/14-deploy-esa.md)）。
+- ESA 子请求上限 **4**（保守值，官方两处文档冲突待实测）→ 管理面站点数多时单请求会逼近上限，需分页（见 [部署 ESA](/dev/14-deploy-esa.md) 与 [平台隐藏限制](/dev/17-platform-limits.md)）。
 
 ---
 

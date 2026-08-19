@@ -99,7 +99,36 @@ export async function tryServePanelStatic(ctx, req, adminPath) {
         /* 静态层不可用则回退内联兜底 */
       }
     }
-    // 回退：从 ui.gen.js 内联字节透传 CSS（无静态目录环境也完整可用）。
+    // ESA 分支（基于阿里云官方《PAGES构建和路由指南》适配，非照搬 EO）：
+    //   官方文档证实：ESA Pages 通过 assets.directory 提供静态托管，静态文件按「目录结构
+    //   直接映射」对外暴露（路由表：/dist/file.html → /file，/dist/folder/index.html →
+    //   /folder/）。故 dist/public/assets/app.js 以物理路径 /assets/app.js 对外可访问。
+    //   但管理面浏览器请求的是 /{adminPath}/assets/app.js（带 adminPath 前缀），静态目录
+    //   无此路径 → 未命中 → 落函数（默认模式 notFoundStrategy 不配时，文档明确「无静态资源
+    //   则执行 ER 函数」）。故此处把 /{adminPath}/assets/* 重写为固定物理 /assets/* 后，
+    //   用同站 fetch 拉取——该请求会命中 ESA 静态层直接返回文件（文档路由流程：有静态资源
+    //   直接响应）。这是复现 CF「静态资源走边缘托管、零函数执行」的逻辑，且**路径语义由
+    //   官方文档证实**（目录直接映射），与 EO 机制恰同构但依据不同。
+    //   注：仅在管理面根 HTML 已切外部资源（renderAdminPage 的 useExternalAssets 含 esa）
+    //   时才会走到这里；首屏 2 个 fetch（css+js）命中静态层边缘缓存后稳态 0 fetch，远低于
+    //   ESA 每请求子请求上限，预算安全。
+    if (ctx?.caps?.platform === 'esa') {
+      try {
+        const physResp = await fetch(new Request(url.origin + '/assets/' + file, {
+          method: req.method,
+          headers: req.headers,
+          redirect: 'follow',
+        }));
+        if (physResp && physResp.status < 400) {
+          const headers = new Headers(physResp.headers);
+          headers.set('cache-control', 'public, max-age=86400, immutable');
+          headers.set('x-content-type-options', 'nosniff');
+          return new Response(physResp.body, { status: physResp.status, headers });
+        }
+      } catch {
+        /* 静态层不可用则回退内联兜底 */
+      }
+    }
     // 注意：不再单独透传 app.js。管理面根路径走 UI_HTML 内联，其 <script> 已包含
     // 完整前端逻辑，浏览器不会再来请求 /assets/app.js，故此处对 JS 资源直接返回
     // null，交给 disguise 兜底。
@@ -164,13 +193,22 @@ export async function renderAdminPage(ctx, adminPath) {
   // 实际绑定才可用，故此处不直接用 hasStaticHosting 作为 CF 的切外部判据。
   const assets = ctx?.env?.ASSETS;
   const isEo = ctx?.caps?.platform === 'eo';
-  const useExternalAssets = isEo || (assets && typeof assets.fetch === 'function');
+  const isEsa = ctx?.caps?.platform === 'esa';
+  // 切外部 /assets/* 的判据（基于官方文档，非照搬）：
+  //   - EO：Makers 静态目录托管恒存在，物理 /assets/* 对外可访问。
+  //   - ESA：官方《PAGES构建和路由指南》证实 assets.directory 静态文件按目录结构直接映射
+  //          对外，故 dist/public/assets/app.js 以物理 /assets/app.js 可访问；管理面根 HTML
+  //          切外部引用后，浏览器发 /{adminPath}/assets/*（落函数）→ 重写为 /assets/* 由
+  //          tryServePanelStatic 的 ESA 分支同站 fetch 命中静态层。与 EO 语义同构但依据为
+  //          官方文档（目录直接映射），不是复制 EO。
+  //   - CF：仅在确有 env.ASSETS 绑定时切外部（纯 Dashboard 粘贴无 ASSETS 保持内联）。
+  const useExternalAssets = isEo || isEsa || (assets && typeof assets.fetch === 'function');
   if (useExternalAssets) {
     // 资产对外引用前缀：
-    //   - EO：固定物理 /assets（不带 adminPath，因 adminPath 运行时可变且 EO 静态层无法感知）；
-    //         bare /assets/* 天然匹配 dist/eo-public/assets/，由 EO 静态层零函数返回。
+    //   - EO / ESA：固定物理 /assets（不带 adminPath，因 adminPath 运行时可变、静态层按
+    //         目录映射无法感知前缀）；bare /assets/* 天然匹配静态根，由静态层零函数返回。
     //   - CF：/{adminPath}/assets（与 env.ASSETS 物理 /assets/* 路由一致，含 /assets 段）。
-    const assetBase = isEo ? '/assets' : '/' + adminPath + '/assets';
+    const assetBase = (isEo || isEsa) ? '/assets' : '/' + adminPath + '/assets';
     // 内联 <style>…</style> → 外部 app.css
     html = html.replace(/<style[\s\S]*?<\/style>/i, () =>
       `<link rel="stylesheet" href="${assetBase}/app.css">`

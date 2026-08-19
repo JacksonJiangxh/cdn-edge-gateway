@@ -296,7 +296,7 @@ function buildLimitations(ctx) {
     list.push({
       key: 'edgeCache',
       message:
-        '阿里云 ESA 提供全局 cache 单实例（非 caches.default）。Cache 操作与 fetch 共享 32 子请求硬上限，且 cache.put 的 key 必须为 http URL。',
+        '阿里云 ESA 提供全局 cache 单实例（非 caches.default）。Cache 操作与 fetch 共享子请求预算（官方 fetchAPI 与 Cache API 两文档数值冲突，本项目保守取 4，待实测），且 cache.put 的 key 必须为 http URL。',
     });
   }
   if (!caps.hasRawIpFetch) {

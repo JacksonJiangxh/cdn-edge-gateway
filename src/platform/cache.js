@@ -13,7 +13,7 @@
  *  3. ESA（全局 cache 单实例，非 caches.default）：走全局 cache.put/get/delete。
  *     - ESA 的 put key 必须为 http URL（cacheKeyHttpOnly：引擎不支持 https key，
  *       写入时由 cachePut 强制降为 http）；
- *     - Cache 操作与 fetch 共享 32 子请求硬上限（cacheSubreqLimit）。
+ *     - Cache 操作与 fetch 共享子请求预算（cacheSubreqLimit；ESA 保守取 4，官方 fetchAPI/Cache API 两处冲突待实测）。
  *
  * 关键修正：CF / EO / ESA 均原生支持 Cache API，hasCacheApi 三平台均为 true。
  * 旧版认为「EO/ESA 无 caches.default 即无缓存」已被官方文档推翻。
@@ -21,6 +21,7 @@
  */
 
 import { detectCaps } from './caps.js';
+import { wouldExceed } from './subreqBudget.js';
 
 /**
  * 按状态码查找 statusTtl 命中值：键支持精确码（404）与段通配（4xx/5xx/52x），
@@ -238,6 +239,15 @@ export async function cachePut(ctx, cacheKey, response) {
   }
   // ESA 的 put key 必须为 http URL（引擎不支持 https key），降协议避免写入失败
   const caps = ctx && ctx.caps ? ctx.caps : detectCaps(ctx && ctx.env);
+  // 子请求预算守卫：ESA 每请求仅 ~4 个子请求（官方两处冲突待实测），回源已占 1 个，
+  // 若剩余预算不足以再承受一次 cache.put（占 1 个子请求），则跳过写入——
+  // 由 serve-stale（边缘缓存兜底）+ 下次回源补写承接，绝不因缓存写挤掉回源预算。
+  // CF/EO 预算宽松（50/100），wouldExceed 几乎不会触发，等效于旧行为。
+  if (wouldExceed(1, ctx)) {
+    _stats.writeErrors++;
+    markDebug(ctx, 'SKIP_BUDGET');
+    return;
+  }
   let key = cacheKey;
   if (caps.cacheKeyHttpOnly && cacheKey instanceof URL && cacheKey.protocol === 'https:') {
     key = new URL(cacheKey.href);

@@ -71,7 +71,7 @@ export async function probeNativeKV(env) {
  *
  * 两端各自独立做读写回环、各自返回 ok/latencyMs/error，并附带当前生效后端标记，
  * 便于管理面一次点击并列展示（不再是二选一）。两端探测并发执行以压低总耗时；
- * 该接口仅供管理面手动触发，不在数据面热路径，不影响 ESA 的 32 子请求预算。
+ * 该接口仅供管理面手动触发，不在数据面热路径，不影响 ESA 的子请求预算（保守取 4，待实测）。
  *
  * @param {import('../../contracts.js').Ctx} ctx
  */

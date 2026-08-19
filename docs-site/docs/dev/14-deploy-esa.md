@@ -14,14 +14,19 @@
 | 维度 | ESA 真实情况（代码 `caps.js`） | 注意 |
 |---|---|---|
 | 原生 KV | **无**（EdgeKV 按计费策略统一禁用） | 配置走 `REDIS_URL` 或**静态烘焙**，不能依赖运行时 KV |
-| 子请求上限 | **每请求 32 个**（Cache 与 fetch 共享） | 管理面站点数多时要分页（见 §4） |
+| 子请求上限 | **每请求 4 个**（保守值；官方 fetchAPI「4 个」与 Cache API「32 个」冲突，取小，待实测） | 管理面站点数多时要分页（见 §4） |
 | 内存预算 | 128MB（`esa.jsonc` 设） | 缓存 TTL 别太大 |
 
 ---
 
 ## §1 平台能力对照（权威）
 
-来源 `src/platform/caps.js`，ESA 关键 caps：
+> [!NOTE]
+> ⚠️ 历史版本本节写「来源 `caps.js`」——这是把代码层假设当事实，已纠正。本章节能力值
+> **以阿里云官方文档为准**（`esa文档/` 下 RuntimeAPI/Cache/Pages 等手册），`caps.js` 仅是
+> 这些官方事实的代码化表达，不再作为权威来源本身。
+
+来源：阿里云官方文档（`esa文档/`），ESA 关键 caps：
 
 | 能力 | ESA 值 | 说明 |
 |---|---|---|
@@ -30,9 +35,10 @@
 | `cacheSingleInstance` | `true` | Cache 全局单实例，无 `caches.default/open` |
 | `cacheKeyHttpOnly` | `true` | `put` 缓存键必须是 http URL（自动降级） |
 | `hasKV` | `false` | 无原生 KV（见 §3） |
-| `hasSocket` / `hasRawIpFetch` | `false` | 源站必须填**可解析域名**（不能 IP 直连） |
-| `maxSubRequests` | **32** | 每请求子请求上限（Cache 与 fetch 共享） |
-| `cacheSubreqLimit` | **32** | Cache 操作与 fetch 共用这 32 预算 |
+| `hasStaticHosting` | `true` | ✅ 官方《PAGES构建和路由指南》证实：assets.directory 静态托管，文件按目录结构直接映射对外（`/dist/file.html`→`/file`）；默认模式未命中静态资源→执行 ER 函数。故管理面前端走 `/assets/*` 外部引用 |
+| `hasSocket` / `hasRawIpFetch` | `false` | 源站必须填**可解析域名**（不能 IP 直连，见 fetchAPI.md） |
+| `maxSubRequests` | **4** | 每请求子请求预算（保守值）。官方 fetchAPI「每次可发起 4 个」与 Cache API「共享 32 个」表述冲突，本项目取较小值 4（待真机实测；实测若 32 有效则改回） |
+| `cacheSubreqLimit` | **4** | Cache 操作与 fetch 共用这 4 预算（同上） |
 
 > [!IMPORTANT]
 > 数据面全程 ≤2 个 fetch，远低于 **32** 上限，安全；管理面站点多时单请求才需关注 32 预算。
@@ -114,7 +120,7 @@ npm run deploy:esa:cli    # 或直接走 cli 部署脚本 scripts/deploy-esa-cli
 仓库绑 CI（如 CNB/云效），构建后调用 ESA 发布接口。控制台「流水线」按钮一键发布。
 
 > [!NOTE]
-> 管理面站点数多（接近 32 子请求预算）时，列表接口会分页（`MAX_TOTAL_SITES_SCAN`），单请求不会突破 **32** 上限。
+> 管理面站点数多（接近 4 子请求预算）时，列表接口会分页（`MAX_TOTAL_SITES_SCAN`），单请求不会突破 **4** 上限。
 
 ---
 

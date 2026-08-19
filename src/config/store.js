@@ -22,6 +22,7 @@
  */
 
 import { getKV } from '../platform/kv.js';
+import { track as trackSubreq } from '../platform/subreqBudget.js';
 import { encryptSecret } from '../utils/cipher.js';
 import { BAKE_DEFAULTS } from './baked.defaults.js';
 import {
@@ -748,6 +749,13 @@ function requireKV(ctx) {
 async function readJson(ctx, key) {
   const kv = getKV(ctx.env);
   if (!kv) return null;
+  // 子请求预算守卫：每次 KV 读都占 1 个子请求。ESA 每请求仅 ~4（官方两处冲突待实测），
+  // 管理面一次请求常读多个集合（sites/pools/rules/stats），若无守卫易撞限。
+  // 预算不足时直接返回 null，由上层走内存缓存 / 默认值优雅降级，绝不盲目撞墙。
+  if (!trackSubreq(1, ctx)) {
+    console.warn(`[store] 子请求预算不足，跳过读取 ${key}`);
+    return null;
+  }
   try {
     return await kv.get(key, 'json');
   } catch (err) {

@@ -82,7 +82,7 @@ DEL  /DEL/key
 网关通过 `fetch` 调 Webdis 完成读写，**完全走 HTTP，不需要 Redis 客户端库**。
 
 > [!NOTE]
-> ESA 每请求子请求上限 **32**（Cache 与 fetch 共享），Webdis 调用也占这个预算。
+> ESA 每请求子请求预算（保守取 **4**，官方 fetchAPI「4 个」与 Cache API「32 个」冲突，待实测），Webdis 调用也占这个预算——故数据面严格限制回源 fetch 数量。
 > 所以配置读取要有内存缓存（见下），不能每次请求都打 Redis。
 
 ---

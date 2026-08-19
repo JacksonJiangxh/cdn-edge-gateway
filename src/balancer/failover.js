@@ -38,6 +38,7 @@ import { buildOriginHeaders } from '../proxy/headers.js';
 import { DEFAULT_CLIENT_IP_HEADER } from '../config/stages-defaults.js';
 import { fetchOrigin } from '../proxy/engines/fetchEngine.js';
 import { fetchOrigin as r2FetchOrigin } from '../proxy/engines/r2Engine.js';
+import { track as trackSubreq, remaining as remainingSubreq } from '../platform/subreqBudget.js';
 
 /** 平台安全余量（毫秒）：留出响应序列化 / 缓存写入的空间，避免撞平台执行上限 */
 const SAFETY_RESERVE = Object.freeze({
@@ -170,7 +171,11 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader, opts = {}
   if (!Array.isArray(ctx.debug.notes)) ctx.debug.notes = [];
   ctx.debug.notes.push(`budget-cap:${budget}`);
 
-  const speculable = enabled && speculativeMs > 0 && isSpeculable(ctx, bodyBuf);
+  // 竞速会瞬间并行两个回源 fetch（占 2 个子请求）。ESA 每请求仅 ~4 个子请求预算
+  // （官方两处冲突待实测），若剩余预算不足以再承受 2 个 fetch，则禁用竞速，
+  // 退回纯串行单路，避免竞速双路直接挤爆子请求预算导致整请求 5xx。
+  const enoughBudgetForRace = remainingSubreq(ctx) >= 2;
+  const speculable = enabled && speculativeMs > 0 && isSpeculable(ctx, bodyBuf) && enoughBudgetForRace;
 
   for (let attempt = 0; attempt < totalAttempts; attempt++) {
     // 首次尝试复用管线已选中的首选源站：管线为了「按 origin 匹配规则」和「构造缓存键」
@@ -581,6 +586,15 @@ function snapshotResp(resp) {
  * @returns {Promise<Response>} 源站响应
  */
 async function dispatch(ctx, origin, originUrl, headers, timeoutMs, opts) {
+  // 子请求预算守卫：每次 dispatch 至少发起 1 个回源子请求，先扣预算。
+  // 预算不足（如 ESA 4 预算已被回源+缓存写吃紧）直接抛错，由 requestWithFailover
+  // 的 catch 当作源站失败处理（记冷却 + 换源 / 最终 502 兜底），而非盲目撞墙。
+  // 注意：track 一旦成功即计入平台侧计数（无论后续成败），故失败也占用预算。
+  if (!trackSubreq(1, ctx)) {
+    const err = new Error('subrequest budget exhausted before origin fetch');
+    err.code = 'SUBREQ_BUDGET_EXHAUSTED';
+    throw err;
+  }
   if (origin.engine === 'r2') {
     return r2FetchOrigin(ctx, origin, originUrl, headers, timeoutMs, opts);
   }
@@ -602,10 +616,20 @@ async function dispatch(ctx, origin, originUrl, headers, timeoutMs, opts) {
 
   const hh = opts?.hostHeader;
   const custom = hh?.custom;
-  if (custom && String(custom).trim() && String(custom).trim() !== String(originUrl.hostname)) {
-    headers.set('Host', String(custom).trim());
-  } else if (hh?.mode === 'accel' && ctx.url.hostname && ctx.url.hostname !== String(originUrl.hostname)) {
-    headers.set('Host', ctx.url.hostname);
+  // 自定义回源 Host 注入：CF/EO/ESA 三平台 fetch 均支持通过 init.headers 设置 Host 头
+  // （见 caps.js §认知基线；阿里云 ESA fetchAPI 文档未禁止 set 回源 Host，回源 Host
+  // 是反代基本能力）。ESA 唯一约束（fetchAPI.md §Headers 黑名单）是「读取」客户端请求
+  // 的 host 内部头会 exception——本项目只做 set 不做 get，故 ESA 上此处正常生效。
+  // 仅对 set 本身做极薄 try/catch 兜底，防个别非法 Host 值（含端口/非法字符）在严校验
+  // 平台抛错；这不是平台降级逻辑，正常 Host 值三平台都成功写入。
+  try {
+    if (custom && String(custom).trim() && String(custom).trim() !== String(originUrl.hostname)) {
+      headers.set('Host', String(custom).trim());
+    } else if (hh?.mode === 'accel' && ctx.url.hostname && ctx.url.hostname !== String(originUrl.hostname)) {
+      headers.set('Host', ctx.url.hostname);
+    }
+  } catch {
+    /* 个别非法 Host 值写入失败时降级为用 URL hostname 回源 */
   }
 
   return fetchOrigin(ctx, origin, originUrl, headers, timeoutMs, opts);

@@ -146,7 +146,11 @@ function readUrl(base, cmd, args, dbSeg = '') {
 async function webdisFetch(url, opts, token, timeoutMs) {
   const headers = { accept: 'application/json' };
   if (token) headers.authorization = token;
-  const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+  // AbortController 特性探测：部分平台（如阿里云 ESA）RuntimeAPI 手册未列 AbortController，
+  // 直接 new AbortController() 会抛错导致所有 KV 读失败。仅当全局确实存在该构造器时才启用
+  // 超时控制；否则降级为「无超时 fetch」，保证 Webdis 后端在 ESA 上仍可用。
+  const hasAbort = typeof AbortController === 'function';
+  const ctrl = hasAbort ? new AbortController() : null;
   let timer;
   if (ctrl && timeoutMs && timeoutMs > 0) {
     timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -173,7 +177,7 @@ async function webdisFetch(url, opts, token, timeoutMs) {
     }
     return json;
   } catch (err) {
-    if (err && err.name === 'AbortError') {
+    if (hasAbort && err && err.name === 'AbortError') {
       throw new Error(`Webdis 请求超时（>${timeoutMs}ms）`);
     }
     throw err;

@@ -16,6 +16,11 @@ import { detectCaps } from './platform/caps.js';
 import { preloadKV } from './platform/kv.js';
 import { loadConfigSnapshot } from './config/store.js';
 import { initMemBudget } from './platform/memBudget.js';
+import {
+  initSubreqBudget,
+  attachToCtx,
+  resetSubreqBudget,
+} from './platform/subreqBudget.js';
 import { handleRequest } from './core/app.js';
 import { resolveRequestId, REQUEST_ID_HEADER } from './utils/reqid.js';
 import { normalizeError, sanitizeMessage } from './utils/errors.js';
@@ -83,6 +88,15 @@ async function dispatch(request, env, waitUntilFn) {
     console.error('[entry] initMemBudget 失败，降级为无统一内存管理:', e?.message);
   }
 
+  // 初始化 isolate 级子请求预算守卫，并按平台免费档硬限设定每请求上限
+  // （ESA=4 保守 / CF=50 Free 档 / EO=100 近似上限）。每请求 ctx 再挂独立计数器，
+  // 使一次请求内所有 fetch / 缓存写 / KV 读共享同一预算，超限即降级而非撞墙。
+  try {
+    initSubreqBudget(caps, env);
+  } catch (e) {
+    console.error('[entry] initSubreqBudget 失败，降级为不限制:', e?.message);
+  }
+
   // 预热 KV 适配器并填充 isolate 级包装缓存。
   // CF 与 EdgeOne 均通过 CDN_KV / KV 绑定提供 KV，包装是纯同步操作，
   // 此处不产生实际网络开销；store.js 既有的 30s 内存缓存进一步分摊读压力。
@@ -103,6 +117,13 @@ async function dispatch(request, env, waitUntilFn) {
     reqId,
     debug: {},
   };
+
+  // 把子请求预算守卫挂到本次请求上下文（每请求独立计数）。
+  try {
+    attachToCtx(ctx, caps);
+  } catch (e) {
+    console.error('[entry] attachToCtx 失败，降级为 isolate 级兜底:', e?.message);
+  }
 
   // 启动时全量快照加载（KV 仅作初始数据源）：首个请求前尽量把固定 5 键
   // （cfg:version/cfg:global/cfg:global_rules/cfg:sites/cfg:pools）一次性读入内存，
@@ -144,6 +165,14 @@ async function dispatch(request, env, waitUntilFn) {
         [REQUEST_ID_HEADER]: reqId,
       },
     });
+  } finally {
+    // 请求级预算挂在 ctx.__subreq 上随请求销毁，无 ctx 调用才走 isolate 兜底；
+    // 这里统一重置 isolate 级兜底计数，避免无 ctx 场景下跨请求累积。
+    try {
+      resetSubreqBudget();
+    } catch {
+      /* 不影响主链路 */
+    }
   }
 }
 

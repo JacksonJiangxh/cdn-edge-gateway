@@ -454,11 +454,19 @@ export function detectCaps(env) {
   // 平台缓存差异标志（详见 docs/11-architecture.md §4.1）：
   //  - EO 的 caches.default 仅节点本地化、不跨节点复制（cacheIsNodeLocal）
   //  - ESA 仅提供全局单实例 cache、无 caches.default / open（cacheSingleInstance）
-  //  - ESA 的 Cache 操作与 fetch 共享 32 子请求硬上限（cacheSubreqLimit）
+  //  - ESA 的 Cache 操作与 fetch 共享子请求约束。官方文档给出两个数值且未说明关系：
+  //    《fetchAPI》「每次可发起 4 个子请求，4 个及以上需申请配额」、
+  //    《Cache API》「共享 32 个子请求」。保守取较小值 4（待真机实测确证）。
   //  - ESA 的 put key 必须为 http URL（cacheKeyHttpOnly：引擎不支持 https key）
   const cacheIsNodeLocal = platform === 'eo';
   const cacheSingleInstance = platform === 'esa';
-  const cacheSubreqLimit = platform === 'esa' ? 32 : Infinity;
+  // cacheSubreqLimit：Cache API 操作与 fetch 共享同一预算。ESA=4（保守，待实测）；
+  // CF=50（Free 档硬限；Paid 经 MAX_SUBREQUESTS 提至 1000）；EO=100（官方未单列硬限，
+  // 取免费档近似上限避免无限大，详见 subreqBudget.js 的 SUBREQ_LIMITS）。
+  const cacheSubreqLimit =
+    platform === 'esa' ? 4 :
+    platform === 'eo' ? 100 :
+    50; // cf：Free 档硬限 50
   const cacheKeyHttpOnly = platform === 'esa';
 
   // EO Makers 的 KV 是「绑定时自定义名的运行时全局变量」，不通过 env 注入，
@@ -489,11 +497,21 @@ export function detectCaps(env) {
     cacheSingleInstance,
     cacheSubreqLimit,
     cacheKeyHttpOnly,
-    // 每请求子请求（fetch）预算上限：
-    //   - ESA 硬限制 = 32（官方文档：Cache 操作与 fetch 共享 32 子请求预算）
-    //   - CF / EO 宽松（远大于 32），给一个大数防误伤
-    //   用途：管理面 listSites 等批读据此控制合并（见 store.js / kv.js）
-    maxSubRequests: platform === 'esa' ? 32 : 1000,
+    // 每请求子请求（fetch）预算上限（隐藏默认，用户无需设置；详见 docs/dev/17-platform-limits.md
+    // 与 platform/subreqBudget.js 的 SUBREQ_LIMITS，二者取值必须保持一致）：
+    //   - ESA = 4（保守值；官方 fetchAPI「每次可发起 4 个子请求」与 Cache API「共享 32 个」
+    //     两处表述冲突，取较小值，待真机实测；实测 32 有效则改回）
+    //   - CF = 50（保守对齐 **Cloudflare Pages Free 档硬限 50/请求**；Paid 档为 1000，但代码
+    //     无法探测档位，且 Free 档用户占多数，故以内置 50 规划最安全；确在 Paid 档且站点极多
+    //     可经环境变量 MAX_SUBREQUESTS 提到 1000）
+    //   - EO = 100（**EO 官方文档未单列子请求硬上限**；用户要求「给大约数值避免无限大」，
+    //     取 100 作为免费档近似上限，仅作代码层防护，非官方硬限）
+    //   用途：该值由 platform/subreqBudget.js 落地为真实运行时守卫（回源 / 缓存写 / 批读计数），
+    //   不再是纯声明——预算耗尽时降级而非盲目重试（详见 failover.js / cache.js / store.js）。
+    maxSubRequests:
+      platform === 'esa' ? 4 :
+      platform === 'eo' ? 100 :
+      50, // cf：Free 档硬限 50；Paid=1000 可经 MAX_SUBREQUESTS 覆盖
     // isolate 内存预算上限（字节），供 memBudget 统一内存管理使用。
     // 统一按 128MB 假设规划（CF 标准 128MB、ESA 函数侧 128MB 见 esa.jsonc；
     // ESA 文档 512MB 为企业另一档配额，不在本假设内）。可由环境变量
@@ -533,10 +551,14 @@ export function detectCaps(env) {
     // 边缘静态层，浏览器重复访问零函数执行次数，最省额度。
     //   - CF：Pages/Workers Static Assets（env.ASSETS 绑定），物理 /assets/* 按 URL 取；
     //   - EO：Makers 静态目录托管（dist/eo-public/ 静态根），URL 物理 /assets/* 直接命中；
-    //   - ESA：当前无静态目录托管（函数/Pages 形态不同），故为 false。
-    // 注：EO 的静态资产对外路径是「与 adminPath 解耦的固定物理 /assets/*」（adminPath 为
-    // 运行时可变变量，不能写死进静态层路由），仅管理面根 HTML 入口走 /{adminPath}。
-    hasStaticHosting: platform === 'eo' || platform === 'cf',
+    //   - ESA：官方《PAGES构建和路由指南》证实 assets.directory 提供静态托管，静态文件按
+    //         「目录结构直接映射」对外暴露（/dist/file.html → /file，/dist/folder/index.html
+    //         → /folder/），故 dist/public/assets/app.{css,js} 以物理 /assets/* 可访问；
+    //         默认模式（不配 notFoundStrategy）下未命中静态资源则「执行 ER 函数」。故 ESA
+    //         同样具备静态托管层（hasStaticHosting=true），管理面走外部 /assets/* 引用。
+    // 注：三平台静态资产对外路径都是「与 adminPath 解耦的固定物理 /assets/*」（adminPath 为
+    // 运行时可变变量，静态层按目录映射无法感知前缀），仅管理面根 HTML 入口走 /{adminPath}。
+    hasStaticHosting: platform === 'eo' || platform === 'cf' || platform === 'esa',
     // 平台单次请求总执行上限（墙钟）：用于推导回源总时间预算硬顶。
     //   - ESA 函数单次执行响应时间上限 = 120s（阿里云官方《什么是函数和Pages》）；
     //     网关等待函数返回首个数据的首字节约束 = 10s，超时网关主动断连返回 504（firstByteMs）。

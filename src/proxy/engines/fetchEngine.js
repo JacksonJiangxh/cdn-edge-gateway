@@ -69,10 +69,13 @@ export function needCustomSni(url, headers) {
 export async function fetchOrigin(ctx, origin, originUrl, headers, timeoutMs, opts) {
   const timeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : 10000;
 
-  // AbortController 实现超时：超时后 fetch 会以 AbortError 拒绝，
-  // 上层 failover 捕获异常后换下一个源站
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
+  // AbortController 特性探测：阿里云 ESA 的 RuntimeAPI 手册未列 AbortController，
+  // 若平台不支持，直接 `new AbortController()` 会抛错导致所有回源失败。故仅在全局
+  // 确实存在该构造器时才启用超时控制；不支持则降级为「不设 signal 的 fetch」，
+  // 回源仍可用（仅无超时取消，但上层 failover 仍有自己的超时语义兜底）。
+  const hasAbort = typeof AbortController === 'function';
+  const controller = hasAbort ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeout) : null;
 
   // 外部 cancel（竞速请求的慢路取消）：把「内部超时信号」与「外部取消信号」合并。
   // 优先用 AbortSignal.any（CF/EO/ESA 现代运行时均支持）；不支持时降级为事件桥接，
@@ -82,17 +85,17 @@ export async function fetchOrigin(ctx, origin, originUrl, headers, timeoutMs, op
   // 会自动传播到 combined，fetch 同样被取消。因此超时仍由顶部 timer 触发内部
   // controller.abort()；若合并信号已 abort（内部超时或外部取消任一触发），清理 timer
   // 避免 Worker 实例被无谓保活。这与降级分支（事件桥接 ext.addEventListener）语义一致。
-  let effectiveSignal = controller.signal;
+  let effectiveSignal = controller ? controller.signal : undefined;
   if (opts?.controller && opts.controller !== controller) {
     const ext = opts.controller.signal;
-    if (typeof AbortSignal.any === 'function') {
+    if (controller && typeof AbortSignal.any === 'function') {
       const combined = AbortSignal.any([controller.signal, ext]);
       effectiveSignal = combined;
       // 合并信号已 abort（内部超时或外部取消任一触发）后清理定时器，避免 Worker 实例被无谓保活
-      combined.addEventListener('abort', () => clearTimeout(timer), { once: true });
+      combined.addEventListener('abort', () => { if (timer) clearTimeout(timer); }, { once: true });
     } else {
-      const onExternalAbort = () => controller.abort();
-      if (ext.aborted) controller.abort();
+      const onExternalAbort = () => controller && controller.abort();
+      if (ext.aborted) controller && controller.abort();
       else ext.addEventListener('abort', onExternalAbort, { once: true });
     }
   }
@@ -108,7 +111,7 @@ export async function fetchOrigin(ctx, origin, originUrl, headers, timeoutMs, op
     String(originUrl).startsWith('https://') &&
     needCustomSni(originUrl, headers)
   ) {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
     const { rawTcpFetch } = await import('./socketEngine.js');
     return rawTcpFetch(originUrl, headers, timeout, opts, ctx);
   }
@@ -141,6 +144,22 @@ export async function fetchOrigin(ctx, origin, originUrl, headers, timeoutMs, op
   }
 
   try {
+    // ESA 适配（官方 fetchAPI.md §Request 特有）：ESA 推荐对「不打算再读取 body 的
+    // 客户端请求」调用 request.ignore() 以复用连接池、提升性能。CF/EO 无此 API。
+    // 仅在 ESA 且客户端请求对象确有 ignore 方法时调用；且**仅当回源没用流式客户端
+    // body**（即已用 bodyBuf 物化、或 GET/HEAD 无 body）时才 ignore——否则流式 body
+    // 被忽略会导致上游收不到请求体。用特性探测，其它平台恒不触发。
+    if (
+      ctx.caps &&
+      ctx.caps.platform === 'esa' &&
+      ctx.request &&
+      typeof ctx.request.ignore === 'function'
+    ) {
+      const streamingClientBody = method !== 'GET' && method !== 'HEAD' && opts?.bodyBuf == null;
+      if (!streamingClientBody) {
+        try { ctx.request.ignore(); } catch { /* ignore 失败不影响主流程 */ }
+      }
+    }
     return await fetch(String(originUrl), init);
   } catch (err) {
     // 回源网络错误 / 超时（AbortError）等：统一包成 UpstreamError(502)。
@@ -152,6 +171,6 @@ export async function fetchOrigin(ctx, origin, originUrl, headers, timeoutMs, op
     });
   } finally {
     // 无论成功失败都要清掉定时器，避免 Worker 实例被无谓地保活
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
   }
 }

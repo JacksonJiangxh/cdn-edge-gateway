@@ -10,7 +10,7 @@
  * 平台差异（详见 docs/11-architecture.md §4.1）：
  *   - EO 的 caches.default 仅节点本地化、不跨节点复制，delete 仅删当前节点实例；
  *   - ESA 的 cache.delete 同样仅作用当前节点，且存入条目仍须 TTL 到期才真正失效；
- *     此外 ESA 的 Cache 操作与 fetch 共享 32 子请求硬上限。
+ *     此外 ESA 的 Cache 操作与 fetch 共享子请求预算（保守取 4，官方两处文档冲突待实测）。
  */
 
 import { ok, fail } from '../../utils/response.js';

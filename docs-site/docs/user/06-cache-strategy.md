@@ -25,7 +25,7 @@
 |---|---|---|
 | Cloudflare Workers | 平台级 Workers Cache + 代码层 `caches.default`（两层） | 两层都要顾及；`[cache] enabled=true` |
 | EdgeOne Pages | **节点本地**缓存 | `delete` 只清当前节点；大规模用缓存代次 |
-| 阿里云 ESA | **全局单实例**缓存 | `put` key 须 http URL；与 fetch 共享 32 子请求预算 |
+| 阿里云 ESA | **全局单实例**缓存 | `put` key 须 http URL；与 fetch 共享子请求预算（保守取 4，官方 fetchAPI/Cache API 两处冲突待实测） |
 
 > [!WARNING]
 > 在 EdgeOne 上点「清单个 URL 缓存」可能只清了**当前节点**。要全量失效，改 `global.cacheGen`（缓存代次）让旧键整体失效。
