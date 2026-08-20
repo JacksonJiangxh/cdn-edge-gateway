@@ -89,7 +89,7 @@ async function dispatch(request, env, waitUntilFn) {
   }
 
   // 初始化 isolate 级子请求预算守卫，并按平台免费档硬限设定每请求上限
-  // （ESA=4 保守 / CF=50 Free 档 / EO=100 近似上限）。每请求 ctx 再挂独立计数器，
+  // （ESA=8 软限制 / CF=50 Free 档 / EO=100 近似上限）。每请求 ctx 再挂独立计数器，
   // 使一次请求内所有 fetch / 缓存写 / KV 读共享同一预算，超限即降级而非撞墙。
   try {
     initSubreqBudget(caps, env);

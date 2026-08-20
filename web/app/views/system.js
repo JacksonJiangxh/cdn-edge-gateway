@@ -280,10 +280,18 @@ export   async function renderSystem() {
     const gConfigCacheTtl = el('input', { class: 'input', id: 'g-configCacheTtl', type: 'number' });
     const gGlobalRateLimit = el('input', { class: 'input', id: 'g-globalRateLimit', type: 'number', placeholder: '0 表示不限制' });
     const gStatsEnabled = el('input', { type: 'checkbox', id: 'g-statsEnabled' });
+    // 统计落盘后端：与后端 resolveStatsBackend 对齐，前端可直接选择，不再只暴露 kv/d1/none。
+    // - auto：跟随部署默认（STATS_BACKEND 未显式设置时，由平台按 d1>redis>native 自动选）
+    // - d1：D1 数据库
+    // - redis：自部署 Webdis/Redis（区别于平台厂商 KV）
+    // - native：平台厂商 KV
+    // - none：关闭统计
     const gStatsDriver = select('g-statsDriver', [], '', [
-      { value: 'kv', label: 'KV' },
+      { value: 'auto', label: '自动（跟随部署默认）' },
       { value: 'd1', label: 'D1' + (caps.hasD1 ? '' : '（当前平台不可用）'), disabled: !caps.hasD1 },
-      { value: 'none', label: '关闭' },
+      { value: 'redis', label: '自部署 KV（Webdis/Redis）' + (caps.kvRedis ? '' : '（REDIS_URL 未配置）'), disabled: !caps.kvRedis },
+      { value: 'native', label: '平台 KV（厂商 KV）' + (caps.kvNative ? '' : '（当前平台未探测到）'), disabled: !caps.kvNative },
+      { value: 'none', label: '关闭统计' },
     ]);
 
     // 未启用统计时「统计驱动」无意义，完全隐藏

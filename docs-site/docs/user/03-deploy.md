@@ -22,7 +22,7 @@ flowchart TD
     B -->|Cloudflare Workers| C1[npm run deploy:cf]
     B -->|Cloudflare Pages| C2[npm run deploy:pages]
     B -->|EdgeOne Makers| C3[本地构建 + edgeone makers deploy dist-eo]
-    B -->|阿里云 ESA| C4[npm run deploy:esa]
+    B -->|阿里云 ESA| C4[控制台连接仓库自动部署]
 ```
 
 ---
@@ -158,10 +158,11 @@ Makers 的 Edge Functions 跑在 V8，**没有 `node:crypto` 等 Node 内建模�
 这里只给最小可用流程：
 
 ```bash
-npm run deploy:esa     # 打印 ESA 部署步骤提示
-# 然后按提示：ESA 控制台设 REDIS_URL → 提交 → 发布
-# 或走 CLI：npm run deploy:esa:cli
+npm run build          # 本地构建产物（_worker.js + dist/public/）
+# 然后：ESA 控制台「函数和 Pages」连接仓库 → 自动读 esa.jsonc 构建部署
+# 运行时变量在控制台「环境变量」设置（CLOUD_PLATFORM=esa、REDIS_URL 等）
 ```
+详见 [开发者篇 · 部署 ESA](/dev/14-deploy-esa.md) §4/§5。
 
 ---
 

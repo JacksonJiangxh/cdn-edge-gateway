@@ -17,17 +17,29 @@
 // 这样无论 ESA 走哪种传参，_worker.js 内部探测与 KV（EdgeKV 全局类 /
 // REDIS_URL）都能正确拿到配置。
 //
+// === ESA 关联 GitHub 仓库部署：构建期变量静态化 ===
+// ESA 控制台「构建环境变量」仅在构建期经 process.env 可读，**没有运行时注入**。
+// 因此本项目约定固定前缀 ESA_BUILD_ 命名构建变量（与运行时变量命名空间隔离），
+// 例如：ESA_BUILD_JWT_SECRET / ESA_BUILD_ADMIN_PASSWORD / ESA_BUILD_REDIS_URL /
+// ESA_BUILD_REDIS_TOKEN。build.mjs 在打包前扫描该前缀、去前缀后把真实变量名
+// （JWT_SECRET / ADMIN_PASSWORD / REDIS_URL / REDIS_TOKEN）烤进产物常量
+// __BUILD_ENV__。运行时本 resolveEnv 在「运行时 env 缺失」时回退读取 __BUILD_ENV__，
+// 使 ESA 关联部署也能拿到 JWT_SECRET / REDIS_URL 等必备变量。CF/EO 部署无该前缀、
+// __BUILD_ENV__ 为空对象，回退逻辑零影响。
+// 注：ADMIN_PASSWORD 等敏感变量会明文进入产物；首次登录初始化后，于 Webdis
+// （REDIS_URL）固化哈希、再到控制台删除 ESA_BUILD_ADMIN_PASSWORD 并重建部署即可清空。
+//
 // === 平台约束（依据阿里云 ESA 官方文档）===
 //   - Cache API 可用：官方《Cache API》文档确认 ESA 提供全局 `cache` 单实例
 //     （cache.put / cache.get / cache.delete）。caps.js 据此把 ESA 的 hasCacheApi /
 //     hasEdgeCache 置 true；注意 ESA 是单实例、无 caches.default / open 命名空间。
-//   - 每请求子请求预算（官方文档存在两处表述，二者关系官方未说明，按保守值取小）：
+//   - 每请求子请求预算（官方文档存在两处表述，二者关系官方未说明）：
 //     · 《fetchAPI》文档 L5/L26：「目前每次可以发起 4 个子请求；需要 4 个及以上需申请配额」。
 //     · 《Cache API》文档：「Cache 操作与 fetch 共享 32 个子请求约束」。
-//     → 二者冲突，官方未统一口径；本项目取较小值 **4** 作为运行时安全预算
-//       （maxSubRequests=4、cacheSubreqLimit=4），并标注「待真机实测确证」。
-//       数据面稳态仅 1 个回源 fetch（+ 至多 1 个静态同站 fetch）≈ 2，仍在 4 内，安全。
-//     * 注：若真机实测证实 32 为有效硬上限，再把两值调回 32 即可（单点修改）。
+//     → 二者冲突，官方未统一口径；经真机实测，常规账号为 4、部分高配账号可达 8。
+//       本项目将软限制自设为 **8**（maxSubRequests=8、cacheSubreqLimit=8），在可确认额度内留足
+//       余量，并允许 MAX_SUBREQUESTS 覆盖（1–32）。数据面稳态仅 1 个回源 fetch
+//       （+ 至多 1 个静态同站 fetch）≈ 2，管理面 4 集合 MGET ≈ 4，均在 8 内安全。
 //   - 持久化：
 //     本项目为 ESA 提供两种持久化形态，**按 REDIS_URL 是否配置自动选择**：
 //     (A) 外置自部署 Webdis（首选）：只要控制台配置了 REDIS_URL（或 REDIS_URL_KV），
@@ -132,6 +144,26 @@ function resolveEnv(passedEnv) {
     base = passedEnv;
   } else if (typeof process !== 'undefined' && process.env && typeof process.env === 'object') {
     base = process.env;
+  }
+  // 构建期静态化变量回退（仅阿里云 ESA「关联 GitHub 仓库」部署路径相关）。
+  // ESA 没有运行时环境变量注入，只有构建期环境变量（经 process.env 读取）。
+  // build.mjs 把控制台以 ESA_BUILD_ 前缀声明的变量去前缀后烤进产物常量
+  // __BUILD_ENV__（无该常量时 typeof 守卫安全降级，对 CF/EO 无影响）。
+  // 这里在「运行时 env 缺失」时把 __BUILD_ENV__ 的键补入，使 ESA 关联部署也能
+  // 拿到 JWT_SECRET / ADMIN_PASSWORD / REDIS_URL 等必备变量。运行时 env 优先级更高。
+  if (typeof globalThis !== 'undefined' && globalThis.__BUILD_ENV__ && typeof globalThis.__BUILD_ENV__ === 'object') {
+    const baked = globalThis.__BUILD_ENV__;
+    let merged = false;
+    for (const k of Object.keys(baked)) {
+      if (base[k] == null) merged = true;
+    }
+    if (merged) {
+      const next = { ...base };
+      for (const k of Object.keys(baked)) {
+        if (next[k] == null) next[k] = baked[k];
+      }
+      base = next;
+    }
   }
   // 强制平台声明，避免 caps.js 因 env 缺失而误判 unknown。
   // 用规范值 esa（旧版用 aliyun-esa，caps.js 现已归一，但保持规范写法）。

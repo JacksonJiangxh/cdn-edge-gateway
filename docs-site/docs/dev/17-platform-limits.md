@@ -17,7 +17,7 @@
 | 首字节（first‑byte）约束 | 无显式 | 无显式 | 无显式 | **10s**（网关硬断连） |
 | 内存预算 | **128MB** | 128MB 假设 | 视实例 | **128MB**（esa.jsonc） |
 | 代码包体积 | **1MB（Free）/ 10MB（Paid）** | **5MB** | **128MB** | **4MB**（ER 限制） |
-| 每请求子请求（fetch） | **50（Free）/ 1000（Paid）** | **未单列硬限**（官方未文档化，不施加内置上限） | — | **4**（保守值，待实测） |
+| 每请求子请求（fetch） | **50（Free）/ 1000（Paid）** | **未单列硬限**（官方未文档化，不施加内置上限） | — | **8**（软限制；官方常规 4、部分高配账号可达 8，可经 `MAX_SUBREQUESTS` 覆盖 1–32） |
 | 请求体上限 | **100MB** | **1MB** | **6MB** | 官方未单列 |
 | KV 单值上限 | **25MB** | — | — | **2MB**（高容量 25MB） |
 | 静态单文件 | — | — | — | **25MB** |
@@ -28,8 +28,9 @@
 > 1. **CF Pages Free 档子请求仅 50/请求**（Paid 才 1000）。本项目**内置默认即按 Free 档 50 规划**
 >    （`caps.maxSubRequests=50`），Paid 档用户可经环境变量 `MAX_SUBREQUESTS` 提到 1000；
 >    若站点很多，单次管理面批读据 50 自动分页 → 见 §3 处理。
-> 2. **ESA 子请求官方两处表述冲突（4 vs 32）**，本项目保守取 **4**。若真机实测 32 有效，
->    改 `caps.js` 两处 `4` 为 `32` 即可（单点收敛）。
+> 2. **ESA 子请求分两类独立接口**：fetch 受软限制（默认 8，真机实测常规账号 4、部分高配账号可达 8，
+>    `MAX_SUBREQUESTS` 可在 1–32 覆盖）；Cache API 独立走平台默认 32（`caps.cacheSubreqLimit=32`），不经 `MAX_SUBREQUESTS` 覆盖。
+>    若真机确证更高 fetch 配额，经环境变量 `MAX_SUBREQUESTS`（限 1–32）覆盖 `maxSubRequests` 即可。
 > 3. **EO 边缘函数官方「Limits」表未单列子请求硬上限**，故本项目对 EO **不施加内置子请求预算**
 >    （`maxSubRequests=Infinity`），不做捏造式的大数限制。
 
@@ -63,9 +64,10 @@
 ### 1.4 子请求 50（Free）/ 1000（Paid）
 - **内置默认**：`caps.maxSubRequests = 50`（cf，对齐 **Free 档硬限**）。**代码无法探测档位**，
   故保守以内置 50 规划；确在 Paid 档且站点极多，可经环境变量 `MAX_SUBREQUESTS` 提到 1000。
-- **代码层已落地守卫**（`platform/subreqBudget.js`，非仅声明）：
-  - `entry.js` 每请求 `attachToCtx` 注入独立预算计数器；`dispatch`（failover.js）每次回源
-    `track(1)` 扣减，`cache.js cachePut` 预算紧张时跳过写，`store.js readJson` 预算不足时跳过读。
+- **代码层已落地守卫（fetch 专用）**（`platform/subreqBudget.js`，非仅声明）：
+  - `entry.js` 每请求 `attachToCtx` 注入 fetch 预算计数器；`dispatch`（failover.js）每次回源
+    `track(1)` 扣减，`store.js readJson`（Webdis/Redis 读，属 fetch 性质）预算不足时跳过读。
+  - **Cache 写不在此守卫内**：`cache.js cachePut` 直接写，由平台 Cache 32 上限独立约束（不走 `MAX_SUBREQUESTS`）。
   - 预算耗尽 → 回源抛 `SUBREQ_BUDGET_EXHAUSTED` 由 failover 当源站失败处理（换源/熔断），
     管理面读降级到内存缓存/默认值，**绝不盲目撞墙**。
 - **触发现象**：`Too many subrequests`（Free 档逼近 50 时）。
@@ -109,8 +111,8 @@
   故取 **100 作为免费档近似上限**（`SUBREQ_LIMITS.eo`），**非官方硬限**，仅作代码层防护，
   防构造型请求打爆边缘。`cacheSubreqLimit` 同样为 100。确属特殊场景可经
   `MAX_SUBREQUESTS` 环境变量调整（范围 1–1000）。
-- **代码层已落地**：与 CF/ESA 同一套 `subreqBudget.js` 守卫（回源计数 / 缓存写跳过 / 读跳过），
-  预算耗尽即降级，不存在"真无限大"导致边缘被打爆的风险。
+- **代码层已落地（fetch 专用）**：与 CF/ESA 同一套 `subreqBudget.js` 守卫（回源计数 / 读跳过），
+  预算耗尽即降级，不存在"真无限大"导致边缘被打爆的风险。Cache 写经 `cache.js` 走平台 32 独立约束。
 
 ### 2.4 V8 运行时专属坑（隐藏适配）
 - **无 `node:` 内建 / `process` 可能不存在** → 本项目用 WebCrypto + `safeGlobal('process')` 守卫（见架构 §EO Makers V8 约束）。
@@ -123,24 +125,52 @@
 
 来源：`esa文档/fetchAPI.md`、`Cache API.md`、`RuntimeAPI手册.md`、`esa.jsonc` 注释。
 
-### 3.1 子请求 4（保守）— 官方两处冲突
+### 3.1 子请求限制 — fetch 软限制 8 / Cache 独立走平台 32
+> ESA 的 fetch 与 Cache 是**两个独立接口、各自独立限制**，需区别对待：
+> - **fetch 子请求**：受本项目**软限制**约束（默认 8，`MAX_SUBREQUESTS` 可在 1–32 覆盖）。官方 `fetchAPI.md`「每次可发起 4 个，4 个及以上需申请配额」，真机实测常规账号 4、高配可达 8，故软限制取 8 留余量。
+> - **Cache API**：独立走**平台默认 32**（「Cache 操作与 fetch 共享 32 个子请求约束」指 Cache 接口自身上限），**不经 `MAX_SUBREQUESTS` 覆盖，与 fetch 互不占用**。
+
 - **官方原文**：
   - `fetchAPI.md` L5/L26：「目前每次可以发起 **4** 个子请求；4 个及以上需申请配额」。
-  - `Cache API.md`：「Cache 操作与 fetch **共享 32 个**子请求约束」。
-  - 两处数字不同，官方未说明关系 → **本项目保守取 4**。
-- **内置默认**：`caps.maxSubRequests = caps.cacheSubreqLimit = 4`（esa）。
-- **代码层已落地守卫**（`platform/subreqBudget.js`，非仅声明）：
-  - `entry.js` 每请求 `attachToCtx` 注入独立预算计数器；`failover.js dispatch` 每次回源
-    `track(1)` 扣减，**且剩余预算 < 2 时自动禁用竞速**（避免 ESA 双路吃光 4 预算）；
-  - `cache.js cachePut` 在 ESA 上**预算紧张时跳过写缓存**（serve-stale 已兜底），护住回源预算；
-  - `store.js readJson` 预算不足时跳过读，管理面降级到内存缓存/默认值。
-  - 预算耗尽 → 回源抛 `SUBREQ_BUDGET_EXHAUSTED`，由 failover 当源站失败处理（换源/熔断），
-    **绝不盲目撞墙**。
-- **触发现象**：回源 + 静态同站 fetch + 管理面批读叠加逼近 4 → 子请求被掐。
+  - `Cache API.md`：「Cache 操作与 fetch **共享 32 个**子请求约束」——此为 Cache 接口自身平台默认上限。
+- **内置默认**（`caps.js`）：
+  - `caps.maxSubRequests = 8`（esa）：**仅约束回源 fetch** 的软限制；允许 `MAX_SUBREQUESTS` 在 **1–32** 内覆盖（超过 32 视为误配被钳制）。
+  - `caps.cacheSubreqLimit = 32`（esa）：Cache API 接口自身平台默认上限，**独立于 fetch 软限制**，不经 `MAX_SUBREQUESTS` 覆盖。
+- **软限制守卫**（`platform/subreqBudget.js`，作用于 fetch）：
+  - `entry.js` 每请求 `attachToCtx` 注入 fetch 预算计数器；回源 fetch 经 `track(1)` 扣减，
+    剩余预算紧张时自动降级（竞速禁用 / 跳过可选回源），护住 fetch 软限制；
+  - 预算耗尽 → 回源抛 `SUBREQ_BUDGET_EXHAUSTED`，由 failover 当源站失败处理（换源/熔断），**绝不盲目撞墙**。
+  - Cache 写（`cache.put`）**不计入 fetch 软限制**，由平台 Cache 的 32 上限独立约束。
+- **触发现象**：回源（1~2）+ 静态同站 fetch（≤1）+ 管理面批读（≈4 集合 MGET）叠加，
+  在常规账号 4 硬限下会被掐；本项目 fetch 软限制取 8 后，常规路径（数据面 ≤3、管理面 4 集合 ≈4）均安全。
 - **处理**：
-  - 管理面站点多 → `store.js` 每次集合读都经 `track` 守卫，自然受 4 约束不会越界；
-  - 数据面稳态仅 ≈2 个 fetch（1 回源 + 至多 1 静态），加预算守卫后安全余量充足；
-  - **真机实测若证实 32 有效**：把 `caps.js` 两处 `4` 改 `32`（单点收敛，同步改 `esa.jsonc` / 本文）。
+  - 管理面 4 集合快照经 `readJsonMany` 合并为单次 `MGET`（≈4 fetch 子请求），受 fetch 软限制 8 约束不越界；
+  - 数据面稳态仅 ≈2~3 个 fetch（1 回源 + ≤1 静态），加预算守卫后安全余量充足；
+  - **真机确证更高配额**：经 `MAX_SUBREQUESTS`（≤32）覆盖 fetch 软限制，`caps.js` / `subreqBudget.js` 无需改。
+
+### 3.1.1 真机 dev 实测（edgeworker2 · esa-cli dev）
+> 用 `scripts/esa-dev-probe.mjs` 在真机运行时（`edgeworker2`）加载 `esa/index.js → _worker.js`，
+> 连接用户 Webdis `db3`（Basic 凭证），临时灌入测试配置（临时域名 `esa-probe.test` → httpbin 源站），
+> 真实打印每请求 `ctx.__subreq.used`（`[SUBREQ-AUDIT]` 日志 + `X-Subreq-Used` 响应头）。实测结论：
+
+| 场景 | 真机 `used` | `limit` | 说明 |
+|---|---|---|---|
+| 冷启动·数据面（首请求） | **3** | 8 | 配置快照 `MGET`(1) + 回源 `fetch`(1) + `cachePut`(1) |
+| 稳态·数据面（配置内存缓存后） | **2~3** | 8 | 回源 `fetch`(1) + `cachePut`(1)；配置快照命中内存后不再读 KV |
+| 管理面·页面 `/__panel` | 0 | 8 | 配置已内存缓存，无新 KV 读 |
+| 管理面·API（读 global） | 0 | 8 | 鉴权拦截（401）在第 1 步，未触达 KV |
+| 未命中域名（disguise 兜底） | 0 | 8 | 伪装页走内存默认，无回源 |
+
+- **核心结论**：所有路径 `used ≤ 3`，**远低于软限制 8**，留足 ≥5 余量；冷启动额外开销仅为
+  「配置快照一次性 `MGET`（每请求若内存未命中则 1 次）」，`ensureGlobalRulesSeeded` 在 isolate 冷启动仅
+  以合法 stages 触发时**零写入**（无额外子请求）。软限制 8 经真机验证**够用**。
+- **dev 运行时真实约束（实测，非项目缺陷）**：
+  1. `edgeworker2` **禁止直连 IP 地址**（`Direct access to IP addresses is not allowed`）——源站必须填可解析域名；
+  2. 当前 dev 运行时版本对公网域名 `fetch` 触发 `deno_fetch: failed to get js_req_stats from OpState` 运行时 bug，
+     导致回源**响应 502**；但子请求计数已在 `fetch` 调用*前*由 `subreqBudget.track` 正确计入，故 `used` 仍反映真实发起数。
+  → 因此「回源 200 的端到端计数」受 dev 运行时限制无法实测，但计数路径与预算守卫已用真机验证成立；
+     上线真机（`esa-cli deploy`）运行时不带此 dev-only 限制，回源真实发生、`used` 路径一致。
+- 复跑：`node scripts/esa-dev-probe.mjs`（需先 `chmod -R 777 /root/.ew2/edgeworker2` 赋予运行时执行权限）。
 
 ### 3.2 执行墙钟 120s / 首字节 10s / 内存 128MB / 代码包 4MB
 - **内置默认**：

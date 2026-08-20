@@ -67,7 +67,7 @@ flowchart LR
 | Cloudflare Workers | `npm run deploy:cf` | 免费额度大、原生 KV、支持 TCP 回源 |
 | Cloudflare Pages | `npm run deploy:pages` | 同上，Pages 形态 |
 | EdgeOne Pages | 控制台/CLI 绑定仓库 | 节点本地缓存、`CLOUD_PLATFORM=eo` |
-| 阿里云 ESA | `npm run deploy:esa` | 静态烘焙 + REDIS_URL 兜底 KV |
+| 阿里云 ESA | 控制台连接仓库自动部署 | 静态烘焙 + REDIS_URL 兜底 KV |
 
 > [!NOTE]
 > 阿里云 ESA 部署与 MCP 管理偏进阶，放在 [开发者篇](/dev/14-deploy-esa.md)。

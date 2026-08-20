@@ -95,6 +95,25 @@ function resolveEnv(passedEnv) {
   } else if (typeof process !== 'undefined' && process.env && typeof process.env === 'object') {
     base = process.env;
   }
+  // 构建期静态化变量回退（与 esa/index.js 对称）。
+  // build.mjs 把控制台以 ESA_BUILD_ 前缀声明的构建变量去前缀后烤进产物常量
+  // __BUILD_ENV__；运行时 env 缺失时回退读取，使「无运行时注入」的平台也能拿到
+  // JWT_SECRET / REDIS_URL 等。typeof 守卫确保无该常量（CF/EO 正常部署）时零影响，
+  // 且运行时 env 优先级更高。
+  if (typeof globalThis !== 'undefined' && globalThis.__BUILD_ENV__ && typeof globalThis.__BUILD_ENV__ === 'object') {
+    const baked = globalThis.__BUILD_ENV__;
+    let merged = false;
+    for (const k of Object.keys(baked)) {
+      if (base[k] == null) merged = true;
+    }
+    if (merged) {
+      const next = { ...base };
+      for (const k of Object.keys(baked)) {
+        if (next[k] == null) next[k] = baked[k];
+      }
+      base = next;
+    }
+  }
   if (!base.CLOUD_PLATFORM) {
     base = { ...base, CLOUD_PLATFORM: 'eo' };
   }

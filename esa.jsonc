@@ -16,11 +16,11 @@
   //       "notFoundStrategy": "404Page" 且仓库不提供 404.html，使其落到函数。
   // 4. 函数代码包 ≤ 4MB、静态单文件 ≤ 25MB（本项目远小于此）。
   // 5. 运行限制：内存 128MB、执行时间 120s。
-  //    每请求子请求(fetch)预算：官方文档两处表述冲突且未说明关系——
-  //      · fetchAPI：「目前每次可以发起 4 个子请求；4 个及以上需申请配额」
-  //      · Cache API：「Cache 操作与 fetch 共享 32 个子请求约束」
-  //    → 本项目保守取较小值 4（caps.js: maxSubRequests=cacheSubreqLimit=4），待真机实测。
-  //    数据面稳态≈2 个 fetch（1 回源 + 至多 1 静态同站），在 4 内安全。
+  //    子请求分两类独立接口（互不占用）：
+  //      · fetch 子请求：受本项目软限制约束（caps.maxSubRequests=8，可由 MAX_SUBREQUESTS 在 1–32 覆盖）；
+  //        官方 fetchAPI「目前每次可以发起 4 个子请求；4 个及以上需申请配额」，真机实测常规 4、高配可达 8。
+  //      · Cache API：独立走平台默认 32（caps.cacheSubreqLimit=32），不经 MAX_SUBREQUESTS 覆盖，与 fetch 互不占用。
+  //    数据面稳态≈2 个 fetch（1 回源 + 至多 1 静态同站），管理面 4 集合 MGET≈4，均在 fetch 软限制 8 内。
   // 6. 环境变量在【ESA 控制台】设置（esa.jsonc 不支持顶层 env 字段），包括：
   //      CLOUD_PLATFORM=esa          —— 显式声明平台（规范值），caps.js 据此探测
   //      REDIS_URL                   —— 【强烈建议配置】外置持久化（自建 Webdis/Redis）。

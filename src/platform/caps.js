@@ -297,11 +297,14 @@ export function readStatsMaxHosts(env) {
  *
  * @param {Object} env 环境对象
  * @param {import('../contracts.js').Caps} [caps] 可选，未传时内部 detectCaps
+ * @param {string} [prefOverride] 偏好覆盖：当 STATS_BACKEND 为 auto/未设置时，
+ *        可由前端系统设置（cfg:global.statsDriver）注入，实现前端可控选型。
  * @returns {'d1'|'redis'|'native'|'none'} 实际生效后端
  */
-export function resolveStatsBackend(env, caps) {
+export function resolveStatsBackend(env, caps, prefOverride) {
   const c = caps || detectCaps(env);
-  const pref = readStatsBackendPreference(env);
+  // 部署者显式设置 STATS_BACKEND 时优先；否则采用 prefOverride（前端选择）。
+  const pref = readStatsBackendPreference(env) || prefOverride || 'auto';
 
   if (pref === 'none') return 'none';
   if (pref === 'd1') return c.hasD1 ? 'd1' : 'none';
@@ -454,17 +457,20 @@ export function detectCaps(env) {
   // 平台缓存差异标志（详见 docs/11-architecture.md §4.1）：
   //  - EO 的 caches.default 仅节点本地化、不跨节点复制（cacheIsNodeLocal）
   //  - ESA 仅提供全局单实例 cache、无 caches.default / open（cacheSingleInstance）
-  //  - ESA 的 Cache 操作与 fetch 共享子请求约束。官方文档给出两个数值且未说明关系：
-  //    《fetchAPI》「每次可发起 4 个子请求，4 个及以上需申请配额」、
-  //    《Cache API》「共享 32 个子请求」。保守取较小值 4（待真机实测确证）。
+  //  - ESA 的 fetch 子请求与 Cache API 是两个独立接口，各自有独立限制：
+  //    《fetchAPI》「每次可发起 4 个子请求，4 个及以上需申请配额」（经真机实测常规 4、部分高配可达 8）；
+  //    《Cache API》「共享 32 个子请求」——此为 Cache 接口自身的平台默认上限，与 fetch 互不占用。
+  //  - 本项目对 fetch 设「软限制」（MAX_SUBREQUESTS 可覆盖，默认 8，范围 1–32）；Cache 接口不归软限制管，
+  //    直接走平台默认的 32。两者区别对待。
   //  - ESA 的 put key 必须为 http URL（cacheKeyHttpOnly：引擎不支持 https key）
   const cacheIsNodeLocal = platform === 'eo';
   const cacheSingleInstance = platform === 'esa';
-  // cacheSubreqLimit：Cache API 操作与 fetch 共享同一预算。ESA=4（保守，待实测）；
-  // CF=50（Free 档硬限；Paid 经 MAX_SUBREQUESTS 提至 1000）；EO=100（官方未单列硬限，
-  // 取免费档近似上限避免无限大，详见 subreqBudget.js 的 SUBREQ_LIMITS）。
+  // cacheSubreqLimit：Cache API 接口自身的平台默认上限，独立于 fetch 软限制。
+  //   ESA=32（平台 Cache 默认「共享 32」，不经 MAX_SUBREQUESTS 覆盖）；
+  //   CF=50（Free 档硬限；Paid 经 MAX_SUBREQUESTS 提至 1000）；EO=100（官方未单列硬限，
+  //   取免费档近似上限避免无限大，详见 subreqBudget.js 的 SUBREQ_LIMITS）。
   const cacheSubreqLimit =
-    platform === 'esa' ? 4 :
+    platform === 'esa' ? 32 :
     platform === 'eo' ? 100 :
     50; // cf：Free 档硬限 50
   const cacheKeyHttpOnly = platform === 'esa';
@@ -497,19 +503,19 @@ export function detectCaps(env) {
     cacheSingleInstance,
     cacheSubreqLimit,
     cacheKeyHttpOnly,
-    // 每请求子请求（fetch）预算上限（隐藏默认，用户无需设置；详见 docs/dev/17-platform-limits.md
-    // 与 platform/subreqBudget.js 的 SUBREQ_LIMITS，二者取值必须保持一致）：
-    //   - ESA = 4（保守值；官方 fetchAPI「每次可发起 4 个子请求」与 Cache API「共享 32 个」
-    //     两处表述冲突，取较小值，待真机实测；实测 32 有效则改回）
+    // 每请求子请求（**fetch 专用**）预算软上限（仅约束回源 fetch 子请求；Cache API 走独立的
+    // cacheSubreqLimit，不在此列）。隐藏默认，用户可经 MAX_SUBREQUESTS 覆盖；详见
+    // docs-site/docs/dev/17-platform-limits.md 与 platform/subreqBudget.js 的 SUBREQ_LIMITS：
+    //   - ESA = 8（软限制；官方常规 fetch 4、部分高配账号可达 8，取 8 留余量；MAX_SUBREQUESTS 可覆盖 1–32）
     //   - CF = 50（保守对齐 **Cloudflare Pages Free 档硬限 50/请求**；Paid 档为 1000，但代码
     //     无法探测档位，且 Free 档用户占多数，故以内置 50 规划最安全；确在 Paid 档且站点极多
     //     可经环境变量 MAX_SUBREQUESTS 提到 1000）
     //   - EO = 100（**EO 官方文档未单列子请求硬上限**；用户要求「给大约数值避免无限大」，
     //     取 100 作为免费档近似上限，仅作代码层防护，非官方硬限）
-    //   用途：该值由 platform/subreqBudget.js 落地为真实运行时守卫（回源 / 缓存写 / 批读计数），
-    //   不再是纯声明——预算耗尽时降级而非盲目重试（详见 failover.js / cache.js / store.js）。
+    //   用途：该值由 platform/subreqBudget.js 落地为 fetch 子请求的运行时守卫，预算耗尽时降级
+    //   而非盲目重试（详见 failover.js / fetchEngine.js）。Cache API 不受此值约束。
     maxSubRequests:
-      platform === 'esa' ? 4 :
+      platform === 'esa' ? 8 :
       platform === 'eo' ? 100 :
       50, // cf：Free 档硬限 50；Paid=1000 可经 MAX_SUBREQUESTS 覆盖
     // isolate 内存预算上限（字节），供 memBudget 统一内存管理使用。

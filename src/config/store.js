@@ -380,20 +380,26 @@ const _snapshotState = {
  *  成功迁移返回新集合；无迁移必要返回 null。
  */
 async function migrateLegacySiteKeys(ctx) {
+  const entityKeys = [];
+  // 一次性批量读：索引 + 所有实体键（仅占 1 个子请求预算，规避 ESA 4 子请求上限）。
+  // 先以 site:_index 占位推断实体键，但索引本身未知前无法确定实体键集合；
+  // 故分两段：索引单独读（决定是否存在及实体键），实体批量读合并为一次子请求。
   const idx = await readJson(ctx, 'site:_index');
   if (!idx || !Array.isArray(idx.hosts)) return null;
   const hosts = idx.hosts.filter((h) => typeof h === 'string');
   if (hosts.length === 0) return null;
+  for (const host of hosts) entityKeys.push(`site:${String(host).toLowerCase()}`);
+  const sites = await readJsonMany(ctx, entityKeys);
   const coll = { hosts: [], wildcards: [], byHost: {} };
-  for (const host of hosts) {
-    const h = host.toLowerCase();
-    const site = await readJson(ctx, `site:${h}`);
+  hosts.forEach((host, i) => {
+    const h = String(host).toLowerCase();
+    const site = sites[i];
     if (site && typeof site === 'object') {
       coll.byHost[h] = site;
       coll.hosts.push(h);
       if (h.startsWith('*.')) coll.wildcards.push({ pattern: h, host: h });
     }
-  }
+  });
   if (coll.hosts.length > 0) {
     await writeJson(ctx, K_SITES, coll);
     return coll;
@@ -411,14 +417,16 @@ async function migrateLegacyPoolKeys(ctx) {
   if (!idx || !Array.isArray(idx.ids)) return null;
   const ids = idx.ids.filter((x) => typeof x === 'string');
   if (ids.length === 0) return null;
+  const entityKeys = ids.map((id) => `pool:${id}`);
+  const pools = await readJsonMany(ctx, entityKeys);
   const coll = { ids: [], byId: {} };
-  for (const id of ids) {
-    const pool = await readJson(ctx, `pool:${id}`);
+  ids.forEach((id, i) => {
+    const pool = pools[i];
     if (pool && typeof pool === 'object') {
       coll.byId[id] = pool;
       coll.ids.push(id);
     }
-  }
+  });
   if (coll.ids.length > 0) {
     await writeJson(ctx, K_POOLS, coll);
     return coll;
@@ -450,8 +458,18 @@ export async function loadConfigSnapshot(ctx) {
       return;
     }
 
+    // 1~5. 一次性批量读取全部固定配置键（仅 1 次子请求预算，规避 ESA 4 子请求上限）
+    // 原方案逐键 readJson 共 5 次子请求，在 ESA 上直接撞线降级；改为 readJsonMany
+    // 后后端（Webdis MGET / CF-EO 并行 GET）合并为一次/少量请求。
+    const [verRaw, rawGlobal, rawRules, rawSites, rawPools] = await readJsonMany(ctx, [
+      K_VERSION,
+      K_GLOBAL,
+      K_GLOBAL_RULES,
+      K_SITES,
+      K_POOLS,
+    ]);
+
     // 1. 版本号
-    const verRaw = await readJson(ctx, K_VERSION);
     const ver = typeof verRaw === 'number' && Number.isFinite(verRaw) ? verRaw : 0;
     _verState.value = ver;
     _cachedGlobalVersion = ver;
@@ -459,8 +477,7 @@ export async function loadConfigSnapshot(ctx) {
 
     // 2. 全局配置
     try {
-      const raw = await readJson(ctx, K_GLOBAL);
-      const cfg = raw ? validateGlobal(raw).value : cloneGlobal();
+      const cfg = rawGlobal ? validateGlobal(rawGlobal).value : cloneGlobal();
       _ttlMs = Math.max(0, (cfg.configCacheTtl ?? 60) * 1000);
       if (
         (ctx?.caps?.platform === 'edgeone' || ctx?.caps?.platform === 'eo') &&
@@ -476,7 +493,6 @@ export async function loadConfigSnapshot(ctx) {
 
     // 3. 全站规则（规范化后进内存，供 getGlobalRules 纯内存读）
     try {
-      const rawRules = await readJson(ctx, K_GLOBAL_RULES);
       const stages = _normalizeGlobalRulesInMemory(rawRules);
       _snapshotState.globalRules = { stages };
       memSet(K_GLOBAL_RULES, { stages });
@@ -486,7 +502,7 @@ export async function loadConfigSnapshot(ctx) {
 
     // 4. 站点族 + 5. 源站池族（含旧散乱键迁移）
     try {
-      let coll = await readJson(ctx, K_SITES);
+      let coll = rawSites;
       let siteColl = coll && typeof coll === 'object' ? normalizeSiteCollection(coll) : null;
       if (!siteColl || (siteColl.hosts.length === 0 && !coll)) {
         const migrated = await migrateLegacySiteKeys(ctx);
@@ -499,7 +515,7 @@ export async function loadConfigSnapshot(ctx) {
       console.error('[store] 快照加载站点失败（已降级为空）:', err?.message);
     }
     try {
-      let coll = await readJson(ctx, K_POOLS);
+      let coll = rawPools;
       let poolColl = coll && typeof coll === 'object' ? normalizePoolCollection(coll) : null;
       if (!poolColl || (poolColl.ids.length === 0 && !coll)) {
         const migrated = await migrateLegacyPoolKeys(ctx);
@@ -762,6 +778,42 @@ async function readJson(ctx, key) {
     console.error(`[store] 读取 ${key} 失败:`, err?.message);
     return null;
   }
+}
+
+/**
+ * 批量安全读取 JSON（读路径专用，绝不抛错）。
+ * 核心优化：把「读 N 个键 = N 次子请求预算」合并为「1 次」。
+ * ESA 强制每请求最多 ~4 个 fetch 子请求，逐键 GET 在快照加载（version/global/
+ * rules/sites/pools 共 5 键）或旧散乱键迁移（索引 + 逐实体）时极易撞限并降级为 null。
+ * 后端若支持批量读（Webdis 走单次 MGET，CF/EO/ESA 走并行 GET），本函数优先调用
+ * kv.batchGet 合并为一次/少量请求；旧适配器或测试桩若无 batchGet 方法，则回退到
+ * 逐键 readJson（行为与原先完全一致，零侵入）。
+ * 返回数组与 keys 严格同序，任意键缺失/失败对应位为 null。
+ * @param {import('../contracts.js').Ctx} ctx
+ * @param {string[]} keys 键名数组
+ * @returns {Promise<(any|null)[]>}
+ */
+async function readJsonMany(ctx, keys) {
+  const list = Array.isArray(keys) ? keys : [];
+  const kv = getKV(ctx.env);
+  if (!kv) return list.map(() => null);
+  // 整组批量读只占 1 个子请求预算（而非每键各 1），把 N 次子请求压成 1 次。
+  if (!trackSubreq(1, ctx)) {
+    console.warn(`[store] 子请求预算不足，跳过批量读取 ${list.length} 个键`);
+    return list.map(() => null);
+  }
+  if (typeof kv.batchGet === 'function') {
+    try {
+      const res = await kv.batchGet(list, 'json');
+      if (Array.isArray(res) && res.length === list.length) return res;
+      // 长度不符（不应发生）→ 回退逐键，保证顺序与数量正确
+      console.warn('[store] batchGet 返回长度异常，回退逐键读取');
+    } catch (err) {
+      console.error('[store] 批量读取失败，回退逐键:', err?.message);
+    }
+  }
+  // 回退：逐键（每个键各自扣 1 预算；无 batchGet 时的兼容路径）
+  return Promise.all(list.map((k) => readJson(ctx, k)));
 }
 
 /** 写入 JSON，失败向上抛 */

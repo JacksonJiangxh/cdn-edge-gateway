@@ -32,9 +32,14 @@ export async function info(ctx, global) {
   const g = global || (await getGlobal(ctx));
   const baked = isBakedMode(ctx);
   // 统计落盘实际生效后端（独立于配置 KV 后端）：d1 / redis（自部署）/ native（厂商）/ none
-  // 由 STATS_BACKEND 平台开关 + 实际部署可用性共同决定，前端据此展示「配置存哪、统计存哪」。
-  const statsBackend = resolveStatsBackend(ctx.env, ctx.caps);
-  const statsBackendPref = readStatsBackendPreference(ctx.env);
+  // 由 STATS_BACKEND 平台开关 + 前端系统设置（g.statsDriver）+ 实际部署可用性共同决定。
+  // STATS_BACKEND 显式设置时优先；否则采用前端选择，使面板展示与运行时真实落盘一致。
+  const statsBackendPrefEnv = readStatsBackendPreference(ctx.env);
+  const statsPrefOverride = (statsBackendPrefEnv === 'auto' || statsBackendPrefEnv == null) && g?.statsDriver
+    ? g.statsDriver
+    : statsBackendPrefEnv;
+  const statsBackend = resolveStatsBackend(ctx.env, ctx.caps, statsPrefOverride);
+  const statsBackendPref = statsPrefOverride;
   const statsTtl = readStatsTtl(ctx.env);
   const statsMaxHosts = readStatsMaxHosts(ctx.env);
   return ok({

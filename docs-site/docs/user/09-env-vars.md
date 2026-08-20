@@ -97,9 +97,40 @@
 | 步骤 | 内容 |
 |---|---|
 | ① 可视化操作 | ESA 控制台创建函数 / 站点；ESA 本项目**统一禁用厂商 KV**，请用自部署 Webdis 或静态烘焙 |
-| ② 命令 | `npm run build` → `npm run deploy:esa` |
+| ② 命令 | `npm run build`（本地构建产物）→ 控制台连接仓库自动部署（见 [部署 ESA](/dev/14-deploy-esa.md) §4/§5） |
 | ③ 创建的工具 | 无必绑 KV（厂商 KV 已禁用）；Webdis 后端需你自备 Redis + 反代 |
 | ④ 要设的变量 | **`CLOUD_PLATFORM=esa`（必）**、`JWT_SECRET`（必）、`ADMIN_PASSWORD`（首次必）；**推荐 `REDIS_URL` + `REDIS_TOKEN`**（配即启用 Webdis，否则自动 `STATIC_CONFIG=1` 只读）；可选 `KV_BACKEND`/`REDIS_PREFIX`/`REDIS_DB`/`REDIS_TIMEOUT_MS`/`STATIC_CONFIG`/`MEM_BUDGET_BYTES`/`EXECUTION_LIMIT_MS`/`FIRST_BYTE_LIMIT_MS`/`ADMIN_PATH` |
+
+#### ESA 关联 GitHub 仓库部署：构建期变量必须以 `ESA_BUILD_` 前缀声明
+
+ESA「关联 GitHub 仓库」构建部署**没有运行时环境变量注入**，只有「构建环境变量」（构建期间经 `process.env` 读取）。本项目约定**固定前缀 `ESA_BUILD_`** 命名构建变量，与运行时变量（CF/EO 控制台的 secret/var）命名空间隔离：
+
+- 你在 ESA 控制台「构建环境变量」面板设置 `ESA_BUILD_JWT_SECRET`、`ESA_BUILD_ADMIN_PASSWORD`、`ESA_BUILD_REDIS_URL` 等；
+- `build.mjs` 在打包前扫描该前缀、去前缀后把真实变量名（`JWT_SECRET`/`ADMIN_PASSWORD`/`REDIS_URL`）烤进产物常量 `globalThis.__BUILD_ENV__`；
+- 运行时薄壳 `resolveEnv` 在运行时 env 缺失时回退读取 `__BUILD_ENV__`，ESA 关联部署即可拿到必备变量。
+- **没有 `ESA_BUILD_*`（如纯 CLI 部署 `esa-cli deploy`）时产物为空对象 `__BUILD_ENV__ = {}`，回退逻辑零影响**，与 CF/EO 行为一致。
+
+**关联 GitHub 部署时控制台「构建环境变量」设置示例：**
+
+| 控制台变量名（带前缀） | 去前缀后的真实变量 | 说明 |
+|---|---|---|
+| `ESA_BUILD_JWT_SECRET` | `JWT_SECRET` | 会话密钥，≥8 字符高熵随机串 |
+| `ESA_BUILD_ADMIN_PASSWORD` | `ADMIN_PASSWORD` | 仅首次初始化 |
+| `ESA_BUILD_REDIS_URL` | `REDIS_URL` | 自建 Webdis 地址（ESA 无平台 KV，必填才能可写） |
+| `ESA_BUILD_REDIS_TOKEN` | `REDIS_TOKEN` | Webdis 凭证 base64 串（代码自动补 `Basic `） |
+| `ESA_BUILD_REDIS_PREFIX` | `REDIS_PREFIX` | 多项目共库隔离键（可选） |
+| `ESA_BUILD_REDIST_URL_KV` / `ESA_BUILD_REDIS_DB` / `ESA_BUILD_REDIS_TIMEOUT_MS` / `ESA_BUILD_KV_BACKEND` / `ESA_BUILD_MEM_BUDGET_BYTES` | 同名真实变量 | 其余可静态化的变量同理加 `ESA_BUILD_` 前缀 |
+
+> 前缀规则是**自动的**：任何 `ESA_BUILD_XXX` 都会被去前缀后烤入产物，无需改代码；凡「有默认值且代码内已按平台分支给出」（如 `EXECUTION_LIMIT_MS`/`REDIS_PREFIX`）或「落 KV 储存」（如 `ADMIN_PATH`）的变量，无需通过此前缀注入。
+
+**`ADMIN_PASSWORD` 明文权衡与清理流程（重要）：**
+
+`ADMIN_PASSWORD` 以 `ESA_BUILD_ADMIN_PASSWORD` 设入后，会**明文出现在构建产物 JS 中**（这是 ESA 无运行时 secret 注入的已知权衡）。正确做法是**一次性使用**：
+
+1. 在 ESA 控制台「构建环境变量」设 `ESA_BUILD_ADMIN_PASSWORD=临时强密码`，连同 `ESA_BUILD_JWT_SECRET`/`ESA_BUILD_REDIS_URL`/`ESA_BUILD_REDIS_TOKEN` 一起提交，触发关联构建部署；
+2. 首次访问登录页，用该密码初始化管理员账号——哈希会经 `REDIS_URL`（Webdis）**固化进 KV**；
+3. 登录成功后，**回到 ESA 控制台删除 `ESA_BUILD_ADMIN_PASSWORD`**，再触发一次重建部署——产物中的明文密码即被清空，之后完全依赖 KV 中固化的哈希校验，不再需要该构建变量。
+4. 因 ESA 无平台 KV，**必须配 `ESA_BUILD_REDIS_URL`** 才能把哈希固化到 Webdis；若未配 `REDIS_URL`，ESA 自动进入 `STATIC_CONFIG=1` 只读模式，管理员哈希无处固化，初始化会失败。
 
 ---
 

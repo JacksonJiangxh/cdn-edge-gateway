@@ -292,6 +292,69 @@ export function createRedisKV(env) {
       }
     },
 
+    // ---- 批量读取：Webdis MGET 单次请求 ----
+    // ESA 强制每请求最多 4 个子请求，逐键 GET 在读取多配置键（站点索引 + 逐站点等）
+    // 时极易撞限。Webdis 的 MGET 支持多键单请求，返回值数组与入参顺序一一对应、
+    // 缺失键为 null，与单键 GET 语义对齐（已实测）。故把 N 次 GET 合并为 1 次 MGET，
+    // 子请求预算消耗从 N 降为 1，彻底规避 ESA 子请求上限。
+    // 返回数组与 keys 严格同序：非法 key / 缺失 / 解析失败 对应位为 null。
+    async batchGet(keys, type = 'json') {
+      const list = Array.isArray(keys) ? keys : [];
+      // 先按 keys 顺序构造结果与物理键（非法 key 直接占位 null，保持顺序）
+      const slots = list.map((k) => {
+        if (typeof k !== 'string' || k === '') return { ok: false };
+        try {
+          const logical = encodeKey(k);
+          const phys = physKey(prefix, logical);
+          if (typeof phys !== 'string' || phys === '') return { ok: false };
+          return { ok: true, phys };
+        } catch {
+          return { ok: false };
+        }
+      });
+      const physKeys = slots.filter((s) => s.ok).map((s) => s.phys);
+      // 没有任何合法 key：不发起请求，直接全 null 占位
+      if (physKeys.length === 0) {
+        return list.map(() => null);
+      }
+      try {
+        const json = await webdisFetch(
+          readUrl(base, 'MGET', physKeys, dbSegment),
+          { method: 'GET' },
+          token,
+          timeoutMs,
+        );
+        const arr = unwrap(json, 'MGET').value;
+        if (!Array.isArray(arr)) {
+          console.warn('[webdis] MGET 返回结构异常，降级为全 null');
+          return list.map(() => null);
+        }
+        // 解析每个元素（与 get 的解析分支对齐，但适配 MGET 的特殊语义）。
+        // Webdis GET 对所有值包一层 JSON 引用（值 → 字符串 → 再 JSON.parse 还原）；
+        // 而 MGET 对「字符串类型的 value」会**多剥一层引号**（裸串直接返回，非合法 JSON），
+        // 对对象/数字/布尔等仍返回其 JSON 序列化字符串。因此：
+        //   - 元素是对象 → 已是解析后对象（type json 直接取，text 序列化）；
+        //   - 元素是字符串且 JSON.parse 成功 → 还原为对象/数字/布尔/字符串；
+        //   - 元素是字符串但 JSON.parse 失败（如裸 "alpha"）→ 这正是 MGET 被多剥引号
+        //     后的字符串 value 本身，直接返回 raw（与 get 语义一致，而非当作非法降级 null）。
+        return slots.map((s, i) => {
+          if (!s.ok) return null;
+          const raw = arr[i];
+          if (raw === null || raw === undefined) return null;
+          if (typeof raw === 'object') return type === 'json' ? raw : JSON.stringify(raw);
+          if (type === 'text') return String(raw);
+          if (type === 'json') {
+            try { return JSON.parse(raw); } catch { return raw; }
+          }
+          return String(raw);
+        });
+      } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        console.warn(`[webdis] MGET 失败：${msg}`);
+        return list.map(() => null);
+      }
+    },
+
     async put(key, value, opts) {
       if (typeof key !== 'string' || key === '') return;
       const logical = encodeKey(key);

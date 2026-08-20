@@ -1732,15 +1732,27 @@ export function validateGlobal(input, caps, current) {
   let globalRateLimit = int(input.globalRateLimit, d.globalRateLimit, 0, 1000000);
   if (globalRateLimit > 0 && globalRateLimit < 10) globalRateLimit = 10;
 
-  // 统计驱动自适应：统计落盘只支持 D1。平台无 D1 绑定时，用户即便选了 'd1' 也
-  // 无法落盘——按产品语义「没有就不可用」自动归一到 'none'（统计功能关闭），
-  // 而非报错阻断保存。这样 EdgeOne / ESA 等无 D1 平台也能正常保存全局配置。
-  let statsDriver = enumOf(input.statsDriver, ['d1', 'none'], d.statsDriver);
-  if (caps && caps.hasD1 === false && statsDriver === 'd1') {
-    statsDriver = 'none';
-    console.warn(
-      `[config] 平台（${caps.platform || 'unknown'}）未绑定 D1，统计驱动自动归一到 'none'（统计功能不可用，绝不写 KV）`
-    );
+  // 统计落盘后端选择（独立于配置 KV 后端）：用户可在前端系统设置里直接选
+  // d1 / 自部署 KV(redis) / 平台 KV(native) / auto / none。无 D1 也不再强制归
+  // none——允许选 native/redis，由平台实际可用性在运行时再确定真实落盘点。
+  // 软归零：选了「平台未部署」的后端 → 归一到 'none'（统计不可用），而非报错阻断保存。
+  // 兼容旧版前端存入的 'kv'（当时语义=统计存 KV），归一到 'auto'，交由部署默认决定落盘点。
+  const rawStatsDriver = input.statsDriver === 'kv' ? 'auto' : input.statsDriver;
+  let statsDriver = enumOf(rawStatsDriver, ['d1', 'redis', 'native', 'auto', 'none'], d.statsDriver);
+  if (caps) {
+    const haveD1 = caps.hasD1 === true;
+    const haveRedis = caps.kvRedis === true;
+    const haveNative = caps.kvNative === true;
+    if (statsDriver === 'd1' && !haveD1) {
+      statsDriver = 'none';
+      console.warn(`[config] 平台（${caps.platform || 'unknown'}）未绑定 D1，统计驱动 'd1' 自动归一到 'none'`);
+    } else if (statsDriver === 'redis' && !haveRedis) {
+      statsDriver = 'none';
+      console.warn(`[config] 平台（${caps.platform || 'unknown'}）未配置自部署 Webdis(REDIS_URL)，统计驱动 'redis' 自动归一到 'none'`);
+    } else if (statsDriver === 'native' && !haveNative) {
+      statsDriver = 'none';
+      console.warn(`[config] 平台（${caps.platform || 'unknown'}）未探测到厂商 KV，统计驱动 'native' 自动归一到 'none'`);
+    }
   }
 
   const value = {
@@ -1774,11 +1786,15 @@ export function validateGlobal(input, caps, current) {
 export function checkGlobalCaps(value, caps) {
   const errors = [];
   if (!caps) return errors;
-  if (caps.hasD1 === false && value.statsDriver === 'd1') {
-    errors.push(
-      `统计驱动设为 d1，但当前平台（${caps.platform || 'unknown'}）不支持 D1；` +
-        `统计落盘只支持 D1，无 D1 时请改为 'none'（统计功能不可用）`
-    );
+  // 防御性校验：理论上上游已做软归零，这里仅在 caps 明确不可用且仍命中时拦截。
+  if (value.statsDriver === 'd1' && caps.hasD1 === false) {
+    errors.push(`统计驱动设为 d1，但当前平台（${caps.platform || 'unknown'}）不支持 D1，请改选 auto/native/redis/none`);
+  }
+  if (value.statsDriver === 'redis' && caps.kvRedis === false) {
+    errors.push(`统计驱动设为 redis(自部署 Webdis)，但当前平台未配置 REDIS_URL，请改选 auto/d1/native/none`);
+  }
+  if (value.statsDriver === 'native' && caps.kvNative === false) {
+    errors.push(`统计驱动设为 native(平台 KV)，但当前平台未探测到厂商 KV，请改选 auto/d1/redis/none`);
   }
   return errors;
 }

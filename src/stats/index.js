@@ -153,8 +153,14 @@ async function resolveDriver(ctx) {
     /* cfg 读不到按 auto 继续 */
   }
 
-  const pref = readStatsBackendPreference(ctx?.env);
-  const backend = resolveStatsBackend(ctx?.env, caps); // 受可用性约束，非法选择 → 'none'
+  // 部署者偏好（STATS_BACKEND 环境变量）优先；若为 auto/未设置，则回退到前端在
+  // 系统设置里选择的 statsDriver（写入 cfg:global）。注意：getGlobal 已在 KV 适配器
+  // 选定之后调用，因此此处读取配置不会形成「读配置前需先知后端」的循环依赖。
+  let pref = readStatsBackendPreference(ctx?.env);
+  if ((pref === 'auto' || pref == null) && cfg && cfg.statsDriver) {
+    pref = cfg.statsDriver;
+  }
+  const backend = resolveStatsBackend(ctx?.env, caps, pref); // 受可用性约束，非法选择 → 'none'
 
   if (backend === 'none') return { name: 'none', mod: null, kvSub: null };
   if (backend === 'd1') {

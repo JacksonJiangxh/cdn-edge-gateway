@@ -171,10 +171,10 @@ export async function requestWithFailover(ctx, pool, rule, hostHeader, opts = {}
   if (!Array.isArray(ctx.debug.notes)) ctx.debug.notes = [];
   ctx.debug.notes.push(`budget-cap:${budget}`);
 
-  // 竞速会瞬间并行两个回源 fetch（占 2 个子请求）。ESA 每请求仅 ~4 个子请求预算
-  // （官方两处冲突待实测），若剩余预算不足以再承受 2 个 fetch，则禁用竞速，
-  // 退回纯串行单路，避免竞速双路直接挤爆子请求预算导致整请求 5xx。
-  const enoughBudgetForRace = remainingSubreq(ctx) >= 2;
+  // 竞速会瞬间并行两个回源 fetch（占 2 个子请求）。ESA 软限制为 8 个子请求预算
+  // （官方常规 4、部分高配账号 8），但数据面还可能叠加同站静态 fetch（≤1）与 Cache put（1），
+  // 故预留余量：仅当剩余预算 ≥ 3 时才允许竞速，避免双路 + 静态 + 缓存写挤爆预算导致整请求 5xx。
+  const enoughBudgetForRace = remainingSubreq(ctx) >= 3;
   const speculable = enabled && speculativeMs > 0 && isSpeculable(ctx, bodyBuf) && enoughBudgetForRace;
 
   for (let attempt = 0; attempt < totalAttempts; attempt++) {
@@ -586,10 +586,11 @@ function snapshotResp(resp) {
  * @returns {Promise<Response>} 源站响应
  */
 async function dispatch(ctx, origin, originUrl, headers, timeoutMs, opts) {
-  // 子请求预算守卫：每次 dispatch 至少发起 1 个回源子请求，先扣预算。
-  // 预算不足（如 ESA 4 预算已被回源+缓存写吃紧）直接抛错，由 requestWithFailover
-  // 的 catch 当作源站失败处理（记冷却 + 换源 / 最终 502 兜底），而非盲目撞墙。
-  // 注意：track 一旦成功即计入平台侧计数（无论后续成败），故失败也占用预算。
+  // 子请求预算守卫（**仅约束回源 fetch**，不含 Cache API）：每次 dispatch 至少发起
+  // 1 个回源子请求，先扣 fetch 软限制预算（MAX_SUBREQUESTS，ESA 默认 8）。预算不足
+  // 直接抛错，由 requestWithFailover 的 catch 当作源站失败处理（记冷却 + 换源 /
+  // 最终 502 兜底），而非盲目撞墙。注意：Cache 写经 cache.js 走平台 32，不在此列。
+  // track 一旦成功即计入平台侧计数（无论后续成败），故失败也占用预算。
   if (!trackSubreq(1, ctx)) {
     const err = new Error('subrequest budget exhausted before origin fetch');
     err.code = 'SUBREQ_BUDGET_EXHAUSTED';

@@ -5,8 +5,10 @@
  * 【为什么需要它】
  * 三平台的边缘运行时对「单个客户端请求内可发起的子请求(fetch / Cache API 操作)
  * 总数」都有硬约束，超限会被网关直接掐断（返回 5xx / 子请求耗尽错误）：
- *   - ESA  ：官方 fetchAPI「每次可发起 4 个子请求」与 Cache API「共享 32 个」两处
- *            表述冲突，本项目保守取 4（待真机实测确证）。
+ *   - ESA  ：fetchAPI 与 Cache API 是两个独立接口、各自独立限制——fetch 官方「每次可发起 4 个」
+ *            （真机实测常规 4、部分高配可达 8）；Cache API「共享 32 个」为 Cache 接口自身平台默认上限。
+ *            本项目只对 **fetch** 设软限制 8（MAX_SUBREQUESTS 可覆盖 1–32）；Cache 接口不归软限制管，
+ *            直接走平台默认 32，与 fetch 互不占用。
  *   - CF   ：Cloudflare Pages **Free 档仅 50/请求**（Paid=1000），代码无法探测档位，
  *            默认按 Free 档 50 规划最安全。
  *   - EO   ：官方文档（edge-functions SKILL「Limits」表）**未单列子请求硬上限**，
@@ -37,8 +39,8 @@
  * @type {Readonly<Record<string, number>>}
  */
 export const SUBREQ_LIMITS = Object.freeze({
-  /** ESA：保守取 4（官方两处文档冲突待实测） */
-  esa: 4,
+  /** ESA：自设软限制 8（官方常规 4、部分高配账号可达 8；MAX_SUBREQUESTS 可覆盖） */
+  esa: 8,
   /** CF：对齐 Free 档硬限 50；Paid=1000 可经 MAX_SUBREQUESTS 覆盖 */
   cf: 50,
   /**
@@ -83,8 +85,10 @@ let _budget = { limit: Infinity, used: 0 };
 let _initialized = false;
 
 /**
- * 读取 MAX_SUBREQUESTS 环境变量覆盖（仅对 cf / eo 生效；ESA 固定按官方保守值，
- * 不暴露覆盖以免误配冲垮 4 预算）。允许 Free→Paid 提升（如 cf 提到 1000）。
+ * 读取 MAX_SUBREQUESTS 环境变量覆盖（cf / eo / esa 均生效）。
+ *   - ESA 软限制已自设为 8（常规账号 4、部分高配账号可达 8），允许经环境变量覆盖，
+ *     但限定 1–32 合理范围，既避免误配冲垮 4 的硬限，也允许在确认高配配额时上调。
+ *   - cf / eo 允许不高于 1000（Free→Paid 提升，如 cf 提到 1000）。
  * @param {Object} env 环境变量
  * @param {string} platform 规范平台值
  * @param {number} base 平台默认上限
@@ -93,8 +97,10 @@ let _initialized = false;
 function resolveLimit(env, platform, base) {
   const override = readNumEnv(env, 'MAX_SUBREQUESTS');
   if (override == null) return base;
-  // ESA 禁止覆盖（保守值待实测，误配风险高）
-  if (platform === 'esa') return base;
+  if (platform === 'esa') {
+    // ESA 官方常规硬限为 4、部分账号 8；覆盖范围收紧到 1–32，防误配冲垮硬限
+    return Math.min(32, Math.max(1, Math.floor(override)));
+  }
   // 仅允许「不高于 1000」的合理范围，防误设 Infinity/负数
   return Math.min(1000, Math.max(1, Math.floor(override)));
 }

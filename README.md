@@ -63,7 +63,7 @@
 | 11 | [系统架构](./docs-site/docs/dev/11-architecture.md) | 代码分层、模块职责、平台能力降级、内存预算 |
 | 12 | [请求处理流程](./docs-site/docs/dev/12-request-flow.md) | 一个请求从进到出的完整链路 |
 | 13 | [Redis/Webdis KV 兜底](./docs-site/docs/dev/13-redis-kv.md) | 无原生 KV 平台（ESA）用 Webdis 持久化 |
-| 14 | [部署到阿里云 ESA](./docs-site/docs/dev/14-deploy-esa.md) | ESA 控制台 / CLI / 流水线部署 |
+| 14 | [部署到阿里云 ESA](./docs-site/docs/dev/14-deploy-esa.md) | 控制台连接仓库自动部署 |
 | 15 | [ESA MCP Server](./docs-site/docs/dev/15-mcp-esa.md) | 在 AI IDE 里用自然语言管理 ESA |
 
 **附录**：[状态码说明](./docs-site/docs/appendix/status-codes.md) · [隐藏配置字段](./docs-site/docs/appendix/hidden-fields.md) · [502 错误说明](./docs-site/docs/appendix/502.md)

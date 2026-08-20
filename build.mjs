@@ -439,6 +439,46 @@ const EXTERNAL_MODULES = [
   'node:zlib',
 ];
 
+// ---------------------------------------------------------------------------
+// 构建期环境变量吸收（仅阿里云 ESA「关联 GitHub 仓库」部署路径需要）
+// ---------------------------------------------------------------------------
+// ESA 控制台只提供「构建环境变量」（构建期间经 process.env 读取），没有运行时
+// 环境变量注入。本函数扫描所有以 ESA_BUILD_ 前缀声明的构建变量，去前缀后得到
+// 真实变量名（如 ESA_BUILD_JWT_SECRET → JWT_SECRET），组装为普通对象，由上方
+// esbuild define 烤进产物常量 __BUILD_ENV__。运行时薄壳 resolveEnv 在运行时 env
+// 缺失时回退读取该常量。
+//
+// 设计要点：
+//   - 固定前缀 ESA_BUILD_ 与运行时变量（CF/EO 控制台的 secret/var）命名空间隔离，
+//     绝不会误烤任何运行时变量，也无需维护显式键白名单——用户新增构建变量只需
+//     按前缀命名即自动生效。
+//   - 只取「有值」的键（空字符串 / 未设置不注入），语义等同运行时缺省，交给代码
+//     内厂商分支默认值处理。
+//   - 没有 ESA_BUILD_* 时返回 {}，产物里 __BUILD_ENV__ 为空对象，CF/EO 部署零影响。
+const BUILD_ENV_PREFIX = 'ESA_BUILD_';
+
+/**
+ * 扫描 process.env 中所有 ESA_BUILD_ 前缀变量，去前缀组装为真实变量名映射。
+ * @returns {Record<string, string>}
+ */
+function collectBuildEnv() {
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k.startsWith(BUILD_ENV_PREFIX) && typeof v === 'string' && v !== '') {
+      out[k.slice(BUILD_ENV_PREFIX.length)] = v;
+    }
+  }
+  if (Object.keys(out).length > 0) {
+    console.log(`▸ 构建期环境变量：检测到 ${Object.keys(out).length} 个 ESA_BUILD_*，将烤进产物 __BUILD_ENV__`);
+  }
+  return out;
+}
+
+// 在 esbuild 配置求值前一次性采集，供下方 banner 注入 globalThis.__BUILD_ENV__。
+// 模块顶层 const 在 buildOptions 引用时已完成求值，且 collectBuildEnv 已做前缀过滤。
+const BUILD_ENV_VALUE = collectBuildEnv();
+
 /** @type {esbuild.BuildOptions} */
 const buildOptions = {
   entryPoints: [join(SRC, 'entry.js')],
@@ -459,11 +499,21 @@ const buildOptions = {
   // EO 与 ESA 都经各自薄壳（edge-functions/[[default]].js、esa/index.js）转发，
   // 薄壳会在调用前把 env.CLOUD_PLATFORM 强制置为 'eo' / 'esa'，优先级高于此默认值。
   // 于是三平台都无需任何控制台/API 配置即可正确判定厂商。
+  //
+  // __BUILD_ENV__（构建期环境变量静态化常量）：注意 esbuild 的 define 仅「文本替换
+  // 源码中实际出现的标识符」，而 __BUILD_ENV__ 在 src/ 中不被引用，会被丢弃。
+  // 因此改用 banner 在产物顶部真实声明 globalThis.__BUILD_ENV__（见下方 banner.js）。
+  // 仅阿里云 ESA「关联 GitHub 仓库」部署时生效——ESA 没有运行时环境变量注入能力，
+  // 仅在构建期提供「构建环境变量」（经 process.env 读取）。我们把所有以 ESA_BUILD_
+  // 前缀声明的构建变量去前缀后烤进此对象，运行时由薄壳 resolveEnv 在运行时 env
+  // 缺失时回退读取，从而让 ESA 关联部署也能拿到 JWT_SECRET / REDIS_URL 等。
+  // CF / EO 部署时产物里此对象为空（无 ESA_BUILD_*），薄壳默认不回退，零影响。
   define: {
     __BUILD_PLATFORM__: JSON.stringify('cf'),
   },
   banner: {
-    js: `// cdn-edge-gateway — built at ${new Date().toISOString()}\n// 构建产物，请勿手动编辑。修改源码请编辑 src/ 目录后重新运行 npm run build`,
+    js: `// cdn-edge-gateway — built at ${new Date().toISOString()}\n// 构建产物，请勿手动编辑。修改源码请编辑 src/ 目录后重新运行 npm run build\n// 构建期静态化环境变量（前缀 ESA_BUILD_ 去前缀后烤入，详见 collectBuildEnv）。
+globalThis.__BUILD_ENV__ = ${JSON.stringify(BUILD_ENV_VALUE)};`,
   },
 };
 

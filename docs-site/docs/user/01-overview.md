@@ -49,7 +49,7 @@ flowchart LR
 | **Cloudflare Workers** | 最省事、自定义域名方便 | `npm run deploy:cf` | 看 CF 节点 |
 | **Cloudflare Pages** | 已有 Git 仓库、想自动构建 | `npm run deploy:pages` | 看 CF 节点 |
 | **EdgeOne Pages** | 业务在国内、要国内边缘 | 控制台 / CLI 绑仓库 | ✅ 有 |
-| **阿里云 ESA** | 想用阿里云、或要做 AI 管理 | `npm run deploy:esa` | ✅ 有 |
+| **阿里云 ESA** | 想用阿里云、或要做 AI 管理 | 控制台连接仓库自动部署 | ✅ 有 |
 
 > [!TIP]
 > 新手直接选 **Cloudflare Workers**，命令最少、自定义域名最方便。

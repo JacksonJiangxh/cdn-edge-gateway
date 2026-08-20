@@ -288,6 +288,22 @@ function wrap(raw) {
     },
 
     /**
+     * 批量读取（KVLike 可选方法）。
+     * CF/EO 无「单请求子请求上限」约束，这里并行调用单键 get 即可，行为与原逐键读一致；
+     * 主要为了让 store.readJsonMany 在任意后端都有统一接口（Webdis 后端会走真正的
+     * 单次 MGET，把 ESA 子请求消耗从 N 降为 1）。
+     * @param {string[]} keys 键名数组
+     * @param {'text'|'json'} [type='json'] 期望的返回类型（store 批量读统一用 json）
+     * @returns {Promise<(any|null)[]>}
+     */
+    async batchGet(keys, type = 'json') {
+      const list = Array.isArray(keys) ? keys : [];
+      return Promise.all(
+        list.map((k) => this.get(k, type).catch(() => null))
+      );
+    },
+
+    /**
      * 写入一个键。
      * 只透传 expirationTtl（两平台共有），metadata / expiration 在 EdgeOne 上不支持，
      * 为保证行为一致这里统一不使用。
@@ -543,6 +559,15 @@ function createEdgeKVAdapter(env) {
       } catch {
         return null;
       }
+    },
+
+    // batchGet（KVLike 可选方法）：ESA 已统一禁用厂商 KV（持久化走 Webdis），
+    // 此分支多为兜底/测试场景。并行调用单键 get 即可，接口与 wrap 对齐。
+    async batchGet(keys, type = 'json') {
+      const list = Array.isArray(keys) ? keys : [];
+      return Promise.all(
+        list.map((k) => this.get(k, type).catch(() => null))
+      );
     },
 
     async put(key, value, opts) {

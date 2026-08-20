@@ -22,9 +22,9 @@
  * @property {boolean} eoEdgeCache        是否支持 EO 同站 fetch 委托节点缓存（运行在 EO 边缘函数且站点已接入加速域名；命中后零函数调用）
  * @property {boolean} cacheIsNodeLocal    缓存仅当前边缘节点有效、不跨节点复制（eo=true；cf/esa=false）
  * @property {boolean} cacheSingleInstance 平台仅提供单实例全局 cache、无 caches.default/open 命名空间（esa=true；cf/eo=false）
- * @property {number}  cacheSubreqLimit    Cache 操作与 fetch 共享的子请求预算（esa=4 保守值，官方 fetchAPI/Cache API 两处数字冲突；其余宽松）
+ * @property {number}  cacheSubreqLimit    Cache 操作与 fetch 共享的子请求预算（esa=8 软限制，官方常规 4 / 部分高配账号可达 8，MAX_SUBREQUESTS 可覆盖 1–32；其余宽松）
  * @property {boolean} cacheKeyHttpOnly    Cache API 的 put key 必须为 http(s) 协议 URL（esa 引擎不支持 https key，写入时强制降为 http）
- * @property {number}  maxSubRequests     每请求子请求（fetch）预算上限（esa=32 硬限且与 Cache 共享；cf/eo=1000 宽松）
+ * @property {number}  maxSubRequests     每请求子请求（fetch）预算上限（esa=8 软限制，官方常规 4 / 部分高配账号可达 8，MAX_SUBREQUESTS 可覆盖 1–32；cf/eo=1000 宽松）
  * @property {boolean} hasRawIpFetch      是否支持「fetch 直连裸 IP / 自定义端口」（CF / EO 支持：EO 官方 Fetch 文档未禁止裸 IP；ESA 官方明确不支持，须走平台源站组兜底）
  * @property {boolean} hasSocket          是否支持 cloudflare:sockets（仅 CF，用于裸 IP+HTTPS+自定义 SNI 的内部自动兜底）
  * @property {boolean} hasD1              是否绑定了 D1

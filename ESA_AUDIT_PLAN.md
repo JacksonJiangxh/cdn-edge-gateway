@@ -28,7 +28,7 @@
      `maxSubRequests: platform==='esa' ? 4 : …`、`cacheSubreqLimit: platform==='esa' ? 4 : Infinity`）。
      数据面稳态≈2 个 fetch（1 回源 + 至多 1 静态同站），在 4 内安全。
    - 若真机实测证实 32 为有效硬上限，仅需把 caps.js 两处 ESA `4` 改回 `32` 即可（单点收敛）。
-   - **对照其它平台**（见 `docs/dev/17-platform-limits.md`）：CF 内置默认按 **Free 档 50**（Paid
+   - **对照其它平台**（见 `docs-site/docs/dev/17-platform-limits.md`）：CF 内置默认按 **Free 档 50**（Paid
      1000 可经 `MAX_SUBREQUESTS` 覆盖）；EO 官方「Limits」表**未单列子请求硬上限**，故取
      **100 作为免费档近似上限**（`maxSubRequests = 100`，避免真无限大打爆边缘），同套
      `subreqBudget.js` 守卫已落地。
