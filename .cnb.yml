@@ -3,7 +3,6 @@
 .docker-image: &docker-image
   image: docker.cnb.cool/xzydm/mirrors/debian:13-all
 
-
 .runner4: &runner4
   cpus: 4
   tags: cnb:arch:amd64
